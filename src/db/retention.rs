@@ -3,7 +3,9 @@ use sqlx::PgPool;
 use crate::config::Config;
 
 pub async fn run_retention_loop(pool: PgPool, config: Config) {
-    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+    // Defer first tick to avoid DB load at startup
+    let start = tokio::time::Instant::now() + Duration::from_secs(3600);
+    let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
     loop {
         interval.tick().await;
         tracing::info!("Running retention cleanup");
@@ -43,7 +45,7 @@ pub async fn prune_old_snapshots(pool: &PgPool, days: u32) -> Result<u64, sqlx::
     Ok(result.rows_affected())
 }
 
-// TODO: implement proper archival (move to archive table) in Phase 7
+// TODO: implement proper archival (move to archive table) — deferred to post-MVP
 pub async fn purge_completed_tasks(pool: &PgPool, days: u32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "DELETE FROM ai_memory.tasks \

@@ -79,11 +79,16 @@ pub async fn list_tasks(
 }
 
 pub async fn update_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("UPDATE ai_memory.tasks SET status = $2 WHERE id = $1")
-        .bind(id)
-        .bind(&status)
-        .execute(pool)
-        .await?;
+    // Auto-set completed_at when transitioning to Completed, clear it otherwise
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = $2, \
+         completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE NULL END \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&status)
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 

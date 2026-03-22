@@ -112,19 +112,22 @@ pub async fn log_outcome(
 
 pub async fn search_similar_failures(
     pool: &PgPool,
+    project_id: Uuid,
     embedding: &[f32],
     limit: i64,
 ) -> Result<Vec<Attempt>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
     sqlx::query_as(
-        "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \
-         reasoning_embedding, git_ref, token_cost, created_at, resolved_at \
-         FROM ai_memory.attempts \
-         WHERE outcome = 'rejected' AND reasoning_embedding IS NOT NULL \
-         ORDER BY reasoning_embedding <=> $1::vector LIMIT $2",
+        "SELECT a.id, a.task_id, a.approach_summary, a.code_snippet, a.outcome, a.reasoning, \
+         a.reasoning_embedding, a.git_ref, a.token_cost, a.created_at, a.resolved_at \
+         FROM ai_memory.attempts a \
+         JOIN ai_memory.tasks t ON a.task_id = t.id \
+         WHERE a.outcome = 'rejected' AND a.reasoning_embedding IS NOT NULL AND t.project_id = $3 \
+         ORDER BY a.reasoning_embedding <=> $1::vector LIMIT $2",
     )
     .bind(&emb)
     .bind(limit)
+    .bind(project_id)
     .fetch_all(pool)
     .await
 }

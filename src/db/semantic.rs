@@ -106,6 +106,7 @@ pub async fn search_rules_by_embedding(
                 "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at \
                  FROM ai_memory.semantic_rules \
                  WHERE project_id = $1 AND embedding IS NOT NULL AND category = $4 \
+                 AND (expires_at IS NULL OR expires_at > NOW()) \
                  ORDER BY embedding <=> $2::vector LIMIT $3",
             )
             .bind(project_id)
@@ -120,6 +121,7 @@ pub async fn search_rules_by_embedding(
                 "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at \
                  FROM ai_memory.semantic_rules \
                  WHERE project_id = $1 AND embedding IS NOT NULL \
+                 AND (expires_at IS NULL OR expires_at > NOW()) \
                  ORDER BY embedding <=> $2::vector LIMIT $3",
             )
             .bind(project_id)

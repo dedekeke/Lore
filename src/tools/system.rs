@@ -1,1 +1,2 @@
-// inspect_memory_schema, get_active_context, export_memory -- implemented in Phase 4
+// System tools (get_active_context, switch_project, export_memory) are implemented
+// as #[tool] methods on LoreServer in src/server.rs.

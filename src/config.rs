@@ -79,7 +79,7 @@ impl Config {
             "local" => EmbeddingProvider::Local,
             "openai" => EmbeddingProvider::OpenAi,
             other => {
-                tracing::error!(value = other, "Invalid EMBEDDING_PROVIDER (expected 'local' or 'openai'), defaulting to 'local'");
+                tracing::warn!(value = other, "Invalid EMBEDDING_PROVIDER (expected 'local' or 'openai'), defaulting to 'local'");
                 EmbeddingProvider::Local
             }
         };
@@ -92,7 +92,7 @@ impl Config {
             "stdio" => McpTransport::Stdio,
             "sse" => McpTransport::Sse,
             other => {
-                tracing::error!(value = other, "Invalid MCP_TRANSPORT (expected 'stdio' or 'sse'), defaulting to 'stdio'");
+                tracing::warn!(value = other, "Invalid MCP_TRANSPORT (expected 'stdio' or 'sse'), defaulting to 'stdio'");
                 McpTransport::Stdio
             }
         };

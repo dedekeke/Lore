@@ -12,15 +12,17 @@ async fn main() {
     // Load .env file (silently ignore if missing -- production may use real env vars)
     let _ = dotenvy::dotenv();
 
-    let config = Config::from_env();
-
-    // Initialize structured logging with level from config
+    // Initialize logging before Config::from_env() so config parse warnings are captured.
+    // Read LOG_LEVEL directly to break the circular dependency.
+    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
+                .unwrap_or_else(|_| EnvFilter::new(&log_level)),
         )
         .init();
+
+    let config = Config::from_env();
 
     tracing::info!("Starting Lore MCP server");
 

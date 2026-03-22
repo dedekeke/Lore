@@ -14,6 +14,10 @@ use crate::config::Config;
 pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
     let timeout_ms = config.database_statement_timeout_secs * 1000;
 
+    if config.database_statement_timeout_secs == 0 {
+        tracing::warn!("DATABASE_STATEMENT_TIMEOUT_SECS is 0, statement timeout is disabled");
+    }
+
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .acquire_timeout(Duration::from_secs(5))

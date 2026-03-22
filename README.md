@@ -78,10 +78,12 @@ All settings via environment variables (see `.env.example`):
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model name |
 | `EMBEDDING_DIMENSIONS` | `384` | Must match model and DB schema |
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` |
+| `MCP_SSE_PORT` | `3100` | SSE port (only when `MCP_TRANSPORT=sse`) |
 | `LOG_LEVEL` | `info` | Tracing filter level |
 | `RETENTION_ATTEMPTS_DAYS` | `30` | Auto-delete attempts older than N days |
 | `RETENTION_SNAPSHOTS_DAYS` | `7` | Auto-delete context snapshots older than N days |
 | `RETENTION_TASKS_ARCHIVE_DAYS` | `90` | Auto-delete completed tasks older than N days |
+| `DEFAULT_PROJECT_NAME` | `default` | Fallback project name for `switch_project` |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 
@@ -165,7 +167,7 @@ src/
 │   ├── mod.rs           # EmbeddingProvider trait + enum dispatch
 │   ├── local.rs         # fastembed provider (feature-gated)
 │   └── openai.rs        # OpenAI API provider
-└── tools/               # Module stubs (implementations in server.rs)
+└── tools/               # Domain module stubs (tool impls live on LoreServer in server.rs)
 migrations/              # sqlx SQL migrations (auto-run on startup)
 ```
 

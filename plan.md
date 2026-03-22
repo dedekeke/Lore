@@ -17,16 +17,16 @@ The AI doesn't need to read 5,000 tokens of messy chat history. It queries the l
 
 ## 1. Architecture Stack
 
-| Component           | Choice                                         | Rationale                                                    |
-| ------------------- | ---------------------------------------------- | ------------------------------------------------------------ |
-| **Language**         | Rust                                           | Strict schema validation, memory safety, zero-cost abstractions |
-| **Database**         | PostgreSQL + `pgvector`                        | Relational structure for episodic data, vector search for semantic recall |
-| **ORM/Query Builder** | `sqlx` (compile-time checked SQL)             | Catches schema drift at build time, not runtime              |
-| **Embeddings**       | `fastembed-rs` (local, default) or OpenAI API (optional) | Local-first avoids API costs and latency; OpenAI opt-in for higher quality |
-| **Protocol SDK**     | `rmcp` (Official Rust MCP SDK)                 | First-class MCP support                                      |
-| **Transport**        | `stdio` (primary), `SSE` (optional for remote) | stdio for local CLI integration; SSE for dashboard/remote clients |
-| **Migrations**       | `sqlx migrate`                                 | Versioned, reversible migrations checked into source control |
-| **Methodology**      | Test-Driven Development (TDD)                  |                                                              |
+| Component             | Choice                                                   | Rationale                                                                  |
+|-----------------------|----------------------------------------------------------|----------------------------------------------------------------------------|
+| **Language**          | Rust                                                     | Strict schema validation, memory safety, zero-cost abstractions            |
+| **Database**          | PostgreSQL + `pgvector`                                  | Relational structure for episodic data, vector search for semantic recall  |
+| **ORM/Query Builder** | `sqlx` (compile-time checked SQL)                        | Catches schema drift at build time, not runtime                            |
+| **Embeddings**        | `fastembed-rs` (local, default) or OpenAI API (optional) | Local-first avoids API costs and latency; OpenAI opt-in for higher quality |
+| **Protocol SDK**      | `rmcp` (Official Rust MCP SDK)                           | First-class MCP support                                                    |
+| **Transport**         | `stdio` (primary), `SSE` (optional for remote)           | stdio for local CLI integration; SSE for dashboard/remote clients          |
+| **Migrations**        | `sqlx migrate`                                           | Versioned, reversible migrations checked into source control               |
+| **Methodology**       | Test-Driven Development (TDD)                            |                                                                            |
 
 ---
 
@@ -38,25 +38,25 @@ The AI doesn't need to read 5,000 tokens of messy chat history. It queries the l
 
 Scopes all memory to a specific project/workspace so multiple codebases can share one server.
 
-| Column       | Type      | Notes                          |
-| ------------ | --------- | ------------------------------ |
-| `id`         | UUID PK   |                                |
+| Column       | Type      | Notes                         |
+|--------------|-----------|-------------------------------|
+| `id`         | UUID PK   |                               |
 | `name`       | String    | e.g. "memo", "my-web-app"     |
-| `root_path`  | String    | Absolute path to project root  |
-| `created_at` | Timestamp |                                |
+| `root_path`  | String    | Absolute path to project root |
+| `created_at` | Timestamp |                               |
 
 #### Table: `semantic_rules` (Long-term facts)
 
-| Column       | Type                     | Notes                                     |
-| ------------ | ------------------------ | ----------------------------------------- |
-| `id`         | UUID PK                  |                                           |
-| `project_id` | UUID FK -> projects      |                                           |
-| `category`   | Enum('preference', 'fact', 'constraint', 'lesson') | `lesson` added for auto-extracted rules |
-| `content`    | Text                     |                                           |
-| `embedding`  | Vector(1536)             | pgvector                                  |
-| `source_task_id` | UUID FK -> tasks (nullable) | Links lesson back to the episode that created it |
-| `created_at` | Timestamp                |                                           |
-| `expires_at` | Timestamp (nullable)     | Optional TTL for time-bound rules         |
+| Column           | Type                                               | Notes                                            |
+|------------------|----------------------------------------------------|--------------------------------------------------|
+| `id`             | UUID PK                                            |                                                  |
+| `project_id`     | UUID FK -> projects                                |                                                  |
+| `category`       | Enum('preference', 'fact', 'constraint', 'lesson') | `lesson` added for auto-extracted rules          |
+| `content`        | Text                                               |                                                  |
+| `embedding`      | Vector(1536)                                       | pgvector                                         |
+| `source_task_id` | UUID FK -> tasks (nullable)                        | Links lesson back to the episode that created it |
+| `created_at`     | Timestamp                                          |                                                  |
+| `expires_at`     | Timestamp (nullable)                               | Optional TTL for time-bound rules                |
 
 **Indexes:**
 - `idx_semantic_project` on `(project_id)`
@@ -65,34 +65,34 @@ Scopes all memory to a specific project/workspace so multiple codebases can shar
 
 #### Table: `tasks` (Current goals)
 
-| Column        | Type                     | Notes                                |
-| ------------- | ------------------------ | ------------------------------------ |
-| `id`          | UUID PK                  |                                      |
-| `project_id`  | UUID FK -> projects      |                                      |
-| `description` | Text                     |                                      |
-| `status`      | Enum('active', 'completed', 'abandoned', 'blocked') | `blocked` added for dependency tracking |
-| `parent_task_id` | UUID FK -> tasks (nullable) | Supports subtask hierarchies      |
-| `created_at`  | Timestamp                |                                      |
-| `completed_at`| Timestamp (nullable)     |                                      |
+| Column           | Type                                                | Notes                                   |
+|------------------|-----------------------------------------------------|-----------------------------------------|
+| `id`             | UUID PK                                             |                                         |
+| `project_id`     | UUID FK -> projects                                 |                                         |
+| `description`    | Text                                                |                                         |
+| `status`         | Enum('active', 'completed', 'abandoned', 'blocked') | `blocked` added for dependency tracking |
+| `parent_task_id` | UUID FK -> tasks (nullable)                         | Supports subtask hierarchies            |
+| `created_at`     | Timestamp                                           |                                         |
+| `completed_at`   | Timestamp (nullable)                                |                                         |
 
 **Indexes:**
 - `idx_tasks_project_status` on `(project_id, status)`
 
 #### Table: `attempts` (The Episodic Ledger)
 
-| Column             | Type                     | Notes                                |
-| ------------------ | ------------------------ | ------------------------------------ |
-| `id`               | UUID PK                  |                                      |
-| `task_id`          | UUID FK -> tasks         |                                      |
-| `approach_summary` | Text                     |                                      |
-| `code_snippet`     | Text (nullable)          |                                      |
-| `outcome`          | Enum('pending', 'accepted', 'rejected') |                          |
-| `reasoning`        | Text                     | Why it succeeded or failed           |
-| `reasoning_embedding` | Vector(1536) (nullable) | For cross-task failure similarity search |
-| `git_ref`          | String (nullable)        | Commit hash or stash ref for rollback |
-| `token_cost`       | Integer (nullable)       | Tokens consumed during this attempt  |
-| `created_at`       | Timestamp                |                                      |
-| `resolved_at`      | Timestamp (nullable)     |                                      |
+| Column                | Type                                    | Notes                                    |
+|-----------------------|-----------------------------------------|------------------------------------------|
+| `id`                  | UUID PK                                 |                                          |
+| `task_id`             | UUID FK -> tasks                        |                                          |
+| `approach_summary`    | Text                                    |                                          |
+| `code_snippet`        | Text (nullable)                         |                                          |
+| `outcome`             | Enum('pending', 'accepted', 'rejected') |                                          |
+| `reasoning`           | Text                                    | Why it succeeded or failed               |
+| `reasoning_embedding` | Vector(1536) (nullable)                 | For cross-task failure similarity search |
+| `git_ref`             | String (nullable)                       | Commit hash or stash ref for rollback    |
+| `token_cost`          | Integer (nullable)                      | Tokens consumed during this attempt      |
+| `created_at`          | Timestamp                               |                                          |
+| `resolved_at`         | Timestamp (nullable)                    |                                          |
 
 **Indexes:**
 - `idx_attempts_task` on `(task_id)`
@@ -103,13 +103,13 @@ Scopes all memory to a specific project/workspace so multiple codebases can shar
 
 Tracks when context wipes happen so the resume injection knows exactly what to load.
 
-| Column       | Type      | Notes                                    |
-| ------------ | --------- | ---------------------------------------- |
-| `id`         | UUID PK   |                                          |
-| `task_id`    | UUID FK   |                                          |
-| `wiped_at`   | Timestamp |                                          |
-| `token_count_before` | Integer | Tokens in context before wipe     |
-| `last_attempt_id` | UUID FK | Last attempt visible before the wipe |
+| Column               | Type      | Notes                                |
+|----------------------|-----------|--------------------------------------|
+| `id`                 | UUID PK   |                                      |
+| `task_id`            | UUID FK   |                                      |
+| `wiped_at`           | Timestamp |                                      |
+| `token_count_before` | Integer   | Tokens in context before wipe        |
+| `last_attempt_id`    | UUID FK   | Last attempt visible before the wipe |
 
 ---
 
@@ -132,12 +132,12 @@ The chat context window is now a temporary UI. The *real* state lives in the `at
 
 ### Retention Policy
 
-| Data Type       | Retention                                           |
-| --------------- | --------------------------------------------------- |
-| `semantic_rules` | Permanent (unless explicitly deleted or expired)   |
-| `tasks` (completed) | Archive after 90 days (move to `tasks_archive`) |
+| Data Type                       | Retention                                                                                 |
+|---------------------------------|-------------------------------------------------------------------------------------------|
+| `semantic_rules`                | Permanent (unless explicitly deleted or expired)                                          |
+| `tasks` (completed)             | Archive after 90 days (move to `tasks_archive`)                                           |
 | `attempts` (on completed tasks) | Keep 30 days, then prune — the extracted `lesson` in `semantic_rules` preserves the value |
-| `context_snapshots` | Keep 7 days                                    |
+| `context_snapshots`             | Keep 7 days                                                                               |
 
 A background `CRON`-style cleanup job (Rust `tokio::time::interval`) handles pruning.
 
@@ -147,32 +147,32 @@ A background `CRON`-style cleanup job (Rust `tokio::time::interval`) handles pru
 
 ### Long-Term Memory
 
-| Tool                | Parameters                  | Returns             | Description                            |
-| ------------------- | --------------------------- | ------------------- | -------------------------------------- |
-| `remember_rule`     | `category`, `content`       | `rule_id`           | Stores a semantic rule with embedding  |
-| `recall_rules`      | `query`, `limit?`, `category?` | `Rule[]`         | Vector similarity search, optionally filtered |
-| `forget_rule`       | `rule_id`                   | `success`           | Soft-delete a rule                     |
-| `list_rules`        | `category?`                 | `Rule[]`            | List all rules, optionally by category |
+| Tool            | Parameters                     | Returns   | Description                                   |
+|-----------------|--------------------------------|-----------|-----------------------------------------------|
+| `remember_rule` | `category`, `content`          | `rule_id` | Stores a semantic rule with embedding         |
+| `recall_rules`  | `query`, `limit?`, `category?` | `Rule[]`  | Vector similarity search, optionally filtered |
+| `forget_rule`   | `rule_id`                      | `success` | Soft-delete a rule                            |
+| `list_rules`    | `category?`                    | `Rule[]`  | List all rules, optionally by category        |
 
 ### Episodic Memory (The Ledger)
 
-| Tool                | Parameters                          | Returns        | Description                              |
-| ------------------- | ----------------------------------- | -------------- | ---------------------------------------- |
-| `start_task`        | `description`, `parent_task_id?`    | `task_id`      | Create a new task                        |
-| `propose_attempt`   | `task_id`, `approach_summary`, `code_snippet?` | `attempt_id` | Log an approach before executing it   |
-| `log_outcome`       | `attempt_id`, `outcome`, `reasoning`, `git_ref?` | `success` | Record what happened and why          |
-| `review_ledger`     | `task_id`, `outcome_filter?`        | `Attempt[]`    | Query the ledger, optionally filter by outcome |
-| `find_similar_failures` | `error_description`, `limit?`   | `Attempt[]`    | Vector search across `reasoning_embedding` for similar past errors |
-| `complete_task`     | `task_id`, `lesson?`               | `success`      | Close out a task, optionally auto-extract lesson |
+| Tool                    | Parameters                                       | Returns      | Description                                                        |
+|-------------------------|--------------------------------------------------|--------------|--------------------------------------------------------------------|
+| `start_task`            | `description`, `parent_task_id?`                 | `task_id`    | Create a new task                                                  |
+| `propose_attempt`       | `task_id`, `approach_summary`, `code_snippet?`   | `attempt_id` | Log an approach before executing it                                |
+| `log_outcome`           | `attempt_id`, `outcome`, `reasoning`, `git_ref?` | `success`    | Record what happened and why                                       |
+| `review_ledger`         | `task_id`, `outcome_filter?`                     | `Attempt[]`  | Query the ledger, optionally filter by outcome                     |
+| `find_similar_failures` | `error_description`, `limit?`                    | `Attempt[]`  | Vector search across `reasoning_embedding` for similar past errors |
+| `complete_task`         | `task_id`, `lesson?`                             | `success`    | Close out a task, optionally auto-extract lesson                   |
 
 ### System / Introspection
 
-| Tool                     | Parameters | Returns         | Description                                     |
-| ------------------------ | ---------- | --------------- | ----------------------------------------------- |
-| `inspect_memory_schema`  | none       | `SchemaInfo`    | Returns table definitions so AI can orient itself |
-| `get_active_context`     | none       | `ContextSummary`| Returns current task, recent attempts, active rules — the "resume packet" |
-| `switch_project`         | `name` or `root_path` | `project_id` | Switch project scope                       |
-| `export_memory`          | `format: 'json' \| 'markdown'` | `string` | Export all memory for backup/portability   |
+| Tool                    | Parameters                     | Returns          | Description                                                               |
+|-------------------------|--------------------------------|------------------|---------------------------------------------------------------------------|
+| `inspect_memory_schema` | none                           | `SchemaInfo`     | Returns table definitions so AI can orient itself                         |
+| `get_active_context`    | none                           | `ContextSummary` | Returns current task, recent attempts, active rules — the "resume packet" |
+| `switch_project`        | `name` or `root_path`          | `project_id`     | Switch project scope                                                      |
+| `export_memory`         | `format: 'json' \| 'markdown'` | `string`         | Export all memory for backup/portability                                  |
 
 ---
 
@@ -343,14 +343,38 @@ memo/
 
 ## 10. Implementation Order
 
-| Phase | Scope                        | Milestone                                      |
-| ----- | ---------------------------- | ---------------------------------------------- |
-| **1** | Project scaffold + DB        | `cargo build` passes, migrations run, DB connected |
-| **2** | Embedding provider           | `fastembed-rs` generates vectors, trait abstraction works |
-| **3** | Core CRUD + tests            | All DB operations tested against real Postgres  |
-| **4** | MCP tool handlers            | Tools callable via stdio, JSON-RPC round-trips pass |
-| **5** | Vector search                | `recall_rules` and `find_similar_failures` return ranked results |
-| **6** | Compaction + resume          | `get_active_context` returns correct resume packet |
-| **7** | Retention + cleanup          | Background pruning runs on schedule             |
-| **8** | Configuration + hardening    | Env-based config, connection limits, timeouts   |
-| **9** | Advanced features            | Git checkpointing, cross-project search, dashboard |
+| Phase | Scope                     | Milestone                                                        |
+|-------|---------------------------|------------------------------------------------------------------|
+| **1** | Project scaffold + DB     | `cargo build` passes, migrations run, DB connected               |
+| **2** | Embedding provider        | `fastembed-rs` generates vectors, trait abstraction works        |
+| **3** | Core CRUD + tests         | All DB operations tested against real Postgres                   |
+| **4** | MCP tool handlers         | Tools callable via stdio, JSON-RPC round-trips pass              |
+| **5** | Vector search             | `recall_rules` and `find_similar_failures` return ranked results |
+| **6** | Compaction + resume       | `get_active_context` returns correct resume packet               |
+| **7** | Retention + cleanup       | Background pruning runs on schedule                              |
+| **8** | Configuration + hardening | Env-based config, connection limits, timeouts                    |
+| **9** | Advanced features         | Git checkpointing, cross-project search, dashboard               |
+
+## 11. Future Enhancements (Performance & Algorithmic Optimizations) (needs review)
+
+As the database grows from hundreds of ledger entries to thousands, standard I/O and exact vector math will become the primary bottlenecks, increasing latency on MCP tool calls. The following algorithms will be implemented to achieve sub-50ms response times:
+
+### A. HNSW (Hierarchical Navigable Small World) Indexing
+* **The Problem:** Standard `pgvector` executes exact K-Nearest Neighbors (KNN), scanning every row. This results in $O(N)$ time complexity, which degrades as memory grows.
+* **The Solution:** Implement HNSW, an Approximate Nearest Neighbor (ANN) algorithm that builds a multi-layered graph for vector navigation, reducing search time to $O(\log N)$.
+* **Implementation:** Add `CREATE INDEX ON ai_memory USING hnsw (embedding vector_cosine_ops);` to the database migrations.
+
+### B. Hybrid Search with RRF (Reciprocal Rank Fusion)
+* **The Problem:** Vector search is excellent at finding concepts but often fails at exact keyword matches (e.g., specific variable names or error codes).
+* **The Solution:** Combine Postgres full-text keyword search (BM25) with semantic vector search, merging the results using the RRF algorithm. This prevents the AI from needing multiple `recall` attempts.
+* **Algorithm:**
+  $$RRF\_Score = \sum \frac{1}{k + rank_i}$$
+  *(Where $k$ is a constant, typically 60, and $rank_i$ is the document's rank in its respective result list).*
+
+### C. In-Memory LRU Caching
+* **The Problem:** Repeatedly checking the same task ledger or generating embeddings for similar diagnostic questions wastes compute and API calls.
+* **The Solution:** Implement a Least Recently Used (LRU) cache using a Rust crate like `moka`. Frequent `task_id` queries will bypass the Postgres database entirely, returning to the LLM in under a millisecond.
+
+### D. Zero-Latency Local Embeddings (ONNX)
+* **The Problem:** Relying on external APIs (like OpenAI) to embed the AI's query string adds 300ms–800ms of network latency per tool call.
+* **The Solution:** Run a lightweight, quantized embedding model (e.g., `all-MiniLM-L6-v2`) natively inside the Rust server using the `ort` (ONNX Runtime) crate. This drops embedding generation time to ~10ms with zero network dependency.

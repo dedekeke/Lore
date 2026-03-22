@@ -9,18 +9,18 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    // Load .env file (silently ignore if missing -- production may use real env vars)
     let _ = dotenvy::dotenv();
 
-    let config = Config::from_env();
-
-    // Initialize structured logging with level from config
+    // Init logging before Config::from_env() so parse warnings are captured.
+    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
+                .unwrap_or_else(|_| EnvFilter::new(&log_level)),
         )
         .init();
+
+    let config = Config::from_env();
 
     tracing::info!("Starting Lore MCP server");
 
@@ -35,13 +35,10 @@ async fn main() {
         }
     };
 
-    // Wait for shutdown signal (SIGINT or SIGTERM)
     shutdown_signal().await;
-
     tracing::info!("Shutting down Lore MCP server");
 }
 
-/// Waits for either SIGINT (ctrl-c) or SIGTERM for graceful shutdown.
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
 

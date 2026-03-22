@@ -22,3 +22,6 @@ CREATE INDEX idx_attempts_reasoning_embedding ON ai_memory.attempts USING hnsw (
 ALTER TABLE ai_memory.semantic_rules
     ADD CONSTRAINT fk_semantic_source_task
     FOREIGN KEY (source_task_id) REFERENCES ai_memory.tasks(id) ON DELETE SET NULL;
+
+-- Index for FK lookups on source_task_id (needed for ON DELETE SET NULL scans)
+CREATE INDEX idx_semantic_source_task ON ai_memory.semantic_rules(source_task_id);

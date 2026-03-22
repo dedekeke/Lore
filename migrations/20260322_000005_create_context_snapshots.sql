@@ -5,3 +5,5 @@ CREATE TABLE ai_memory.context_snapshots (
     token_count_before INTEGER NOT NULL,
     last_attempt_id UUID REFERENCES ai_memory.attempts(id) ON DELETE SET NULL
 );
+
+CREATE INDEX idx_snapshots_task ON ai_memory.context_snapshots(task_id);

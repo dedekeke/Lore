@@ -303,6 +303,7 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
 
+        if success {
         if let Some(lesson_text) = &lesson {
             let project_id = self.project_id().await?;
             let embedding = self.embed(lesson_text).await?;
@@ -315,6 +316,7 @@ impl LoreServer {
             )
             .await
             .map_err(Self::db_err)?;
+        }
         }
 
         Self::json_content(&serde_json::json!({ "success": success }))
@@ -389,18 +391,15 @@ impl LoreServer {
         root_path: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_name = name.unwrap_or_else(|| self.config().default_project_name.clone());
-        let path = root_path.unwrap_or_else(|| ".".to_string());
+        let path = root_path.unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
 
-        let existing = db::projects::get_project_by_name(self.pool(), &project_name)
+        let project_id = db::projects::get_or_create_project(self.pool(), &project_name, &path)
             .await
             .map_err(Self::db_err)?;
-
-        let project_id = match existing {
-            Some(p) => p.id,
-            None => db::projects::create_project(self.pool(), &project_name, &path)
-                .await
-                .map_err(Self::db_err)?,
-        };
 
         self.set_project_id(project_id).await;
         Self::json_content(&serde_json::json!({

@@ -1777,6 +1777,7 @@ dependencies = [
  "dotenvy",
  "fastembed",
  "pgvector",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

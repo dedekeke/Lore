@@ -42,8 +42,11 @@ pub struct Config {
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
+    #[allow(dead_code)]
     pub mcp_transport: McpTransport,
+    #[allow(dead_code)]
     pub mcp_sse_port: u16,
+    #[allow(dead_code)]
     pub log_level: String,
 
     pub retention_attempts_days: u32,

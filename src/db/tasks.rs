@@ -40,6 +40,7 @@ pub async fn create_task(
     Ok(row.0)
 }
 
+#[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, description, status, parent_task_id, created_at, completed_at \
@@ -78,6 +79,7 @@ pub async fn list_tasks(
     }
 }
 
+#[allow(dead_code)]
 pub async fn update_task_status(pool: &PgPool, id: Uuid, status: TaskStatus) -> Result<bool, sqlx::Error> {
     // Auto-set completed_at when transitioning to Completed, clear it otherwise
     let result = sqlx::query(

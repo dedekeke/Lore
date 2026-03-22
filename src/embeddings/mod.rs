@@ -39,6 +39,7 @@ pub enum AnyEmbeddingProvider {
     OpenAi(openai::OpenAiEmbeddingProvider),
 }
 
+#[allow(dead_code)]
 impl EmbeddingProvider for AnyEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         match self {

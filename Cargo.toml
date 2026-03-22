@@ -19,7 +19,7 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 fastembed = { version = "4", optional = true }
 pgvector = { version = "0.4", features = ["sqlx"] }
 

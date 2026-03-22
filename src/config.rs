@@ -1,7 +1,6 @@
 use std::env;
 use std::fmt;
 
-/// MCP transport protocol.
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {
     Stdio,
@@ -17,7 +16,6 @@ impl fmt::Display for McpTransport {
     }
 }
 
-/// Embedding provider backend.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmbeddingProvider {
     Local,
@@ -33,43 +31,29 @@ impl fmt::Display for EmbeddingProvider {
     }
 }
 
-/// Application configuration parsed from environment variables.
-///
-/// All fields have sensible defaults matching `.env.example` so the server
-/// can start with minimal configuration. Only `DATABASE_URL` is strictly
-/// required at runtime (though it has a default for local development).
 #[derive(Debug, Clone)]
 pub struct Config {
-    // Database
     pub database_url: String,
     pub database_max_connections: u32,
     pub database_statement_timeout_secs: u64,
 
-    // Embeddings
     pub embedding_provider: EmbeddingProvider,
     pub openai_api_key: Option<String>,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
-    // Server
     pub mcp_transport: McpTransport,
     pub mcp_sse_port: u16,
     pub log_level: String,
 
-    // Retention
     pub retention_attempts_days: u32,
     pub retention_snapshots_days: u32,
     pub retention_tasks_archive_days: u32,
 
-    // Project
     pub default_project_name: String,
 }
 
 impl Config {
-    /// Parse configuration from environment variables.
-    ///
-    /// Assumes `dotenvy::dotenv()` has already been called so `.env` values
-    /// are available in the process environment.
     pub fn from_env() -> Self {
         let embedding_provider = match env::var("EMBEDDING_PROVIDER")
             .unwrap_or_else(|_| "local".into())
@@ -79,7 +63,7 @@ impl Config {
             "local" => EmbeddingProvider::Local,
             "openai" => EmbeddingProvider::OpenAi,
             other => {
-                tracing::warn!(value = other, "Invalid EMBEDDING_PROVIDER (expected 'local' or 'openai'), defaulting to 'local'");
+                tracing::warn!(value = other, "Invalid EMBEDDING_PROVIDER, defaulting to 'local'");
                 EmbeddingProvider::Local
             }
         };
@@ -92,7 +76,7 @@ impl Config {
             "stdio" => McpTransport::Stdio,
             "sse" => McpTransport::Sse,
             other => {
-                tracing::warn!(value = other, "Invalid MCP_TRANSPORT (expected 'stdio' or 'sse'), defaulting to 'stdio'");
+                tracing::warn!(value = other, "Invalid MCP_TRANSPORT, defaulting to 'stdio'");
                 McpTransport::Stdio
             }
         };
@@ -123,7 +107,6 @@ impl Config {
     }
 }
 
-/// Helper to parse an env var into a numeric type, warning and falling back on failure.
 fn parse_warn_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     match env::var(key) {
         Ok(v) => match v.parse() {

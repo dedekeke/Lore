@@ -1,20 +1,9 @@
-//! Embedding provider trait and factory.
-//!
-//! Defines the [`EmbeddingProvider`] trait that all embedding backends must
-//! implement. Because native async fn in traits returns `impl Future` which
-//! is not dyn-compatible, the factory uses an [`AnyEmbeddingProvider`] enum
-//! to dispatch at runtime without requiring the `async_trait` crate.
-
+#[cfg(feature = "local-embeddings")]
 pub mod local;
 pub mod openai;
 
 use crate::config::{self, Config};
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during embedding generation.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
     #[error("Embedding model error: {0}")]
@@ -27,39 +16,23 @@ pub enum EmbeddingError {
     DimensionMismatch { expected: usize, actual: usize },
 }
 
-// ---------------------------------------------------------------------------
-// Trait
-// ---------------------------------------------------------------------------
-
 /// Trait for generating text embeddings.
-///
-/// Implementations must be safe to share across threads (`Send + Sync`).
-/// Uses native async fn in traits (Rust 1.75+).
+/// Uses native async fn in traits (Rust 1.75+) — not dyn-compatible.
 pub trait EmbeddingProvider: Send + Sync {
-    /// Generate an embedding vector for the given text.
     fn embed(
         &self,
         text: &str,
     ) -> impl std::future::Future<Output = Result<Vec<f32>, EmbeddingError>> + Send;
 
-    /// Generate embeddings for multiple texts in a batch.
     fn embed_batch(
         &self,
         texts: &[&str],
     ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, EmbeddingError>> + Send;
 
-    /// Return the dimensionality of embeddings produced by this provider.
     fn dimensions(&self) -> usize;
 }
 
-// ---------------------------------------------------------------------------
-// Enum dispatch (avoids dyn + async_trait)
-// ---------------------------------------------------------------------------
-
-/// Runtime-dispatched embedding provider.
-///
-/// Since native async fn in traits is not dyn-compatible, this enum provides
-/// concrete dispatch without needing `async_trait` or `Box<dyn ...>`.
+/// Enum dispatch for runtime provider selection (avoids dyn + async_trait).
 pub enum AnyEmbeddingProvider {
     #[cfg(feature = "local-embeddings")]
     Local(local::LocalEmbeddingProvider),
@@ -92,16 +65,6 @@ impl EmbeddingProvider for AnyEmbeddingProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
-/// Create the appropriate embedding provider based on application config.
-///
-/// - [`config::EmbeddingProvider::Local`] requires the `local-embeddings`
-///   feature flag to be enabled at compile time.
-/// - [`config::EmbeddingProvider::OpenAi`] requires `openai_api_key` to be
-///   set in the config.
 pub fn create_provider(config: &Config) -> Result<AnyEmbeddingProvider, EmbeddingError> {
     match config.embedding_provider {
         config::EmbeddingProvider::Local => create_local_provider(config),

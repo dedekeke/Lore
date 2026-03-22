@@ -1,13 +1,9 @@
-//! OpenAI API embedding provider.
-//!
-//! Calls the OpenAI `/v1/embeddings` endpoint to generate text embeddings.
-//! Requires a valid API key.
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::{EmbeddingError, EmbeddingProvider};
 
-/// An embedding provider that delegates to the OpenAI Embeddings API.
 pub struct OpenAiEmbeddingProvider {
     api_key: String,
     model: String,
@@ -16,22 +12,20 @@ pub struct OpenAiEmbeddingProvider {
 }
 
 impl OpenAiEmbeddingProvider {
-    /// Create a new OpenAI embedding provider.
-    ///
-    /// # Arguments
-    /// * `api_key`    - OpenAI API key.
-    /// * `model`      - Model identifier (e.g. "text-embedding-3-small").
-    /// * `dimensions` - Expected embedding dimensionality.
     pub fn new(api_key: &str, model: &str, dimensions: usize) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
             api_key: api_key.to_string(),
             model: model.to_string(),
             dimensions,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
-    /// Send an embedding request to the OpenAI API.
     async fn request_embeddings(
         &self,
         input: Vec<String>,
@@ -58,7 +52,9 @@ impl OpenAiEmbeddingProvider {
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".to_string());
             return Err(EmbeddingError::Api(format!(
-                "OpenAI API returned {status}: {text}"
+                "OpenAI API returned {status} for model '{}': {text}. \
+                 Note: the 'dimensions' parameter is only supported by text-embedding-3-* models.",
+                self.model
             )));
         }
 
@@ -67,13 +63,12 @@ impl OpenAiEmbeddingProvider {
             .await
             .map_err(|e| EmbeddingError::Api(format!("Failed to parse OpenAI response: {e}")))?;
 
-        // Sort by index to ensure ordering matches the input order.
+        // OpenAI does not guarantee ordering; sort by index.
         let mut data = result.data;
         data.sort_by_key(|d| d.index);
 
         let embeddings: Vec<Vec<f32>> = data.into_iter().map(|d| d.embedding).collect();
 
-        // Validate dimensions.
         for embedding in &embeddings {
             if embedding.len() != self.dimensions {
                 return Err(EmbeddingError::DimensionMismatch {
@@ -89,10 +84,11 @@ impl OpenAiEmbeddingProvider {
 
 impl EmbeddingProvider for OpenAiEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        let mut results = self.request_embeddings(vec![text.to_string()]).await?;
+        let results = self.request_embeddings(vec![text.to_string()]).await?;
 
         results
-            .pop()
+            .into_iter()
+            .next()
             .ok_or_else(|| EmbeddingError::Api("OpenAI returned no embeddings".to_string()))
     }
 
@@ -108,10 +104,6 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
         self.dimensions
     }
 }
-
-// ---------------------------------------------------------------------------
-// API request / response types
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct EmbeddingRequest<'a> {

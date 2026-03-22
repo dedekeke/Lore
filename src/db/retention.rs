@@ -1,4 +1,27 @@
+use std::time::Duration;
 use sqlx::PgPool;
+use crate::config::Config;
+
+pub async fn run_retention_loop(pool: PgPool, config: Config) {
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+    loop {
+        interval.tick().await;
+        tracing::info!("Running retention cleanup");
+
+        match prune_old_attempts(&pool, config.retention_attempts_days).await {
+            Ok(n) => tracing::info!(rows = n, "Pruned old attempts"),
+            Err(e) => tracing::warn!(error = %e, "Failed to prune old attempts"),
+        }
+        match prune_old_snapshots(&pool, config.retention_snapshots_days).await {
+            Ok(n) => tracing::info!(rows = n, "Pruned old snapshots"),
+            Err(e) => tracing::warn!(error = %e, "Failed to prune old snapshots"),
+        }
+        match purge_completed_tasks(&pool, config.retention_tasks_archive_days).await {
+            Ok(n) => tracing::info!(rows = n, "Purged completed tasks"),
+            Err(e) => tracing::warn!(error = %e, "Failed to purge completed tasks"),
+        }
+    }
+}
 
 pub async fn prune_old_attempts(pool: &PgPool, days: u32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(

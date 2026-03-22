@@ -47,6 +47,8 @@ async fn main() {
         }
     };
 
+    tokio::spawn(db::retention::run_retention_loop(pool.clone(), config.clone()));
+
     let server = server::LoreServer::new(pool, embeddings, config);
     let transport = rmcp::transport::io::stdio();
 

@@ -11,3 +11,4 @@ CREATE TABLE ai_memory.tasks (
 );
 
 CREATE INDEX idx_tasks_project_status ON ai_memory.tasks(project_id, status);
+CREATE INDEX idx_tasks_parent ON ai_memory.tasks(parent_task_id) WHERE parent_task_id IS NOT NULL;

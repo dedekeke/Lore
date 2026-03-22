@@ -16,7 +16,9 @@ CREATE TABLE ai_memory.attempts (
 
 CREATE INDEX idx_attempts_task ON ai_memory.attempts(task_id);
 CREATE INDEX idx_attempts_outcome ON ai_memory.attempts(task_id, outcome);
-CREATE INDEX idx_attempts_reasoning_embedding ON ai_memory.attempts USING hnsw (reasoning_embedding vector_cosine_ops);
+CREATE INDEX idx_attempts_reasoning_embedding ON ai_memory.attempts
+    USING hnsw (reasoning_embedding vector_cosine_ops)
+    WHERE reasoning_embedding IS NOT NULL;
 
 -- Add FK from semantic_rules to tasks now that tasks table exists
 ALTER TABLE ai_memory.semantic_rules

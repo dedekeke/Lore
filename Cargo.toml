@@ -3,6 +3,10 @@ name = "lore"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["local-embeddings"]
+local-embeddings = ["dep:fastembed"]
+
 [dependencies]
 rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
@@ -15,5 +19,9 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
-fastembed = "4"
+fastembed = { version = "4", optional = true }
 pgvector = { version = "0.4", features = ["sqlx"] }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }

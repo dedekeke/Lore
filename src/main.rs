@@ -35,10 +35,29 @@ async fn main() {
         }
     };
 
-    // Keep the server alive until interrupted
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for ctrl-c");
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    shutdown_signal().await;
 
     tracing::info!("Shutting down Lore MCP server");
+}
+
+/// Waits for either SIGINT (ctrl-c) or SIGTERM for graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.expect("Failed to listen for ctrl-c");
+    }
 }

@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TYPE ai_memory.rule_category AS ENUM ('preference', 'fact', 'constraint', 'lesson');
 
 CREATE TABLE ai_memory.semantic_rules (
@@ -15,4 +13,6 @@ CREATE TABLE ai_memory.semantic_rules (
 
 CREATE INDEX idx_semantic_project ON ai_memory.semantic_rules(project_id);
 CREATE INDEX idx_semantic_category ON ai_memory.semantic_rules(project_id, category);
-CREATE INDEX idx_semantic_embedding ON ai_memory.semantic_rules USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_semantic_embedding ON ai_memory.semantic_rules
+    USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL;

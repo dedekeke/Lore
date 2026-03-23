@@ -9,8 +9,8 @@ impl LocalEmbeddingProvider {
     pub fn new(model_name: &str, dimensions: usize) -> Result<Self, EmbeddingError> {
         let embedding_model = resolve_model(model_name)?;
 
-        let options = fastembed::InitOptions::new(embedding_model)
-            .with_show_download_progress(false);
+        let options =
+            fastembed::InitOptions::new(embedding_model).with_show_download_progress(false);
 
         let model = fastembed::TextEmbedding::try_new(options)
             .map_err(|e| EmbeddingError::Model(e.to_string()))?;
@@ -71,12 +71,8 @@ fn resolve_model(name: &str) -> Result<fastembed::EmbeddingModel, EmbeddingError
     match name {
         "all-MiniLM-L6-v2" => Ok(fastembed::EmbeddingModel::AllMiniLML6V2),
         "all-MiniLM-L12-v2" => Ok(fastembed::EmbeddingModel::AllMiniLML12V2),
-        "BGE-small-en-v1.5" | "bge-small-en-v1.5" => {
-            Ok(fastembed::EmbeddingModel::BGESmallENV15)
-        }
-        "BGE-base-en-v1.5" | "bge-base-en-v1.5" => {
-            Ok(fastembed::EmbeddingModel::BGEBaseENV15)
-        }
+        "BGE-small-en-v1.5" | "bge-small-en-v1.5" => Ok(fastembed::EmbeddingModel::BGESmallENV15),
+        "BGE-base-en-v1.5" | "bge-base-en-v1.5" => Ok(fastembed::EmbeddingModel::BGEBaseENV15),
         other => Err(EmbeddingError::Model(format!(
             "Unsupported local embedding model: '{other}'. \
              Supported: all-MiniLM-L6-v2, all-MiniLM-L12-v2, bge-small-en-v1.5, bge-base-en-v1.5"

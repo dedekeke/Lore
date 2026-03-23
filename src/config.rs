@@ -66,7 +66,10 @@ impl Config {
             "local" => EmbeddingProvider::Local,
             "openai" => EmbeddingProvider::OpenAi,
             other => {
-                tracing::warn!(value = other, "Invalid EMBEDDING_PROVIDER, defaulting to 'local'");
+                tracing::warn!(
+                    value = other,
+                    "Invalid EMBEDDING_PROVIDER, defaulting to 'local'"
+                );
                 EmbeddingProvider::Local
             }
         };
@@ -79,7 +82,10 @@ impl Config {
             "stdio" => McpTransport::Stdio,
             "sse" => McpTransport::Sse,
             other => {
-                tracing::warn!(value = other, "Invalid MCP_TRANSPORT, defaulting to 'stdio'");
+                tracing::warn!(
+                    value = other,
+                    "Invalid MCP_TRANSPORT, defaulting to 'stdio'"
+                );
                 McpTransport::Stdio
             }
         };
@@ -110,15 +116,103 @@ impl Config {
     }
 }
 
-fn parse_warn_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+pub fn parse_warn_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     match env::var(key) {
         Ok(v) => match v.parse() {
             Ok(parsed) => parsed,
             Err(_) => {
-                tracing::warn!(key = key, value = v, "Invalid value for env var, using default");
+                tracing::warn!(
+                    key = key,
+                    value = v,
+                    "Invalid value for env var, using default"
+                );
                 default
             }
         },
         Err(_) => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // env vars are process-global — serialize config tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env() {
+        for key in [
+            "DATABASE_URL",
+            "DATABASE_MAX_CONNECTIONS",
+            "DATABASE_STATEMENT_TIMEOUT_SECS",
+            "EMBEDDING_PROVIDER",
+            "OPENAI_API_KEY",
+            "EMBEDDING_MODEL",
+            "EMBEDDING_DIMENSIONS",
+            "MCP_TRANSPORT",
+            "MCP_SSE_PORT",
+            "LOG_LEVEL",
+            "RETENTION_ATTEMPTS_DAYS",
+            "RETENTION_SNAPSHOTS_DAYS",
+            "RETENTION_TASKS_ARCHIVE_DAYS",
+            "DEFAULT_PROJECT_NAME",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn test_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Local);
+        assert_eq!(cfg.embedding_dimensions, 384);
+        assert_eq!(cfg.mcp_transport, McpTransport::Stdio);
+        assert_eq!(cfg.database_max_connections, 10);
+        assert_eq!(cfg.retention_attempts_days, 30);
+        assert_eq!(cfg.default_project_name, "default");
+    }
+
+    #[test]
+    fn test_openai_provider_parsing() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("EMBEDDING_PROVIDER", "openai");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::OpenAi);
+    }
+
+    #[test]
+    fn test_invalid_provider_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("EMBEDDING_PROVIDER", "garbage");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Local);
+    }
+
+    #[test]
+    fn test_invalid_numeric_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("DATABASE_MAX_CONNECTIONS", "notanumber");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.database_max_connections, 10);
+    }
+
+    #[test]
+    fn test_empty_openai_key_is_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("OPENAI_API_KEY", "");
+
+        let cfg = Config::from_env();
+        assert!(cfg.openai_api_key.is_none());
     }
 }

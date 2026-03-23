@@ -1,3 +1,4 @@
+pub mod fake;
 #[cfg(feature = "local-embeddings")]
 pub mod local;
 pub mod openai;
@@ -33,10 +34,12 @@ pub trait EmbeddingProvider: Send + Sync {
 }
 
 /// Enum dispatch for runtime provider selection (avoids dyn + async_trait).
+#[allow(clippy::large_enum_variant)]
 pub enum AnyEmbeddingProvider {
     #[cfg(feature = "local-embeddings")]
     Local(local::LocalEmbeddingProvider),
     OpenAi(openai::OpenAiEmbeddingProvider),
+    Fake(fake::FakeEmbeddingProvider),
 }
 
 #[allow(dead_code)]
@@ -46,6 +49,7 @@ impl EmbeddingProvider for AnyEmbeddingProvider {
             #[cfg(feature = "local-embeddings")]
             Self::Local(p) => p.embed(text).await,
             Self::OpenAi(p) => p.embed(text).await,
+            Self::Fake(p) => p.embed(text).await,
         }
     }
 
@@ -54,6 +58,7 @@ impl EmbeddingProvider for AnyEmbeddingProvider {
             #[cfg(feature = "local-embeddings")]
             Self::Local(p) => p.embed_batch(texts).await,
             Self::OpenAi(p) => p.embed_batch(texts).await,
+            Self::Fake(p) => p.embed_batch(texts).await,
         }
     }
 
@@ -62,6 +67,7 @@ impl EmbeddingProvider for AnyEmbeddingProvider {
             #[cfg(feature = "local-embeddings")]
             Self::Local(p) => p.dimensions(),
             Self::OpenAi(p) => p.dimensions(),
+            Self::Fake(p) => p.dimensions(),
         }
     }
 }
@@ -75,10 +81,8 @@ pub fn create_provider(config: &Config) -> Result<AnyEmbeddingProvider, Embeddin
 
 #[cfg(feature = "local-embeddings")]
 fn create_local_provider(config: &Config) -> Result<AnyEmbeddingProvider, EmbeddingError> {
-    let provider = local::LocalEmbeddingProvider::new(
-        &config.embedding_model,
-        config.embedding_dimensions,
-    )?;
+    let provider =
+        local::LocalEmbeddingProvider::new(&config.embedding_model, config.embedding_dimensions)?;
     Ok(AnyEmbeddingProvider::Local(provider))
 }
 

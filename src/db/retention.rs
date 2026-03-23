@@ -1,6 +1,6 @@
-use std::time::Duration;
-use sqlx::PgPool;
 use crate::config::Config;
+use sqlx::PgPool;
+use std::time::Duration;
 
 pub async fn run_retention_loop(pool: PgPool, config: Config) {
     // Defer first tick to avoid DB load at startup

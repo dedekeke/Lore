@@ -42,7 +42,6 @@ pub enum AnyEmbeddingProvider {
     Fake(fake::FakeEmbeddingProvider),
 }
 
-#[allow(dead_code)]
 impl EmbeddingProvider for AnyEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         match self {

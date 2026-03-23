@@ -18,6 +18,8 @@ impl GeminiEmbeddingProvider {
             .build()
             .expect("Failed to build HTTP client");
 
+        let model = model.strip_prefix("models/").unwrap_or(model);
+
         Self {
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -162,8 +164,6 @@ impl EmbeddingProvider for GeminiEmbeddingProvider {
     }
 }
 
-// -- Single embed request/response --
-
 #[derive(Serialize)]
 struct EmbedContentRequest {
     content: Content,
@@ -190,8 +190,6 @@ struct EmbedContentResponse {
 struct EmbeddingValues {
     values: Vec<f32>,
 }
-
-// -- Batch embed request/response --
 
 #[derive(Serialize)]
 struct BatchEmbedContentsRequest<'a> {

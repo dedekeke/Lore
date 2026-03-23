@@ -19,14 +19,14 @@ impl fmt::Display for McpTransport {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmbeddingProvider {
     Local,
-    OpenAi,
+    Gemini,
 }
 
 impl fmt::Display for EmbeddingProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local => write!(f, "local"),
-            Self::OpenAi => write!(f, "openai"),
+            Self::Gemini => write!(f, "gemini"),
         }
     }
 }
@@ -38,7 +38,7 @@ pub struct Config {
     pub database_statement_timeout_secs: u64,
 
     pub embedding_provider: EmbeddingProvider,
-    pub openai_api_key: Option<String>,
+    pub gemini_api_key: Option<String>,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
@@ -64,7 +64,7 @@ impl Config {
             .as_str()
         {
             "local" => EmbeddingProvider::Local,
-            "openai" => EmbeddingProvider::OpenAi,
+            "gemini" => EmbeddingProvider::Gemini,
             other => {
                 tracing::warn!(
                     value = other,
@@ -97,7 +97,7 @@ impl Config {
             database_statement_timeout_secs: parse_warn_or("DATABASE_STATEMENT_TIMEOUT_SECS", 5),
 
             embedding_provider,
-            openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            gemini_api_key: env::var("GEMINI_API_KEY").ok().filter(|s| !s.is_empty()),
             embedding_model: env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "all-MiniLM-L6-v2".into()),
             embedding_dimensions: parse_warn_or("EMBEDDING_DIMENSIONS", 384),
@@ -147,7 +147,7 @@ mod tests {
             "DATABASE_MAX_CONNECTIONS",
             "DATABASE_STATEMENT_TIMEOUT_SECS",
             "EMBEDDING_PROVIDER",
-            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
             "EMBEDDING_MODEL",
             "EMBEDDING_DIMENSIONS",
             "MCP_TRANSPORT",
@@ -177,13 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn test_openai_provider_parsing() {
+    fn test_gemini_provider_parsing() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("EMBEDDING_PROVIDER", "openai");
+        std::env::set_var("EMBEDDING_PROVIDER", "gemini");
 
         let cfg = Config::from_env();
-        assert_eq!(cfg.embedding_provider, EmbeddingProvider::OpenAi);
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Gemini);
     }
 
     #[test]
@@ -207,12 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_openai_key_is_none() {
+    fn test_empty_gemini_key_is_none() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("OPENAI_API_KEY", "");
+        std::env::set_var("GEMINI_API_KEY", "");
 
         let cfg = Config::from_env();
-        assert!(cfg.openai_api_key.is_none());
+        assert!(cfg.gemini_api_key.is_none());
     }
 }

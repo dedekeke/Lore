@@ -20,7 +20,7 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 | Language   | Rust                            |
 | Database   | PostgreSQL + pgvector           |
 | ORM        | sqlx (compile-time checked SQL) |
-| Embeddings | fastembed (local) or OpenAI API |
+| Embeddings | fastembed (local) or Gemini API |
 | Protocol   | rmcp (Rust MCP SDK)             |
 | Transport  | stdio                           |
 
@@ -62,7 +62,7 @@ To skip the fastembed dependency (smaller binary, faster build):
 cargo build --release --no-default-features
 ```
 
-Set `EMBEDDING_PROVIDER=openai` and `OPENAI_API_KEY` in your `.env`.
+Set `EMBEDDING_PROVIDER=gemini` and `GEMINI_API_KEY` in your `.env`.
 
 ## Configuration
 
@@ -73,8 +73,8 @@ All settings via environment variables (see `.env.example`):
 | `DATABASE_URL`                    | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string                    |
 | `DATABASE_MAX_CONNECTIONS`        | `10`                                                | Connection pool size                            |
 | `DATABASE_STATEMENT_TIMEOUT_SECS` | `5`                                                 | Per-query timeout                               |
-| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (fastembed) or `openai`                 |
-| `OPENAI_API_KEY`                  | —                                                   | Required when provider is `openai`              |
+| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (fastembed) or `gemini`                 |
+| `GEMINI_API_KEY`                  | —                                                   | Required when provider is `gemini`              |
 | `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Embedding model name                            |
 | `EMBEDDING_DIMENSIONS`            | `384`                                               | Must match model and DB schema                  |
 | `MCP_TRANSPORT`                   | `stdio`                                             | `stdio` or `sse`                                |
@@ -166,7 +166,7 @@ src/
 ├── embeddings/
 │   ├── mod.rs           # EmbeddingProvider trait + enum dispatch
 │   ├── local.rs         # fastembed provider (feature-gated)
-│   └── openai.rs        # OpenAI API provider
+│   └── gemini.rs        # Gemini API provider
 └── tools/               # Domain module stubs (tool impls live on LoreServer in server.rs)
 migrations/              # sqlx SQL migrations (auto-run on startup)
 ```

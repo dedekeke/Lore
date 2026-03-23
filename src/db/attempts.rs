@@ -20,6 +20,7 @@ pub struct Attempt {
     pub outcome: AttemptOutcome,
     pub reasoning: String,
     #[serde(skip)]
+    #[allow(dead_code)]
     pub reasoning_embedding: Option<Vector>,
     pub git_ref: Option<String>,
     pub token_cost: Option<i32>,
@@ -45,6 +46,7 @@ pub async fn create_attempt(
     Ok(row.0)
 }
 
+#[allow(dead_code)]
 pub async fn get_attempt(pool: &PgPool, id: Uuid) -> Result<Option<Attempt>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \

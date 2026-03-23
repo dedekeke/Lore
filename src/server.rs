@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::{ServerHandler, model::*, tool};
+use rmcp::{model::*, tool, ServerHandler};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -46,16 +46,9 @@ impl LoreServer {
     }
 
     pub async fn project_id(&self) -> Result<Uuid, rmcp::Error> {
-        self.inner
-            .current_project_id
-            .read()
-            .await
-            .ok_or_else(|| {
-                rmcp::Error::invalid_params(
-                    "No active project. Call switch_project first.",
-                    None,
-                )
-            })
+        self.inner.current_project_id.read().await.ok_or_else(|| {
+            rmcp::Error::invalid_params("No active project. Call switch_project first.", None)
+        })
     }
 
     pub async fn set_project_id(&self, id: Uuid) {
@@ -63,9 +56,10 @@ impl LoreServer {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::Error> {
-        self.embeddings().embed(text).await.map_err(|e| {
-            rmcp::Error::internal_error(format!("Embedding error: {e}"), None)
-        })
+        self.embeddings()
+            .embed(text)
+            .await
+            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))
     }
 
     fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
@@ -75,7 +69,9 @@ impl LoreServer {
             "constraint" => Ok(db::RuleCategory::Constraint),
             "lesson" => Ok(db::RuleCategory::Lesson),
             other => Err(rmcp::Error::invalid_params(
-                format!("Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson"),
+                format!(
+                    "Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson"
+                ),
                 None,
             )),
         }
@@ -94,9 +90,8 @@ impl LoreServer {
     }
 
     fn parse_uuid(s: &str) -> Result<Uuid, rmcp::Error> {
-        s.parse::<Uuid>().map_err(|e| {
-            rmcp::Error::invalid_params(format!("Invalid UUID '{s}': {e}"), None)
-        })
+        s.parse::<Uuid>()
+            .map_err(|e| rmcp::Error::invalid_params(format!("Invalid UUID '{s}': {e}"), None))
     }
 
     fn db_err(e: sqlx::Error) -> rmcp::Error {
@@ -104,9 +99,8 @@ impl LoreServer {
     }
 
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
-        let json = serde_json::to_string_pretty(val).map_err(|e| {
-            rmcp::Error::internal_error(format!("Serialization error: {e}"), None)
-        })?;
+        let json = serde_json::to_string_pretty(val)
+            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
@@ -115,7 +109,7 @@ impl LoreServer {
 #[tool(tool_box)]
 impl LoreServer {
     #[tool(description = "Store a long-term rule/preference/fact/lesson in memory")]
-    async fn remember_rule(
+    pub async fn remember_rule(
         &self,
         #[tool(param)]
         #[schemars(description = "Rule category: preference, fact, constraint, or lesson")]
@@ -127,14 +121,15 @@ impl LoreServer {
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
         let embedding = self.embed(&content).await?;
-        let id = db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
-            .await
-            .map_err(Self::db_err)?;
+        let id =
+            db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
+                .await
+                .map_err(Self::db_err)?;
         Self::json_content(&serde_json::json!({ "rule_id": id.to_string() }))
     }
 
     #[tool(description = "Recall rules from memory using semantic search")]
-    async fn recall_rules(
+    pub async fn recall_rules(
         &self,
         #[tool(param)]
         #[schemars(description = "Search query")]
@@ -148,7 +143,10 @@ impl LoreServer {
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let embedding = self.embed(&query).await?;
-        let cat = category.as_deref().map(Self::parse_rule_category).transpose()?;
+        let cat = category
+            .as_deref()
+            .map(Self::parse_rule_category)
+            .transpose()?;
         let rules = db::semantic::search_rules_by_embedding(
             self.pool(),
             project_id,
@@ -162,7 +160,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Delete a rule from memory")]
-    async fn forget_rule(
+    pub async fn forget_rule(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the rule to delete")]
@@ -176,14 +174,17 @@ impl LoreServer {
     }
 
     #[tool(description = "List all rules, optionally filtered by category")]
-    async fn list_rules(
+    pub async fn list_rules(
         &self,
         #[tool(param)]
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
-        let cat = category.as_deref().map(Self::parse_rule_category).transpose()?;
+        let cat = category
+            .as_deref()
+            .map(Self::parse_rule_category)
+            .transpose()?;
         let rules = db::semantic::list_rules(self.pool(), project_id, cat)
             .await
             .map_err(Self::db_err)?;
@@ -193,7 +194,7 @@ impl LoreServer {
     // -- Ledger tools --
 
     #[tool(description = "Start a new task in the episodic ledger")]
-    async fn start_task(
+    pub async fn start_task(
         &self,
         #[tool(param)]
         #[schemars(description = "Description of the task")]
@@ -203,7 +204,10 @@ impl LoreServer {
         parent_task_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
-        let parent = parent_task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let parent = parent_task_id
+            .as_deref()
+            .map(Self::parse_uuid)
+            .transpose()?;
         let id = db::tasks::create_task(self.pool(), project_id, &description, parent)
             .await
             .map_err(Self::db_err)?;
@@ -211,7 +215,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Propose an approach attempt for a task")]
-    async fn propose_attempt(
+    pub async fn propose_attempt(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the task")]
@@ -236,7 +240,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Log the outcome of an attempt (accepted/rejected)")]
-    async fn log_outcome(
+    pub async fn log_outcome(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the attempt")]
@@ -268,7 +272,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Review the ledger of attempts for a task")]
-    async fn review_ledger(
+    pub async fn review_ledger(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the task")]
@@ -289,7 +293,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Mark a task as completed, optionally recording a lesson learned")]
-    async fn complete_task(
+    pub async fn complete_task(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the task")]
@@ -304,19 +308,19 @@ impl LoreServer {
             .map_err(Self::db_err)?;
 
         if success {
-        if let Some(lesson_text) = &lesson {
-            let project_id = self.project_id().await?;
-            let embedding = self.embed(lesson_text).await?;
-            db::semantic::create_rule(
-                self.pool(),
-                project_id,
-                db::RuleCategory::Lesson,
-                lesson_text,
-                Some(&embedding),
-            )
-            .await
-            .map_err(Self::db_err)?;
-        }
+            if let Some(lesson_text) = &lesson {
+                let project_id = self.project_id().await?;
+                let embedding = self.embed(lesson_text).await?;
+                db::semantic::create_rule(
+                    self.pool(),
+                    project_id,
+                    db::RuleCategory::Lesson,
+                    lesson_text,
+                    Some(&embedding),
+                )
+                .await
+                .map_err(Self::db_err)?;
+            }
         }
 
         Self::json_content(&serde_json::json!({ "success": success }))
@@ -325,7 +329,7 @@ impl LoreServer {
     // -- Search tools --
 
     #[tool(description = "Find similar past failures using semantic search on rejection reasoning")]
-    async fn find_similar_failures(
+    pub async fn find_similar_failures(
         &self,
         #[tool(param)]
         #[schemars(description = "Description of the error or failure")]
@@ -349,8 +353,10 @@ impl LoreServer {
 
     // -- System tools --
 
-    #[tool(description = "Get the current active context: project, active task, and recent attempts")]
-    async fn get_active_context(&self) -> Result<CallToolResult, rmcp::Error> {
+    #[tool(
+        description = "Get the current active context: project, active task, and recent attempts"
+    )]
+    pub async fn get_active_context(&self) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
             .await
@@ -381,7 +387,7 @@ impl LoreServer {
     }
 
     #[tool(description = "Switch to a project by name (creates it if it doesn't exist)")]
-    async fn switch_project(
+    pub async fn switch_project(
         &self,
         #[tool(param)]
         #[schemars(description = "Project name")]
@@ -408,8 +414,10 @@ impl LoreServer {
         }))
     }
 
-    #[tool(description = "Export all memory (rules, tasks, attempts) for the current project as JSON")]
-    async fn export_memory(
+    #[tool(
+        description = "Export all memory (rules, tasks, attempts) for the current project as JSON"
+    )]
+    pub async fn export_memory(
         &self,
         #[tool(param)]
         #[schemars(description = "Export format: json (only json supported currently)")]
@@ -460,5 +468,46 @@ impl ServerHandler for LoreServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_rule_category_valid() {
+        assert!(LoreServer::parse_rule_category("preference").is_ok());
+        assert!(LoreServer::parse_rule_category("Fact").is_ok());
+        assert!(LoreServer::parse_rule_category("CONSTRAINT").is_ok());
+        assert!(LoreServer::parse_rule_category("lesson").is_ok());
+    }
+
+    #[test]
+    fn test_parse_rule_category_invalid() {
+        assert!(LoreServer::parse_rule_category("garbage").is_err());
+    }
+
+    #[test]
+    fn test_parse_attempt_outcome_valid() {
+        assert!(LoreServer::parse_attempt_outcome("pending").is_ok());
+        assert!(LoreServer::parse_attempt_outcome("Accepted").is_ok());
+        assert!(LoreServer::parse_attempt_outcome("REJECTED").is_ok());
+    }
+
+    #[test]
+    fn test_parse_attempt_outcome_invalid() {
+        assert!(LoreServer::parse_attempt_outcome("maybe").is_err());
+    }
+
+    #[test]
+    fn test_parse_uuid_valid() {
+        let u = uuid::Uuid::new_v4().to_string();
+        assert!(LoreServer::parse_uuid(&u).is_ok());
+    }
+
+    #[test]
+    fn test_parse_uuid_invalid() {
+        assert!(LoreServer::parse_uuid("not-a-uuid").is_err());
     }
 }

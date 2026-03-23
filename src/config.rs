@@ -19,14 +19,14 @@ impl fmt::Display for McpTransport {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmbeddingProvider {
     Local,
-    OpenAi,
+    Gemini,
 }
 
 impl fmt::Display for EmbeddingProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local => write!(f, "local"),
-            Self::OpenAi => write!(f, "openai"),
+            Self::Gemini => write!(f, "gemini"),
         }
     }
 }
@@ -38,12 +38,15 @@ pub struct Config {
     pub database_statement_timeout_secs: u64,
 
     pub embedding_provider: EmbeddingProvider,
-    pub openai_api_key: Option<String>,
+    pub gemini_api_key: Option<String>,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
+    #[allow(dead_code)]
     pub mcp_transport: McpTransport,
+    #[allow(dead_code)]
     pub mcp_sse_port: u16,
+    #[allow(dead_code)]
     pub log_level: String,
 
     pub retention_attempts_days: u32,
@@ -61,9 +64,12 @@ impl Config {
             .as_str()
         {
             "local" => EmbeddingProvider::Local,
-            "openai" => EmbeddingProvider::OpenAi,
+            "gemini" => EmbeddingProvider::Gemini,
             other => {
-                tracing::warn!(value = other, "Invalid EMBEDDING_PROVIDER, defaulting to 'local'");
+                tracing::warn!(
+                    value = other,
+                    "Invalid EMBEDDING_PROVIDER, defaulting to 'local'"
+                );
                 EmbeddingProvider::Local
             }
         };
@@ -76,7 +82,10 @@ impl Config {
             "stdio" => McpTransport::Stdio,
             "sse" => McpTransport::Sse,
             other => {
-                tracing::warn!(value = other, "Invalid MCP_TRANSPORT, defaulting to 'stdio'");
+                tracing::warn!(
+                    value = other,
+                    "Invalid MCP_TRANSPORT, defaulting to 'stdio'"
+                );
                 McpTransport::Stdio
             }
         };
@@ -88,7 +97,7 @@ impl Config {
             database_statement_timeout_secs: parse_warn_or("DATABASE_STATEMENT_TIMEOUT_SECS", 5),
 
             embedding_provider,
-            openai_api_key: env::var("OPENAI_API_KEY").ok().filter(|s| !s.is_empty()),
+            gemini_api_key: env::var("GEMINI_API_KEY").ok().filter(|s| !s.is_empty()),
             embedding_model: env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| "all-MiniLM-L6-v2".into()),
             embedding_dimensions: parse_warn_or("EMBEDDING_DIMENSIONS", 384),
@@ -107,15 +116,103 @@ impl Config {
     }
 }
 
-fn parse_warn_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+pub fn parse_warn_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     match env::var(key) {
         Ok(v) => match v.parse() {
             Ok(parsed) => parsed,
             Err(_) => {
-                tracing::warn!(key = key, value = v, "Invalid value for env var, using default");
+                tracing::warn!(
+                    key = key,
+                    value = v,
+                    "Invalid value for env var, using default"
+                );
                 default
             }
         },
         Err(_) => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // env vars are process-global — serialize config tests
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_env() {
+        for key in [
+            "DATABASE_URL",
+            "DATABASE_MAX_CONNECTIONS",
+            "DATABASE_STATEMENT_TIMEOUT_SECS",
+            "EMBEDDING_PROVIDER",
+            "GEMINI_API_KEY",
+            "EMBEDDING_MODEL",
+            "EMBEDDING_DIMENSIONS",
+            "MCP_TRANSPORT",
+            "MCP_SSE_PORT",
+            "LOG_LEVEL",
+            "RETENTION_ATTEMPTS_DAYS",
+            "RETENTION_SNAPSHOTS_DAYS",
+            "RETENTION_TASKS_ARCHIVE_DAYS",
+            "DEFAULT_PROJECT_NAME",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn test_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Local);
+        assert_eq!(cfg.embedding_dimensions, 384);
+        assert_eq!(cfg.mcp_transport, McpTransport::Stdio);
+        assert_eq!(cfg.database_max_connections, 10);
+        assert_eq!(cfg.retention_attempts_days, 30);
+        assert_eq!(cfg.default_project_name, "default");
+    }
+
+    #[test]
+    fn test_gemini_provider_parsing() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("EMBEDDING_PROVIDER", "gemini");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Gemini);
+    }
+
+    #[test]
+    fn test_invalid_provider_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("EMBEDDING_PROVIDER", "garbage");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.embedding_provider, EmbeddingProvider::Local);
+    }
+
+    #[test]
+    fn test_invalid_numeric_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("DATABASE_MAX_CONNECTIONS", "notanumber");
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.database_max_connections, 10);
+    }
+
+    #[test]
+    fn test_empty_gemini_key_is_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("GEMINI_API_KEY", "");
+
+        let cfg = Config::from_env();
+        assert!(cfg.gemini_api_key.is_none());
     }
 }

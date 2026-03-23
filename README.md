@@ -15,14 +15,14 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 
 ## Architecture
 
-| Component | Choice |
-|-----------|--------|
-| Language | Rust |
-| Database | PostgreSQL + pgvector |
-| ORM | sqlx (compile-time checked SQL) |
-| Embeddings | fastembed (local) or OpenAI API |
-| Protocol | rmcp (Rust MCP SDK) |
-| Transport | stdio |
+| Component  | Choice                          |
+|------------|---------------------------------|
+| Language   | Rust                            |
+| Database   | PostgreSQL + pgvector           |
+| ORM        | sqlx (compile-time checked SQL) |
+| Embeddings | fastembed (local) or Gemini API |
+| Protocol   | rmcp (Rust MCP SDK)             |
+| Transport  | stdio                           |
 
 ## Setup
 
@@ -62,28 +62,28 @@ To skip the fastembed dependency (smaller binary, faster build):
 cargo build --release --no-default-features
 ```
 
-Set `EMBEDDING_PROVIDER=openai` and `OPENAI_API_KEY` in your `.env`.
+Set `EMBEDDING_PROVIDER=gemini` and `GEMINI_API_KEY` in your `.env`.
 
 ## Configuration
 
 All settings via environment variables (see `.env.example`):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string |
-| `DATABASE_MAX_CONNECTIONS` | `10` | Connection pool size |
-| `DATABASE_STATEMENT_TIMEOUT_SECS` | `5` | Per-query timeout |
-| `EMBEDDING_PROVIDER` | `local` | `local` (fastembed) or `openai` |
-| `OPENAI_API_KEY` | — | Required when provider is `openai` |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model name |
-| `EMBEDDING_DIMENSIONS` | `384` | Must match model and DB schema |
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` |
-| `MCP_SSE_PORT` | `3100` | SSE port (only when `MCP_TRANSPORT=sse`) |
-| `LOG_LEVEL` | `info` | Tracing filter level |
-| `RETENTION_ATTEMPTS_DAYS` | `30` | Auto-delete attempts older than N days |
-| `RETENTION_SNAPSHOTS_DAYS` | `7` | Auto-delete context snapshots older than N days |
-| `RETENTION_TASKS_ARCHIVE_DAYS` | `90` | Auto-delete completed tasks older than N days |
-| `DEFAULT_PROJECT_NAME` | `default` | Fallback project name for `switch_project` |
+| Variable                          | Default                                             | Description                                     |
+|-----------------------------------|-----------------------------------------------------|-------------------------------------------------|
+| `DATABASE_URL`                    | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string                    |
+| `DATABASE_MAX_CONNECTIONS`        | `10`                                                | Connection pool size                            |
+| `DATABASE_STATEMENT_TIMEOUT_SECS` | `5`                                                 | Per-query timeout                               |
+| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (fastembed) or `gemini`                 |
+| `GEMINI_API_KEY`                  | —                                                   | Required when provider is `gemini`              |
+| `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Embedding model name                            |
+| `EMBEDDING_DIMENSIONS`            | `384`                                               | Must match model and DB schema                  |
+| `MCP_TRANSPORT`                   | `stdio`                                             | `stdio` or `sse`                                |
+| `MCP_SSE_PORT`                    | `3100`                                              | SSE port (only when `MCP_TRANSPORT=sse`)        |
+| `LOG_LEVEL`                       | `info`                                              | Tracing filter level                            |
+| `RETENTION_ATTEMPTS_DAYS`         | `30`                                                | Auto-delete attempts older than N days          |
+| `RETENTION_SNAPSHOTS_DAYS`        | `7`                                                 | Auto-delete context snapshots older than N days |
+| `RETENTION_TASKS_ARCHIVE_DAYS`    | `90`                                                | Auto-delete completed tasks older than N days   |
+| `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 
@@ -91,36 +91,36 @@ All settings via environment variables (see `.env.example`):
 
 ### Long-Term Memory
 
-| Tool | Description |
-|------|-------------|
+| Tool            | Description                                                                 |
+|-----------------|-----------------------------------------------------------------------------|
 | `remember_rule` | Store a semantic rule (preference, fact, constraint, lesson) with embedding |
-| `recall_rules` | Vector similarity search for relevant rules |
-| `forget_rule` | Delete a rule |
-| `list_rules` | List all rules, optionally filtered by category |
+| `recall_rules`  | Vector similarity search for relevant rules                                 |
+| `forget_rule`   | Delete a rule                                                               |
+| `list_rules`    | List all rules, optionally filtered by category                             |
 
 ### Episodic Memory (Decision Ledger)
 
-| Tool | Description |
-|------|-------------|
-| `start_task` | Create a new task (supports subtask hierarchies) |
-| `propose_attempt` | Log an approach before executing it |
-| `log_outcome` | Record what happened (accepted/rejected) and why |
-| `review_ledger` | Query the ledger for a task, optionally filtered by outcome |
-| `complete_task` | Close a task, optionally extracting a lesson to long-term memory |
+| Tool              | Description                                                      |
+|-------------------|------------------------------------------------------------------|
+| `start_task`      | Create a new task (supports subtask hierarchies)                 |
+| `propose_attempt` | Log an approach before executing it                              |
+| `log_outcome`     | Record what happened (accepted/rejected) and why                 |
+| `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
+| `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
 
 ### Search
 
-| Tool | Description |
-|------|-------------|
+| Tool                    | Description                                     |
+|-------------------------|-------------------------------------------------|
 | `find_similar_failures` | Semantic search across past rejection reasoning |
 
 ### System
 
-| Tool | Description |
-|------|-------------|
+| Tool                 | Description                                                |
+|----------------------|------------------------------------------------------------|
 | `get_active_context` | Resume packet: current task, recent attempts, active rules |
-| `switch_project` | Switch project scope (creates if not exists) |
-| `export_memory` | Export all memory as JSON |
+| `switch_project`     | Switch project scope (creates if not exists)               |
+| `export_memory`      | Export all memory as JSON                                  |
 
 ## MCP Client Configuration
 
@@ -166,7 +166,7 @@ src/
 ├── embeddings/
 │   ├── mod.rs           # EmbeddingProvider trait + enum dispatch
 │   ├── local.rs         # fastembed provider (feature-gated)
-│   └── openai.rs        # OpenAI API provider
+│   └── gemini.rs        # Gemini API provider
 └── tools/               # Domain module stubs (tool impls live on LoreServer in server.rs)
 migrations/              # sqlx SQL migrations (auto-run on startup)
 ```

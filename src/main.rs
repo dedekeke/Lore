@@ -1,10 +1,5 @@
-mod config;
-mod db;
-mod embeddings;
-mod server;
-mod tools;
-
-use config::Config;
+use lore::config::Config;
+use lore::{db, embeddings, server};
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
@@ -15,8 +10,7 @@ async fn main() {
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level)),
         )
         // MCP stdio transport uses stdout for JSON-RPC, so logs must go to stderr
         .with_writer(std::io::stderr)
@@ -47,7 +41,10 @@ async fn main() {
         }
     };
 
-    tokio::spawn(db::retention::run_retention_loop(pool.clone(), config.clone()));
+    tokio::spawn(db::retention::run_retention_loop(
+        pool.clone(),
+        config.clone(),
+    ));
 
     let server = server::LoreServer::new(pool, embeddings, config);
     let transport = rmcp::transport::io::stdio();

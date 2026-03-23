@@ -19,6 +19,7 @@ pub struct SemanticRule {
     pub category: RuleCategory,
     pub content: String,
     #[serde(skip)]
+    #[allow(dead_code)]
     pub embedding: Option<Vector>,
     pub source_task_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -46,6 +47,7 @@ pub async fn create_rule(
     Ok(row.0)
 }
 
+#[allow(dead_code)]
 pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at \

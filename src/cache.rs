@@ -3,11 +3,8 @@ use std::time::Duration;
 
 use moka::future::Cache;
 
-/// Cached embedding result keyed by input text hash
-type EmbeddingCache = Cache<u64, Arc<Vec<f32>>>;
-
-/// Cached search results keyed by (query_hash, project_id)
-type SearchCache = Cache<u64, Arc<String>>;
+type EmbeddingCache = Cache<String, Arc<Vec<f32>>>;
+type SearchCache = Cache<String, Arc<String>>;
 
 pub struct LoreCache {
     pub embeddings: EmbeddingCache,
@@ -27,12 +24,8 @@ impl LoreCache {
                 .build(),
         }
     }
-}
 
-/// Fast hash for cache keys — not cryptographic, just for dedup
-pub fn hash_key(data: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
+    pub fn invalidate_search(&self) {
+        self.search.invalidate_all();
+    }
 }

@@ -35,7 +35,12 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 ### Database
 
 ```bash
-docker run -d --name lore-db -e POSTGRES_USER=lore -e POSTGRES_PASSWORD=password -e POSTGRES_DB=ai_memory -p 5432:5432 pgvector/pgvector:pg16
+docker run -d --name lore-db \
+  -e POSTGRES_USER=lore \
+  -e POSTGRES_PASSWORD=password \
+  -e POSTGRES_DB=ai_memory \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
 ```
 
 ### Build & Run

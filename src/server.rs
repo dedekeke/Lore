@@ -5,7 +5,6 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::cache;
 use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
@@ -60,7 +59,7 @@ impl LoreServer {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::Error> {
-        let key = cache::hash_key(text);
+        let key = text.to_string();
         if let Some(cached) = self.inner.cache.embeddings.get(&key).await {
             return Ok((*cached).clone());
         }
@@ -140,6 +139,7 @@ impl LoreServer {
             db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
                 .await
                 .map_err(Self::db_err)?;
+        self.inner.cache.invalidate_search();
         Self::json_content(&serde_json::json!({ "rule_id": id.to_string() }))
     }
 
@@ -186,6 +186,7 @@ impl LoreServer {
         let deleted = db::semantic::delete_rule(self.pool(), id)
             .await
             .map_err(Self::db_err)?;
+        self.inner.cache.invalidate_search();
         Self::json_content(&serde_json::json!({ "deleted": deleted }))
     }
 

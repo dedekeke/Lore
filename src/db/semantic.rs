@@ -104,8 +104,11 @@ pub async fn search_rules_hybrid(
     limit: i64,
     category: Option<RuleCategory>,
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
-    let emb = Vector::from(embedding.to_vec());
     let ts_query = to_tsquery_safe(query);
+    if ts_query.is_empty() {
+        return search_rules_by_embedding(pool, project_id, embedding, limit, category).await;
+    }
+    let emb = Vector::from(embedding.to_vec());
 
     // RRF: 1/(k+rank_vector) + 1/(k+rank_fts), k=60
     let (cat_filter, cat_val) = match &category {

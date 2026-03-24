@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
@@ -19,6 +20,7 @@ pub struct LoreServerInner {
     pub embeddings: AnyEmbeddingProvider,
     pub config: Config,
     pub current_project_id: RwLock<Option<Uuid>>,
+    pub cache: LoreCache,
 }
 
 impl LoreServer {
@@ -29,6 +31,7 @@ impl LoreServer {
                 embeddings,
                 config,
                 current_project_id: RwLock::new(None),
+                cache: LoreCache::new(1000, 500),
             }),
         }
     }
@@ -56,10 +59,21 @@ impl LoreServer {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::Error> {
-        self.embeddings()
+        let key = text.to_string();
+        if let Some(cached) = self.inner.cache.embeddings.get(&key).await {
+            return Ok((*cached).clone());
+        }
+        let result = self
+            .embeddings()
             .embed(text)
             .await
-            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))
+            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))?;
+        self.inner
+            .cache
+            .embeddings
+            .insert(key, Arc::new(result.clone()))
+            .await;
+        Ok(result)
     }
 
     fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
@@ -125,6 +139,7 @@ impl LoreServer {
             db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
                 .await
                 .map_err(Self::db_err)?;
+        self.inner.cache.invalidate_search();
         Self::json_content(&serde_json::json!({ "rule_id": id.to_string() }))
     }
 
@@ -147,10 +162,11 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::search_rules_by_embedding(
+        let rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
             &embedding,
+            &query,
             limit.unwrap_or(10),
             cat,
         )
@@ -170,6 +186,7 @@ impl LoreServer {
         let deleted = db::semantic::delete_rule(self.pool(), id)
             .await
             .map_err(Self::db_err)?;
+        self.inner.cache.invalidate_search();
         Self::json_content(&serde_json::json!({ "deleted": deleted }))
     }
 

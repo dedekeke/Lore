@@ -22,7 +22,7 @@ The AI doesn't need to read 5,000 tokens of messy chat history. It queries the l
 | **Language**          | Rust                                                     | Strict schema validation, memory safety, zero-cost abstractions            |
 | **Database**          | PostgreSQL + `pgvector`                                  | Relational structure for episodic data, vector search for semantic recall  |
 | **ORM/Query Builder** | `sqlx` (compile-time checked SQL)                        | Catches schema drift at build time, not runtime                            |
-| **Embeddings**        | `fastembed-rs` (local, default) or OpenAI API (optional) | Local-first avoids API costs and latency; OpenAI opt-in for higher quality |
+| **Embeddings**        | `fastembed-rs` (local, default) or Gemini API (optional) | Local-first avoids API costs and latency; Gemini opt-in for higher quality |
 | **Protocol SDK**      | `rmcp` (Official Rust MCP SDK)                           | First-class MCP support                                                    |
 | **Transport**         | `stdio` (primary), `SSE` (optional for remote)           | stdio for local CLI integration; SSE for dashboard/remote clients          |
 | **Migrations**        | `sqlx migrate`                                           | Versioned, reversible migrations checked into source control               |
@@ -187,10 +187,10 @@ DATABASE_MAX_CONNECTIONS=10
 DATABASE_STATEMENT_TIMEOUT_SECS=5
 
 # Embeddings
-EMBEDDING_PROVIDER=local          # "local" (fastembed) or "openai"
-OPENAI_API_KEY=                   # Required only if EMBEDDING_PROVIDER=openai
-EMBEDDING_MODEL=all-MiniLM-L6-v2 # For local; or text-embedding-3-small for OpenAI
-EMBEDDING_DIMENSIONS=384          # Match the model (384 for MiniLM, 1536 for OpenAI)
+EMBEDDING_PROVIDER=local          # "local" (fastembed) or "gemini"
+GEMINI_API_KEY=                   # Required only if EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=all-MiniLM-L6-v2 # For local; or gemini-embedding-001 for Gemini
+EMBEDDING_DIMENSIONS=384          # Match the model (384 for MiniLM, 768 for Gemini)
 
 # Server
 MCP_TRANSPORT=stdio               # "stdio" or "sse"
@@ -324,7 +324,7 @@ memo/
 │   ├── embeddings/
 │   │   ├── mod.rs               # Trait definition
 │   │   ├── local.rs             # fastembed-rs provider
-│   │   └── openai.rs            # OpenAI API provider
+│   │   └── gemini.rs            # Gemini API provider
 │   ├── tools/
 │   │   ├── mod.rs
 │   │   ├── memory.rs            # remember_rule, recall_rules, forget_rule, list_rules
@@ -376,5 +376,97 @@ As the database grows from hundreds of ledger entries to thousands, standard I/O
 * **The Solution:** Implement a Least Recently Used (LRU) cache using a Rust crate like `moka`. Frequent `task_id` queries will bypass the Postgres database entirely, returning to the LLM in under a millisecond.
 
 ### D. Zero-Latency Local Embeddings (ONNX)
-* **The Problem:** Relying on external APIs (like OpenAI) to embed the AI's query string adds 300ms–800ms of network latency per tool call.
+* **The Problem:** Relying on external APIs (like Gemini) to embed the AI's query string adds 300ms–800ms of network latency per tool call.
 * **The Solution:** Run a lightweight, quantized embedding model (e.g., `all-MiniLM-L6-v2`) natively inside the Rust server using the `ort` (ONNX Runtime) crate. This drops embedding generation time to ~10ms with zero network dependency.
+
+---
+
+## 12. Implementation Status
+
+### Completed
+
+| Phase | What | PR |
+|-------|------|----|
+| 1 | Project scaffold, DB schema, migrations, connection pool | Initial commits |
+| 2 | Embedding provider trait + fastembed local provider (feature-gated) | — |
+| 3 | Core CRUD: projects, tasks, attempts, semantic rules, retention | — |
+| 4 | MCP tool handlers via `rmcp` `#[tool]` macros on `LoreServer` | — |
+| 5 | Vector search: `recall_rules` (cosine), `find_similar_failures` | — |
+| 6 | `get_active_context` resume packet, `switch_project`, `export_memory` | — |
+| 7 | Retention scheduler: prune old attempts, snapshots, archived tasks | — |
+| 8 | Env-based config, connection limits, statement timeouts | — |
+| 9 | README with setup, config, and MCP tools reference | PR #7 |
+| 10 | Test suite (unit + integration with testcontainers) + GitHub Actions CI | PR #8 |
+| 11 | Replace OpenAI embeddings with Google Gemini API | PR #9 |
+| 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10 |
+
+### Current State
+
+- **Server runs** on stdio transport, connects to PostgreSQL + pgvector
+- **All 15 MCP tools** implemented and callable
+- **Embedding providers**: fastembed (local, feature-gated) and Gemini API
+- **Performance pipeline**: LRU cache → Gemini/local embedding → HNSW + BM25 hybrid search (RRF)
+- **Test suite**: 11 unit tests + 28 integration tests (DB + server)
+- **CI pipeline**: lint, check, test jobs in GitHub Actions
+- **Lib+bin crate split** enables integration test imports
+
+### Next Steps
+
+| Priority | Task | Notes |
+|----------|------|-------|
+| High | Side-prompt prioritization | Classify attempts by relevance to active task (see §13) |
+| High | Input validation | Max content length, category enum validation at tool boundary |
+| Medium | SSE transport | Enable remote MCP connections |
+| Medium | Local ONNX embedding | Run `all-MiniLM-L6-v2` via `ort` crate for ~10ms embeddings |
+| Low | Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
+| Low | Cross-project search | `find_similar_failures` across all projects |
+| Low | Web dashboard | Lightweight UI to browse/edit the ledger |
+
+---
+
+## 13. Side-Prompt Prioritization (Future Feature)
+
+Classify each attempt by its relevance to the active task. Filters noise from the resume packet and enables analytics on off-task drift.
+
+### Taxonomy
+
+| Type | Description | Include in resume? |
+|------|-------------|--------------------|
+| `task_aligned` | Directly advances the task | Yes |
+| `clarification` | Refines task definition/scope | Yes |
+| `meta` | About Lore itself (e.g. `review_ledger`) | No |
+| `tangent` | Work-related but not this task | No |
+| `off_task` | Entirely unrelated | No |
+
+### Classification Strategy
+
+**Hybrid: embedding similarity + AI self-report.** No secondary LLM call needed in V1.
+
+1. At `start_task`, embed the task description and store as `tasks.description_embedding`
+2. At `propose_attempt`, compute cosine similarity between attempt embedding and task embedding
+3. Map score to type: `>=0.75` → task_aligned, `>=0.50` → clarification, `>=0.30` → tangent, `<0.30` → off_task
+4. Caller can override with explicit `interaction_type` parameter
+
+### Schema Changes
+
+```sql
+-- Migration 1: task intent vector
+ALTER TABLE ai_memory.tasks
+    ADD COLUMN description_embedding vector(384);
+
+-- Migration 2: attempt classification
+CREATE TYPE ai_memory.interaction_type AS ENUM (
+    'task_aligned', 'clarification', 'meta', 'tangent', 'off_task'
+);
+ALTER TABLE ai_memory.attempts
+    ADD COLUMN interaction_type ai_memory.interaction_type NOT NULL DEFAULT 'task_aligned',
+    ADD COLUMN relevance_score REAL;
+```
+
+### Impact on Resume Packet
+
+`get_active_context` filters to `task_aligned` + `clarification` only. A 20-exchange session with 6 off-topic questions becomes a 14-entry ledger — lower token cost, higher signal quality.
+
+### Retention
+
+`tangent`/`off_task`/`meta` attempts pruned after 7 days (vs 30-day default). The `relevance_score` column enables future analytics on task drift patterns.

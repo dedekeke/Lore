@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::cache;
+use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
@@ -19,6 +21,7 @@ pub struct LoreServerInner {
     pub embeddings: AnyEmbeddingProvider,
     pub config: Config,
     pub current_project_id: RwLock<Option<Uuid>>,
+    pub cache: LoreCache,
 }
 
 impl LoreServer {
@@ -29,6 +32,7 @@ impl LoreServer {
                 embeddings,
                 config,
                 current_project_id: RwLock::new(None),
+                cache: LoreCache::new(1000, 500),
             }),
         }
     }
@@ -56,10 +60,21 @@ impl LoreServer {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::Error> {
-        self.embeddings()
+        let key = cache::hash_key(text);
+        if let Some(cached) = self.inner.cache.embeddings.get(&key).await {
+            return Ok((*cached).clone());
+        }
+        let result = self
+            .embeddings()
             .embed(text)
             .await
-            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))
+            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))?;
+        self.inner
+            .cache
+            .embeddings
+            .insert(key, Arc::new(result.clone()))
+            .await;
+        Ok(result)
     }
 
     fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
@@ -147,10 +162,11 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::search_rules_by_embedding(
+        let rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
             &embedding,
+            &query,
             limit.unwrap_or(10),
             cat,
         )

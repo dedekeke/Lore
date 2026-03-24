@@ -6,15 +6,14 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 pub async fn setup_db() -> (PgPool, ContainerAsync<GenericImage>) {
-    let container: ContainerAsync<GenericImage> =
-        GenericImage::new("pgvector/pgvector", "pg17")
-            .with_exposed_port(5432.tcp())
-            .with_env_var("POSTGRES_DB", "lore_test")
-            .with_env_var("POSTGRES_USER", "lore")
-            .with_env_var("POSTGRES_PASSWORD", "test")
-            .start()
-            .await
-            .expect("Failed to start pgvector container");
+    let container: ContainerAsync<GenericImage> = GenericImage::new("pgvector/pgvector", "pg17")
+        .with_exposed_port(5434.tcp())
+        .with_env_var("POSTGRES_DB", "lore_test")
+        .with_env_var("POSTGRES_USER", "lore")
+        .with_env_var("POSTGRES_PASSWORD", "test")
+        .start()
+        .await
+        .expect("Failed to start pgvector container");
 
     let port = container
         .get_host_port_ipv4(5432)

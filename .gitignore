@@ -65,3 +65,4 @@ secrets.yml
 # ============================================
 /.claude/
 /.research/
+.mcp.json

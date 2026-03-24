@@ -398,12 +398,14 @@ As the database grows from hundreds of ledger entries to thousands, standard I/O
 | 9 | README with setup, config, and MCP tools reference | PR #7 |
 | 10 | Test suite (unit + integration with testcontainers) + GitHub Actions CI | PR #8 |
 | 11 | Replace OpenAI embeddings with Google Gemini API | PR #9 |
+| 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10 |
 
 ### Current State
 
 - **Server runs** on stdio transport, connects to PostgreSQL + pgvector
 - **All 15 MCP tools** implemented and callable
 - **Embedding providers**: fastembed (local, feature-gated) and Gemini API
+- **Performance pipeline**: LRU cache → Gemini/local embedding → HNSW + BM25 hybrid search (RRF)
 - **Test suite**: 11 unit tests + 28 integration tests (DB + server)
 - **CI pipeline**: lint, check, test jobs in GitHub Actions
 - **Lib+bin crate split** enables integration test imports
@@ -412,11 +414,59 @@ As the database grows from hundreds of ledger entries to thousands, standard I/O
 
 | Priority | Task | Notes |
 |----------|------|-------|
-| High | HNSW index migration | Add `CREATE INDEX ... USING hnsw` for semantic_rules and attempts embeddings |
+| High | Side-prompt prioritization | Classify attempts by relevance to active task (see §13) |
 | High | Input validation | Max content length, category enum validation at tool boundary |
-| Medium | Hybrid search (RRF) | Combine full-text BM25 + vector search for `recall_rules` |
-| Medium | LRU caching | `moka` crate for hot-path queries (task ledger, recent rules) |
 | Medium | SSE transport | Enable remote MCP connections |
+| Medium | Local ONNX embedding | Run `all-MiniLM-L6-v2` via `ort` crate for ~10ms embeddings |
 | Low | Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
 | Low | Cross-project search | `find_similar_failures` across all projects |
 | Low | Web dashboard | Lightweight UI to browse/edit the ledger |
+
+---
+
+## 13. Side-Prompt Prioritization (Future Feature)
+
+Classify each attempt by its relevance to the active task. Filters noise from the resume packet and enables analytics on off-task drift.
+
+### Taxonomy
+
+| Type | Description | Include in resume? |
+|------|-------------|--------------------|
+| `task_aligned` | Directly advances the task | Yes |
+| `clarification` | Refines task definition/scope | Yes |
+| `meta` | About Lore itself (e.g. `review_ledger`) | No |
+| `tangent` | Work-related but not this task | No |
+| `off_task` | Entirely unrelated | No |
+
+### Classification Strategy
+
+**Hybrid: embedding similarity + AI self-report.** No secondary LLM call needed in V1.
+
+1. At `start_task`, embed the task description and store as `tasks.description_embedding`
+2. At `propose_attempt`, compute cosine similarity between attempt embedding and task embedding
+3. Map score to type: `>=0.75` → task_aligned, `>=0.50` → clarification, `>=0.30` → tangent, `<0.30` → off_task
+4. Caller can override with explicit `interaction_type` parameter
+
+### Schema Changes
+
+```sql
+-- Migration 1: task intent vector
+ALTER TABLE ai_memory.tasks
+    ADD COLUMN description_embedding vector(384);
+
+-- Migration 2: attempt classification
+CREATE TYPE ai_memory.interaction_type AS ENUM (
+    'task_aligned', 'clarification', 'meta', 'tangent', 'off_task'
+);
+ALTER TABLE ai_memory.attempts
+    ADD COLUMN interaction_type ai_memory.interaction_type NOT NULL DEFAULT 'task_aligned',
+    ADD COLUMN relevance_score REAL;
+```
+
+### Impact on Resume Packet
+
+`get_active_context` filters to `task_aligned` + `clarification` only. A 20-exchange session with 6 off-topic questions becomes a 14-entry ledger — lower token cost, higher signal quality.
+
+### Retention
+
+`tangent`/`off_task`/`meta` attempts pruned after 7 days (vs 30-day default). The `relevance_score` column enables future analytics on task drift patterns.

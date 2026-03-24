@@ -108,11 +108,13 @@ pub async fn search_rules_hybrid(
     if ts_query.is_empty() {
         return search_rules_by_embedding(pool, project_id, embedding, limit, category).await;
     }
+    let limit = limit.max(1);
+    let candidate_limit = limit * 3;
     let emb = Vector::from(embedding.to_vec());
 
     // RRF: 1/(k+rank_vector) + 1/(k+rank_fts), k=60
     let (cat_filter, cat_val) = match &category {
-        Some(cat) => ("AND category = $5", Some(cat)),
+        Some(cat) => ("AND category = $6", Some(cat)),
         None => ("", None),
     };
 
@@ -122,14 +124,14 @@ pub async fn search_rules_hybrid(
             FROM ai_memory.semantic_rules
             WHERE project_id = $1 AND embedding IS NOT NULL
               AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter}
-            LIMIT $3 * 3
+            LIMIT $3
         ),
         fts_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, to_tsquery('english', $4)) DESC) AS f_rank
             FROM ai_memory.semantic_rules
             WHERE project_id = $1 AND content_tsv @@ to_tsquery('english', $4)
               AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter}
-            LIMIT $3 * 3
+            LIMIT $3
         ),
         fused AS (
             SELECT COALESCE(v.id, f.id) AS id,
@@ -137,7 +139,7 @@ pub async fn search_rules_hybrid(
             FROM vector_ranked v
             FULL OUTER JOIN fts_ranked f ON v.id = f.id
             ORDER BY rrf_score DESC
-            LIMIT $3
+            LIMIT $5
         )
         SELECT s.id, s.project_id, s.category, s.content, s.embedding,
                s.source_task_id, s.created_at, s.expires_at
@@ -150,8 +152,9 @@ pub async fn search_rules_hybrid(
         sqlx::query_as(&sql)
             .bind(project_id)
             .bind(&emb)
-            .bind(limit)
+            .bind(candidate_limit)
             .bind(&ts_query)
+            .bind(limit)
             .bind(cat)
             .fetch_all(pool)
             .await
@@ -159,8 +162,9 @@ pub async fn search_rules_hybrid(
         sqlx::query_as(&sql)
             .bind(project_id)
             .bind(&emb)
-            .bind(limit)
+            .bind(candidate_limit)
             .bind(&ts_query)
+            .bind(limit)
             .fetch_all(pool)
             .await
     }

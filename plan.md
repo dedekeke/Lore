@@ -396,9 +396,9 @@ As the database grows from hundreds of ledger entries to thousands, standard I/O
 | 7 | Retention scheduler: prune old attempts, snapshots, archived tasks | — |
 | 8 | Env-based config, connection limits, statement timeouts | — |
 | 9 | README with setup, config, and MCP tools reference | PR #7 |
-| 10 | Test suite (unit + integration with testcontainers) + GitHub Actions CI | PR #8 |
+| 10 | Test suite (unit + integration with testcontainers) + GitHub Actions CI | PR #8 (superseded, content merged via #10/#11) |
 | 11 | Replace OpenAI embeddings with Google Gemini API | PR #9 |
-| 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10 |
+| 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10, #11 |
 
 ### Current State
 

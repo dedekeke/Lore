@@ -49,9 +49,18 @@ impl LoreServer {
     }
 
     pub async fn project_id(&self) -> Result<Uuid, rmcp::Error> {
-        self.inner.current_project_id.read().await.ok_or_else(|| {
-            rmcp::Error::invalid_params("No active project. Call switch_project first.", None)
-        })
+        if let Some(id) = *self.inner.current_project_id.read().await {
+            return Ok(id);
+        }
+        // Auto-detect from cwd
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .map_err(|e| rmcp::Error::internal_error(format!("Cannot read cwd: {e}"), None))?;
+        let (id, _name) = db::projects::get_or_create_project_by_path(self.pool(), &cwd)
+            .await
+            .map_err(Self::db_err)?;
+        self.set_project_id(id).await;
+        Ok(id)
     }
 
     pub async fn set_project_id(&self, id: Uuid) {
@@ -135,7 +144,7 @@ impl LoreServer {
 
     pub fn protocol_text() -> &'static str {
         "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
-         1. FIRST CALL: switch_project(name, root_path) to set context.\n\
+         1. FIRST CALL: switch_project(name, root_path) to set context (optional — project is auto-detected from cwd if not called).\n\
          2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
          3. PROPOSING CODE: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.\n\
          4. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning) BEFORE suggesting a fix.\n\

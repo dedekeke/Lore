@@ -53,7 +53,7 @@ pub struct Config {
     pub retention_snapshots_days: u32,
     pub retention_tasks_archive_days: u32,
     pub retention_unknown_days: u32,
-    pub retention_pending_escalation_hours: u64,
+    pub retention_pending_escalation_hours: u32,
 
     pub default_project_name: String,
 }

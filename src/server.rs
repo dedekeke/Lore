@@ -345,7 +345,7 @@ impl LoreServer {
         #[schemars(description = "UUID of the task")]
         task_id: String,
         #[tool(param)]
-        #[schemars(description = "Filter by outcome: pending, accepted, or rejected")]
+        #[schemars(description = "Filter by outcome: pending, accepted, rejected, or unknown")]
         outcome_filter: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let tid = Self::parse_uuid(&task_id)?;

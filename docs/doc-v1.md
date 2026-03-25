@@ -134,7 +134,7 @@ Bookmarks for context wipe events (schema exists, not yet wired).
 
 ---
 
-## MCP Tools (16 total)
+## MCP Tools (14 total)
 
 ### Long-Term Memory
 
@@ -200,7 +200,7 @@ Automated background cleanup runs hourly:
 | Data | Retention | Default |
 |------|-----------|---------|
 | `pending` attempts | Auto-escalated to `unknown` | After 72 hours |
-| `unknown` attempts | Deleted | After 7 days |
+| `unknown` attempts | Deleted | 7 days after escalation |
 | All attempts | Deleted | After 30 days |
 | Context snapshots | Deleted | After 7 days |
 | Completed tasks | Deleted | After 90 days |

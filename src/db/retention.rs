@@ -54,13 +54,13 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
 }
 
 /// Escalate pending attempts older than N hours to 'unknown'
-pub async fn escalate_stale_pending(pool: &PgPool, hours: u64) -> Result<u64, sqlx::Error> {
+pub async fn escalate_stale_pending(pool: &PgPool, hours: u32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE ai_memory.attempts \
          SET outcome = 'unknown', resolved_at = NOW() \
          WHERE outcome = 'pending' AND created_at < NOW() - make_interval(hours => $1)",
     )
-    .bind(hours as f64)
+    .bind(hours as i32)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -80,7 +80,8 @@ pub async fn prune_unknown_attempts(pool: &PgPool, days: u32) -> Result<u64, sql
 
 pub async fn prune_old_attempts(pool: &PgPool, days: u32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
-        "DELETE FROM ai_memory.attempts WHERE created_at < NOW() - make_interval(days => $1)",
+        "DELETE FROM ai_memory.attempts \
+         WHERE outcome != 'unknown' AND created_at < NOW() - make_interval(days => $1)",
     )
     .bind(days as i32)
     .execute(pool)

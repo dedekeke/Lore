@@ -94,6 +94,16 @@ pub async fn update_task_status(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn abandon_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = 'abandoned', completed_at = NOW() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn complete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW() WHERE id = $1",

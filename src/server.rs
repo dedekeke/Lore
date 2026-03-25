@@ -100,6 +100,19 @@ impl LoreServer {
         }
     }
 
+    fn parse_task_status(s: &str) -> Result<db::TaskStatus, rmcp::Error> {
+        match s.to_lowercase().as_str() {
+            "active" => Ok(db::TaskStatus::Active),
+            "completed" => Ok(db::TaskStatus::Completed),
+            "abandoned" => Ok(db::TaskStatus::Abandoned),
+            "blocked" => Ok(db::TaskStatus::Blocked),
+            other => Err(rmcp::Error::invalid_params(
+                format!("Invalid task status: '{other}'. Valid: active, completed, abandoned, blocked"),
+                None,
+            )),
+        }
+    }
+
     fn parse_attempt_outcome(s: &str) -> Result<db::AttemptOutcome, rmcp::Error> {
         match s.to_lowercase().as_str() {
             "pending" => Ok(db::AttemptOutcome::Pending),
@@ -476,6 +489,63 @@ impl LoreServer {
         )
     }
 
+    #[tool(description = "Abandon a task with a reason. Optionally saves the reason as a lesson.")]
+    pub async fn abandon_task(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the task to abandon")]
+        task_id: String,
+        #[tool(param)]
+        #[schemars(description = "Why this task is being abandoned")]
+        reason: String,
+        #[tool(param)]
+        #[schemars(description = "If true, save the reason as a Lesson rule")]
+        save_lesson: Option<bool>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("reason", &reason, 4096)?;
+        let tid = Self::parse_uuid(&task_id)?;
+        let success = db::tasks::abandon_task(self.pool(), tid)
+            .await
+            .map_err(Self::db_err)?;
+
+        if success && save_lesson.unwrap_or(false) {
+            let project_id = self.project_id().await?;
+            let embedding = self.embed(&reason).await?;
+            db::semantic::create_rule(
+                self.pool(),
+                project_id,
+                db::RuleCategory::Lesson,
+                &reason,
+                Some(&embedding),
+            )
+            .await
+            .map_err(Self::db_err)?;
+        }
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "success": success }),
+            "Task abandoned. For your next goal, call start_task(description).",
+        )
+    }
+
+    #[tool(description = "List tasks for the current project, optionally filtered by status")]
+    pub async fn list_tasks(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
+        status: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let st = status
+            .as_deref()
+            .map(Self::parse_task_status)
+            .transpose()?;
+        let tasks = db::tasks::list_tasks(self.pool(), project_id, st)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&tasks)
+    }
+
     // -- Search tools --
 
     #[tool(description = "Find similar past failures using semantic search on rejection reasoning")]
@@ -676,6 +746,19 @@ mod tests {
     #[test]
     fn test_parse_uuid_invalid() {
         assert!(LoreServer::parse_uuid("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn test_parse_task_status_valid() {
+        assert!(LoreServer::parse_task_status("active").is_ok());
+        assert!(LoreServer::parse_task_status("Completed").is_ok());
+        assert!(LoreServer::parse_task_status("ABANDONED").is_ok());
+        assert!(LoreServer::parse_task_status("blocked").is_ok());
+    }
+
+    #[test]
+    fn test_parse_task_status_invalid() {
+        assert!(LoreServer::parse_task_status("done").is_err());
     }
 
     #[test]

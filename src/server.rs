@@ -263,6 +263,53 @@ impl LoreServer {
         Self::json_content(&rules)
     }
 
+    #[tool(description = "Update an existing semantic rule's category and/or content")]
+    pub async fn update_rule(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the rule to update")]
+        rule_id: String,
+        #[tool(param)]
+        #[schemars(description = "New category: preference, fact, constraint, or lesson")]
+        category: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New content for the rule")]
+        content: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        if category.is_none() && content.is_none() {
+            return Err(rmcp::Error::invalid_params(
+                "Provide at least one of: category, content",
+                None,
+            ));
+        }
+        if let Some(ref c) = content {
+            Self::validate_len("content", c, 4096)?;
+        }
+        let id = Self::parse_uuid(&rule_id)?;
+        let cat = category
+            .as_deref()
+            .map(Self::parse_rule_category)
+            .transpose()?;
+        let embedding = match &content {
+            Some(text) => Some(self.embed(text).await?),
+            None => None,
+        };
+        let updated = db::semantic::update_rule(
+            self.pool(),
+            id,
+            cat,
+            content.as_deref(),
+            embedding.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
+        self.inner.cache.invalidate_search();
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "updated": updated }),
+            "Rule updated. Continue with your current task.",
+        )
+    }
+
     // -- Ledger tools --
 
     #[tool(description = "Start a new task in the episodic ledger")]

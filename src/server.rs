@@ -118,6 +118,16 @@ impl LoreServer {
             .map_err(|e| rmcp::Error::invalid_params(format!("Invalid UUID '{s}': {e}"), None))
     }
 
+    fn validate_len(field: &str, val: &str, max: usize) -> Result<(), rmcp::Error> {
+        if val.len() > max {
+            return Err(rmcp::Error::invalid_params(
+                format!("{field} exceeds max length ({} > {max} bytes)", val.len()),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn db_err(e: sqlx::Error) -> rmcp::Error {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
     }
@@ -169,6 +179,7 @@ impl LoreServer {
         #[schemars(description = "The rule content to remember")]
         content: String,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
         let embedding = self.embed(&content).await?;
@@ -196,6 +207,7 @@ impl LoreServer {
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("query", &query, 2048)?;
         let project_id = self.project_id().await?;
         let embedding = self.embed(&query).await?;
         let cat = category
@@ -263,6 +275,7 @@ impl LoreServer {
         #[schemars(description = "UUID of parent task, if this is a subtask")]
         parent_task_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
         let parent = parent_task_id
             .as_deref()
@@ -290,6 +303,10 @@ impl LoreServer {
         #[schemars(description = "Optional code snippet for the attempt")]
         code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("approach_summary", &approach_summary, 4096)?;
+        if let Some(ref code) = code_snippet {
+            Self::validate_len("code_snippet", code, 32768)?;
+        }
         let tid = Self::parse_uuid(&task_id)?;
         let id = db::attempts::create_attempt(
             self.pool(),
@@ -321,6 +338,7 @@ impl LoreServer {
         #[schemars(description = "Optional git reference (commit hash, branch)")]
         git_ref: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("reasoning", &reasoning, 4096)?;
         let aid = Self::parse_uuid(&attempt_id)?;
         let out = Self::parse_attempt_outcome(&outcome)?;
         let embedding = self.embed(&reasoning).await?;
@@ -381,6 +399,9 @@ impl LoreServer {
         #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
         lesson: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        if let Some(ref l) = lesson {
+            Self::validate_len("lesson", l, 4096)?;
+        }
         let tid = Self::parse_uuid(&task_id)?;
         let success = db::tasks::complete_task(self.pool(), tid)
             .await
@@ -420,6 +441,7 @@ impl LoreServer {
         #[schemars(description = "Max results (default 5)")]
         limit: Option<i64>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("error_description", &error_description, 2048)?;
         let project_id = self.project_id().await?;
         let embedding = self.embed(&error_description).await?;
         let attempts = db::attempts::search_similar_failures(
@@ -607,5 +629,16 @@ mod tests {
     #[test]
     fn test_parse_uuid_invalid() {
         assert!(LoreServer::parse_uuid("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn test_validate_len_ok() {
+        assert!(LoreServer::validate_len("f", "short", 4096).is_ok());
+    }
+
+    #[test]
+    fn test_validate_len_exceeds() {
+        let long = "x".repeat(5000);
+        assert!(LoreServer::validate_len("f", &long, 4096).is_err());
     }
 }

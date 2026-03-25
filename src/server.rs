@@ -96,8 +96,9 @@ impl LoreServer {
             "pending" => Ok(db::AttemptOutcome::Pending),
             "accepted" => Ok(db::AttemptOutcome::Accepted),
             "rejected" => Ok(db::AttemptOutcome::Rejected),
+            "unknown" => Ok(db::AttemptOutcome::Unknown),
             other => Err(rmcp::Error::invalid_params(
-                format!("Invalid outcome: '{other}'. Valid: pending, accepted, rejected"),
+                format!("Invalid outcome: '{other}'. Valid: pending, accepted, rejected, unknown"),
                 None,
             )),
         }
@@ -116,6 +117,33 @@ impl LoreServer {
         let json = serde_json::to_string_pretty(val)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    fn json_content_with_nudge<T: serde::Serialize>(
+        val: &T,
+        next_step: &str,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let mut obj = serde_json::to_value(val)
+            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("_next_step".into(), serde_json::Value::String(next_step.into()));
+        }
+        let json = serde_json::to_string_pretty(&obj)
+            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    pub fn protocol_text() -> &'static str {
+        "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
+         1. FIRST CALL: switch_project(name, root_path) to set context.\n\
+         2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
+         3. PROPOSING CODE: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.\n\
+         4. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning) BEFORE suggesting a fix.\n\
+         5. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning) when the USER explicitly confirms success. If unsure, use 'pending'.\n\
+         6. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
+         7. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
+         8. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         Violation causes context rot and repeated failures."
     }
 }
 
@@ -140,7 +168,10 @@ impl LoreServer {
                 .await
                 .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
-        Self::json_content(&serde_json::json!({ "rule_id": id.to_string() }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "rule_id": id.to_string() }),
+            "Rule stored. Continue with your current task.",
+        )
     }
 
     #[tool(description = "Recall rules from memory using semantic search")]
@@ -172,7 +203,7 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content(&rules)
+        Self::json_content_with_nudge(&rules, "Apply these rules to your current task.")
     }
 
     #[tool(description = "Delete a rule from memory")]
@@ -187,7 +218,10 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
-        Self::json_content(&serde_json::json!({ "deleted": deleted }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "deleted": deleted }),
+            "Rule removed. Continue with your current task.",
+        )
     }
 
     #[tool(description = "List all rules, optionally filtered by category")]
@@ -228,7 +262,10 @@ impl LoreServer {
         let id = db::tasks::create_task(self.pool(), project_id, &description, parent)
             .await
             .map_err(Self::db_err)?;
-        Self::json_content(&serde_json::json!({ "task_id": id.to_string() }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "task_id": id.to_string() }),
+            "Task created. Next: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.",
+        )
     }
 
     #[tool(description = "Propose an approach attempt for a task")]
@@ -253,17 +290,20 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content(&serde_json::json!({ "attempt_id": id.to_string() }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "attempt_id": id.to_string() }),
+            "Attempt logged. Present the code to the user and WAIT for their feedback. Do NOT auto-accept. Call log_outcome only after the user confirms success ('accepted') or reports failure ('rejected').",
+        )
     }
 
-    #[tool(description = "Log the outcome of an attempt (accepted/rejected)")]
+    #[tool(description = "Log the outcome of an attempt. ONLY mark 'accepted' when the user explicitly confirms success. Use 'pending' if awaiting confirmation.")]
     pub async fn log_outcome(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the attempt")]
         attempt_id: String,
         #[tool(param)]
-        #[schemars(description = "Outcome: accepted or rejected")]
+        #[schemars(description = "Outcome: pending (awaiting user confirmation), accepted (user confirmed), rejected (user reported failure), or unknown (stale/abandoned)")]
         outcome: String,
         #[tool(param)]
         #[schemars(description = "Reasoning for the outcome")]
@@ -278,14 +318,24 @@ impl LoreServer {
         let success = db::attempts::log_outcome(
             self.pool(),
             aid,
-            out,
+            out.clone(),
             &reasoning,
             Some(&embedding),
             git_ref.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content(&serde_json::json!({ "success": success }))
+        let nudge = match out {
+            db::AttemptOutcome::Rejected => {
+                "Outcome logged. Next: call review_ledger(task_id) to review all past failures, then propose_attempt with a new approach."
+            }
+            db::AttemptOutcome::Accepted => {
+                "Outcome logged. Next: call complete_task(task_id, lesson) to close the task and extract a lesson."
+            }
+            db::AttemptOutcome::Pending => "Outcome set to pending — waiting for user confirmation. Do NOT change to 'accepted' until the user explicitly confirms.",
+            db::AttemptOutcome::Unknown => "Outcome marked as unknown — this attempt will be cleaned up during retention.",
+        };
+        Self::json_content_with_nudge(&serde_json::json!({ "success": success }), nudge)
     }
 
     #[tool(description = "Review the ledger of attempts for a task")]
@@ -295,7 +345,7 @@ impl LoreServer {
         #[schemars(description = "UUID of the task")]
         task_id: String,
         #[tool(param)]
-        #[schemars(description = "Filter by outcome: pending, accepted, or rejected")]
+        #[schemars(description = "Filter by outcome: pending, accepted, rejected, or unknown")]
         outcome_filter: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let tid = Self::parse_uuid(&task_id)?;
@@ -306,7 +356,10 @@ impl LoreServer {
         let attempts = db::attempts::list_attempts(self.pool(), tid, filter)
             .await
             .map_err(Self::db_err)?;
-        Self::json_content(&attempts)
+        Self::json_content_with_nudge(
+            &attempts,
+            "Use the above failures to avoid repeating mistakes. Call propose_attempt with a new approach.",
+        )
     }
 
     #[tool(description = "Mark a task as completed, optionally recording a lesson learned")]
@@ -340,7 +393,10 @@ impl LoreServer {
             }
         }
 
-        Self::json_content(&serde_json::json!({ "success": success }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "success": success }),
+            "Task closed. For your next goal, call start_task(description).",
+        )
     }
 
     // -- Search tools --
@@ -365,7 +421,10 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content(&attempts)
+        Self::json_content_with_nudge(
+            &attempts,
+            "Review these past failures. Avoid repeating the same approaches. Call propose_attempt with a different strategy.",
+        )
     }
 
     // -- System tools --
@@ -395,12 +454,21 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
 
-        Self::json_content(&serde_json::json!({
-            "project": project,
-            "active_tasks": active_tasks,
-            "recent_attempts": recent_attempts,
-            "active_rules_count": active_rules.len(),
-        }))
+        let nudge = if active_tasks.is_empty() {
+            "No active task. Call start_task(description) for your current goal."
+        } else {
+            "Use the active task and attempts above to continue. Call propose_attempt for your next approach."
+        };
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "project": project,
+                "active_tasks": active_tasks,
+                "recent_attempts": recent_attempts,
+                "active_rules_count": active_rules.len(),
+            }),
+            nudge,
+        )
     }
 
     #[tool(description = "Switch to a project by name (creates it if it doesn't exist)")]
@@ -425,10 +493,13 @@ impl LoreServer {
             .map_err(Self::db_err)?;
 
         self.set_project_id(project_id).await;
-        Self::json_content(&serde_json::json!({
-            "project_id": project_id.to_string(),
-            "project_name": project_name,
-        }))
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "project_id": project_id.to_string(),
+                "project_name": project_name,
+            }),
+            "Project set. Next: call start_task(description) for your current goal.",
+        )
     }
 
     #[tool(
@@ -463,12 +534,17 @@ impl LoreServer {
             all_attempts.extend(attempts);
         }
 
-        Self::json_content(&serde_json::json!({
+        Self::json_content_with_nudge(&serde_json::json!({
             "project_id": project_id.to_string(),
             "rules": rules,
             "tasks": tasks,
             "attempts": all_attempts,
-        }))
+        }), "Export complete.")
+    }
+
+    #[tool(description = "Re-read the mandatory episodic memory protocol. Call this if you are unsure what Lore tool to use next.")]
+    pub async fn get_protocol(&self) -> Result<CallToolResult, rmcp::Error> {
+        Ok(CallToolResult::success(vec![Content::text(Self::protocol_text())]))
     }
 }
 
@@ -476,12 +552,7 @@ impl LoreServer {
 impl ServerHandler for LoreServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some(
-                "Lore is a memory management MCP server. It provides long-term semantic memory \
-                 (rules, preferences, lessons) and episodic memory (task ledger with attempts). \
-                 Call switch_project first to set the active project context."
-                    .into(),
-            ),
+            instructions: Some(Self::protocol_text().into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
@@ -510,6 +581,7 @@ mod tests {
         assert!(LoreServer::parse_attempt_outcome("pending").is_ok());
         assert!(LoreServer::parse_attempt_outcome("Accepted").is_ok());
         assert!(LoreServer::parse_attempt_outcome("REJECTED").is_ok());
+        assert!(LoreServer::parse_attempt_outcome("unknown").is_ok());
     }
 
     #[test]

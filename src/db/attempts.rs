@@ -9,6 +9,7 @@ pub enum AttemptOutcome {
     Pending,
     Accepted,
     Rejected,
+    Unknown,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]

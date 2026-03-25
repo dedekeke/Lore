@@ -64,5 +64,6 @@ secrets.yml
 # Project
 # ============================================
 /.claude/
+/.agents/
 /.research/
 .mcp.json

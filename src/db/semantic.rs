@@ -236,6 +236,29 @@ pub async fn search_rules_by_embedding(
     }
 }
 
+/// Find rules with cosine similarity above threshold (for dedup detection)
+pub async fn find_duplicates(
+    pool: &PgPool,
+    project_id: Uuid,
+    embedding: &[f32],
+    threshold: f64,
+) -> Result<Vec<SemanticRule>, sqlx::Error> {
+    let emb = Vector::from(embedding.to_vec());
+    // cosine distance <=> returns distance (0 = identical), so similarity = 1 - distance
+    sqlx::query_as(
+        "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at \
+         FROM ai_memory.semantic_rules \
+         WHERE project_id = $1 AND embedding IS NOT NULL \
+         AND (1.0 - (embedding <=> $2::vector)) >= $3 \
+         ORDER BY embedding <=> $2::vector LIMIT 5",
+    )
+    .bind(project_id)
+    .bind(&emb)
+    .bind(threshold)
+    .fetch_all(pool)
+    .await
+}
+
 /// Sanitize user input into a safe tsquery string
 fn to_tsquery_safe(input: &str) -> String {
     input

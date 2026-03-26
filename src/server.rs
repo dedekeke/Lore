@@ -202,6 +202,24 @@ impl LoreServer {
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
         let embedding = self.embed(&content).await?;
+
+        // Check for near-duplicates (cosine similarity >= 0.95)
+        let duplicates = db::semantic::find_duplicates(self.pool(), project_id, &embedding, 0.95)
+            .await
+            .map_err(Self::db_err)?;
+        if !duplicates.is_empty() {
+            let dup_ids: Vec<String> = duplicates.iter().map(|r| r.id.to_string()).collect();
+            let dup_preview: String = duplicates[0].content.chars().take(100).collect();
+            return Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "duplicate_warning": true,
+                    "similar_rule_ids": dup_ids,
+                    "similar_content_preview": dup_preview,
+                }),
+                "Near-duplicate rule found. Use update_rule to modify the existing rule instead, or use forget_rule to delete it first.",
+            );
+        }
+
         let id =
             db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
                 .await
@@ -655,6 +673,14 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
 
+        let context_wipes = if let Some(task) = active_tasks.first() {
+            db::snapshots::count_snapshots(self.pool(), task.id)
+                .await
+                .map_err(Self::db_err)?
+        } else {
+            0
+        };
+
         let nudge = if active_tasks.is_empty() {
             "No active task. Call start_task(description) for your current goal."
         } else {
@@ -667,8 +693,38 @@ impl LoreServer {
                 "active_tasks": active_tasks,
                 "recent_attempts": recent_attempts,
                 "active_rules_count": active_rules.len(),
+                "context_wipes": context_wipes,
             }),
             nudge,
+        )
+    }
+
+    #[tool(
+        description = "Log a context wipe event. Call this when the AI context window is about to be exhausted or has been reset."
+    )]
+    pub async fn log_context_wipe(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the active task")]
+        task_id: String,
+        #[tool(param)]
+        #[schemars(description = "Approximate token count before the wipe")]
+        token_count: i32,
+        #[tool(param)]
+        #[schemars(description = "UUID of the last attempt before the wipe")]
+        last_attempt_id: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let tid = Self::parse_uuid(&task_id)?;
+        let aid = last_attempt_id
+            .as_deref()
+            .map(Self::parse_uuid)
+            .transpose()?;
+        let id = db::snapshots::create_snapshot(self.pool(), tid, token_count, aid)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "snapshot_id": id.to_string() }),
+            "Context wipe recorded. In the new session, call get_next_steps() or get_active_context() to resume.",
         )
     }
 

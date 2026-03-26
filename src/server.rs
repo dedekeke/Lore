@@ -553,6 +553,44 @@ impl LoreServer {
         Self::json_content(&tasks)
     }
 
+    #[tool(
+        description = "Get task analytics: attempt counts, rejection rate, and time-to-resolution"
+    )]
+    pub async fn get_task_stats(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
+        status: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let st = status.as_deref().map(Self::parse_task_status).transpose()?;
+        let stats = db::tasks::get_task_stats(self.pool(), project_id, st)
+            .await
+            .map_err(Self::db_err)?;
+
+        // Compute aggregate summary
+        let total = stats.len();
+        let total_attempts: i64 = stats.iter().map(|s| s.total_attempts).sum();
+        let total_rejected: i64 = stats.iter().map(|s| s.rejected_attempts).sum();
+        let resolved: Vec<_> = stats.iter().filter_map(|s| s.resolution_minutes).collect();
+        let avg_resolution = if resolved.is_empty() {
+            None
+        } else {
+            Some(resolved.iter().sum::<f64>() / resolved.len() as f64)
+        };
+
+        Self::json_content(&serde_json::json!({
+            "summary": {
+                "total_tasks": total,
+                "total_attempts": total_attempts,
+                "total_rejected": total_rejected,
+                "rejection_rate": if total_attempts > 0 { total_rejected as f64 / total_attempts as f64 } else { 0.0 },
+                "avg_resolution_minutes": avg_resolution,
+            },
+            "tasks": stats,
+        }))
+    }
+
     // -- Search tools --
 
     #[tool(description = "Find similar past failures using semantic search on rejection reasoning")]
@@ -657,18 +695,69 @@ impl LoreServer {
         )
     }
 
-    #[tool(
-        description = "Export all memory (rules, tasks, attempts) for the current project as JSON"
-    )]
+    fn render_markdown_export(
+        project: &Option<db::projects::Project>,
+        rules: &[db::semantic::SemanticRule],
+        tasks: &[db::tasks::Task],
+        attempts: &[db::attempts::Attempt],
+    ) -> String {
+        use std::fmt::Write;
+        let mut md = String::new();
+
+        let name = project
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("Unknown");
+        writeln!(md, "# Lore Export — {name}\n").unwrap();
+
+        writeln!(md, "## Rules ({} total)\n", rules.len()).unwrap();
+        for r in rules {
+            let preview = &r.content[..r.content.len().min(80)];
+            writeln!(md, "### [{:?}] {preview}", r.category).unwrap();
+            writeln!(md, "- **ID:** `{}`", r.id).unwrap();
+            writeln!(md, "- **Content:** {}\n", r.content).unwrap();
+        }
+
+        writeln!(md, "## Tasks ({} total)\n", tasks.len()).unwrap();
+        for t in tasks {
+            writeln!(md, "### {:?}: {}", t.status, t.description).unwrap();
+            writeln!(md, "- **ID:** `{}`", t.id).unwrap();
+            writeln!(
+                md,
+                "- **Created:** {}",
+                t.created_at.format("%Y-%m-%d %H:%M UTC")
+            )
+            .unwrap();
+            if let Some(ca) = t.completed_at {
+                writeln!(md, "- **Completed:** {}", ca.format("%Y-%m-%d %H:%M UTC")).unwrap();
+            }
+            let task_attempts: Vec<_> = attempts.iter().filter(|a| a.task_id == t.id).collect();
+            if !task_attempts.is_empty() {
+                writeln!(md, "\n**Attempts:**\n").unwrap();
+                for a in task_attempts {
+                    writeln!(md, "- **{:?}** — {}", a.outcome, a.approach_summary).unwrap();
+                    if !a.reasoning.is_empty() {
+                        writeln!(md, "  > {}", a.reasoning).unwrap();
+                    }
+                }
+            }
+            writeln!(md).unwrap();
+        }
+
+        md
+    }
+
+    #[tool(description = "Export all memory (rules, tasks, attempts) for the current project")]
     pub async fn export_memory(
         &self,
         #[tool(param)]
-        #[schemars(description = "Export format: json (only json supported currently)")]
+        #[schemars(description = "Export format: json or markdown")]
         format: String,
     ) -> Result<CallToolResult, rmcp::Error> {
-        if format.to_lowercase() != "json" {
+        let fmt = format.to_lowercase();
+        if fmt != "json" && fmt != "markdown" {
             return Err(rmcp::Error::invalid_params(
-                "Only 'json' format is currently supported",
+                "Supported formats: json, markdown",
                 None,
             ));
         }
@@ -687,6 +776,14 @@ impl LoreServer {
                 .await
                 .map_err(Self::db_err)?;
             all_attempts.extend(attempts);
+        }
+
+        if fmt == "markdown" {
+            let project = db::projects::get_project(self.pool(), project_id)
+                .await
+                .map_err(Self::db_err)?;
+            let md = Self::render_markdown_export(&project, &rules, &tasks, &all_attempts);
+            return Ok(CallToolResult::success(vec![Content::text(md)]));
         }
 
         Self::json_content_with_nudge(

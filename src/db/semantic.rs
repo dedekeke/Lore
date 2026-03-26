@@ -86,6 +86,30 @@ pub async fn list_rules(
     }
 }
 
+pub async fn update_rule(
+    pool: &PgPool,
+    id: Uuid,
+    category: Option<RuleCategory>,
+    content: Option<&str>,
+    embedding: Option<&[f32]>,
+) -> Result<bool, sqlx::Error> {
+    let emb = embedding.map(|e| Vector::from(e.to_vec()));
+    let result = sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET \
+         category = COALESCE($2, category), \
+         content = COALESCE($3, content), \
+         embedding = COALESCE($4, embedding) \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(category.as_ref())
+    .bind(content)
+    .bind(emb.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.semantic_rules WHERE id = $1")
         .bind(id)

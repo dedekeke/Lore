@@ -94,6 +94,60 @@ pub async fn update_task_status(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn abandon_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = 'abandoned', completed_at = NOW() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+pub struct TaskSummary {
+    pub id: Uuid,
+    pub description: String,
+    pub status: TaskStatus,
+    pub created_at: DateTime<Utc>,
+    pub total_attempts: i64,
+    pub pending_attempts: i64,
+    pub rejected_attempts: i64,
+    pub accepted_attempts: i64,
+}
+
+pub async fn get_task_summaries(
+    pool: &PgPool,
+    project_id: Uuid,
+    statuses: &[TaskStatus],
+) -> Result<Vec<TaskSummary>, sqlx::Error> {
+    let status_strs: Vec<String> = statuses
+        .iter()
+        .map(|s| match s {
+            TaskStatus::Active => "active".into(),
+            TaskStatus::Completed => "completed".into(),
+            TaskStatus::Abandoned => "abandoned".into(),
+            TaskStatus::Blocked => "blocked".into(),
+        })
+        .collect();
+
+    sqlx::query_as(
+        "SELECT t.id, t.description, t.status, t.created_at, \
+         COUNT(a.id) AS total_attempts, \
+         COUNT(a.id) FILTER (WHERE a.outcome = 'pending') AS pending_attempts, \
+         COUNT(a.id) FILTER (WHERE a.outcome = 'rejected') AS rejected_attempts, \
+         COUNT(a.id) FILTER (WHERE a.outcome = 'accepted') AS accepted_attempts \
+         FROM ai_memory.tasks t \
+         LEFT JOIN ai_memory.attempts a ON a.task_id = t.id \
+         WHERE t.project_id = $1 AND t.status::text = ANY($2) \
+         GROUP BY t.id ORDER BY t.created_at DESC",
+    )
+    .bind(project_id)
+    .bind(&status_strs)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn complete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW() WHERE id = $1",

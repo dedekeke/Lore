@@ -13,17 +13,6 @@ Standard AI memory saves only final facts. When context is wiped, the AI forgets
 
 After a context wipe, the AI queries the ledger and gets a dense summary of past failures and successes — no need to re-read thousands of tokens of chat history.
 
-## Architecture
-
-| Component  | Choice                          |
-|------------|---------------------------------|
-| Language   | Rust                            |
-| Database   | PostgreSQL + pgvector           |
-| ORM        | sqlx (compile-time checked SQL) |
-| Embeddings | fastembed (local) or Gemini API |
-| Protocol   | rmcp (Rust MCP SDK)             |
-| Transport  | stdio                           |
-
 ## Setup
 
 ### Prerequisites
@@ -34,6 +23,17 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 
 ### Database
 
+**Option A: Local PostgreSQL** 
+
+```bash
+# Create user and database
+psql postgres -c "CREATE USER lore WITH PASSWORD 'password';"
+psql postgres -c "CREATE DATABASE ai_memory OWNER lore;"
+psql ai_memory -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+**Option B: Docker**
+
 ```bash
 docker run -d --name lore-db \
   -e POSTGRES_USER=lore \
@@ -43,10 +43,12 @@ docker run -d --name lore-db \
   pgvector/pgvector:pg16
 ```
 
+> Both options use the same default `DATABASE_URL`. Ensure pgvector is installed for local PostgreSQL — see [pgvector install guide](https://github.com/pgvector/pgvector#installation).
+
 ### Build & Run
 
 ```bash
-cp .env.example .env  # edit as needed
+cp .env.example .env
 cargo build --release
 ./target/release/lore
 ```
@@ -80,6 +82,8 @@ All settings via environment variables (see `.env.example`):
 | `RETENTION_ATTEMPTS_DAYS`         | `30`                                                | Auto-delete attempts older than N days          |
 | `RETENTION_SNAPSHOTS_DAYS`        | `7`                                                 | Auto-delete context snapshots older than N days |
 | `RETENTION_TASKS_ARCHIVE_DAYS`    | `90`                                                | Auto-delete completed tasks older than N days   |
+| `RETENTION_UNKNOWN_DAYS`          | `7`                                                 | Auto-delete unknown/stale attempts after N days |
+| `RETENTION_PENDING_ESCALATION_HOURS` | `72`                                             | Escalate pending attempts to unknown after N hours |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
@@ -104,6 +108,8 @@ All settings via environment variables (see `.env.example`):
 | `log_outcome`     | Record what happened (accepted/rejected) and why                 |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
 | `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
+| `abandon_task`    | Abandon a task with reason, optionally saving as lesson          |
+| `list_tasks`      | List tasks for current project, optionally filtered by status    |
 
 ### Search
 
@@ -118,6 +124,9 @@ All settings via environment variables (see `.env.example`):
 | `get_active_context` | Resume packet: current task, recent attempts, active rules |
 | `switch_project`     | Switch project scope (creates if not exists)               |
 | `export_memory`      | Export all memory as JSON                                  |
+| `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
+| `get_protocol`       | Re-read the mandatory episodic memory protocol             |
+| `update_rule`        | Update an existing rule's category and/or content          |
 
 ## MCP Client Configuration
 
@@ -145,29 +154,3 @@ Five tables in the `ai_memory` schema:
 - **tasks** — current goals with status tracking and subtask hierarchies
 - **attempts** — the episodic ledger: approach, outcome, reasoning, optional code/git ref
 - **context_snapshots** — bookmarks for context wipe events
-
-## Project Structure
-
-```
-src/
-├── main.rs              # Entry point, server lifecycle
-├── config.rs            # Env-based configuration
-├── server.rs            # LoreServer + all MCP tool handlers
-├── db/
-│   ├── pool.rs          # Connection pool + migrations
-│   ├── projects.rs      # Project CRUD
-│   ├── semantic.rs      # Semantic rules CRUD + vector search
-│   ├── tasks.rs         # Task CRUD + status management
-│   ├── attempts.rs      # Attempt CRUD + outcome logging + failure search
-│   └── retention.rs     # Background cleanup + retention scheduler
-├── embeddings/
-│   ├── mod.rs           # EmbeddingProvider trait + enum dispatch
-│   ├── local.rs         # fastembed provider (feature-gated)
-│   └── gemini.rs        # Gemini API provider
-└── tools/               # Domain module stubs (tool impls live on LoreServer in server.rs)
-migrations/              # sqlx SQL migrations (auto-run on startup)
-```
-
-## License
-
-MIT

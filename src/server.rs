@@ -572,7 +572,15 @@ impl LoreServer {
         let total = stats.len();
         let total_attempts: i64 = stats.iter().map(|s| s.total_attempts).sum();
         let total_rejected: i64 = stats.iter().map(|s| s.rejected_attempts).sum();
+        let total_accepted: i64 = stats.iter().map(|s| s.accepted_attempts).sum();
+        let resolved_attempts = total_accepted + total_rejected;
+        let rejection_rate = if resolved_attempts > 0 {
+            total_rejected as f64 / resolved_attempts as f64
+        } else {
+            0.0
+        };
         let resolved: Vec<_> = stats.iter().filter_map(|s| s.resolution_minutes).collect();
+        // avg_resolution only counts tasks with completed_at (completed/abandoned)
         let avg_resolution = if resolved.is_empty() {
             None
         } else {
@@ -584,7 +592,7 @@ impl LoreServer {
                 "total_tasks": total,
                 "total_attempts": total_attempts,
                 "total_rejected": total_rejected,
-                "rejection_rate": if total_attempts > 0 { total_rejected as f64 / total_attempts as f64 } else { 0.0 },
+                "rejection_rate": rejection_rate,
                 "avg_resolution_minutes": avg_resolution,
             },
             "tasks": stats,
@@ -712,7 +720,7 @@ impl LoreServer {
 
         writeln!(md, "## Rules ({} total)\n", rules.len()).unwrap();
         for r in rules {
-            let preview = &r.content[..r.content.len().min(80)];
+            let preview: String = r.content.chars().take(80).collect();
             writeln!(md, "### [{:?}] {preview}", r.category).unwrap();
             writeln!(md, "- **ID:** `{}`", r.id).unwrap();
             writeln!(md, "- **Content:** {}\n", r.content).unwrap();
@@ -737,7 +745,9 @@ impl LoreServer {
                 for a in task_attempts {
                     writeln!(md, "- **{:?}** — {}", a.outcome, a.approach_summary).unwrap();
                     if !a.reasoning.is_empty() {
-                        writeln!(md, "  > {}", a.reasoning).unwrap();
+                        for line in a.reasoning.lines() {
+                            writeln!(md, "  > {line}").unwrap();
+                        }
                     }
                 }
             }

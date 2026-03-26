@@ -94,7 +94,7 @@ All settings via environment variables (see `.env.example`):
 
 | Tool            | Description                                                                 |
 |-----------------|-----------------------------------------------------------------------------|
-| `remember_rule` | Store a semantic rule (preference, fact, constraint, lesson) with embedding |
+| `remember_rule` | Store a rule with embedding (warns on cosine > 0.95 duplicates)            |
 | `recall_rules`  | Vector similarity search for relevant rules                                 |
 | `forget_rule`   | Delete a rule                                                               |
 | `list_rules`    | List all rules, optionally filtered by category                             |
@@ -121,7 +121,8 @@ All settings via environment variables (see `.env.example`):
 
 | Tool                 | Description                                                |
 |----------------------|------------------------------------------------------------|
-| `get_active_context` | Resume packet: current task, recent attempts, active rules |
+| `get_active_context` | Resume packet: current task, attempts, wipe count          |
+| `log_context_wipe`   | Record a context window exhaustion event                   |
 | `switch_project`     | Switch project scope (creates if not exists)               |
 | `get_task_stats`     | Task analytics: attempt counts, rejection rate, resolution |
 | `export_memory`      | Export all memory as JSON or markdown                      |

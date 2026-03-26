@@ -25,8 +25,6 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 
 **Option A: Local PostgreSQL** 
 
-If you have PostgreSQL installed locally (e.g. via Homebrew, apt, etc.):
-
 ```bash
 # Create user and database
 psql postgres -c "CREATE USER lore WITH PASSWORD 'password';"
@@ -110,6 +108,8 @@ All settings via environment variables (see `.env.example`):
 | `log_outcome`     | Record what happened (accepted/rejected) and why                 |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
 | `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
+| `abandon_task`    | Abandon a task with reason, optionally saving as lesson          |
+| `list_tasks`      | List tasks for current project, optionally filtered by status    |
 
 ### Search
 
@@ -124,7 +124,9 @@ All settings via environment variables (see `.env.example`):
 | `get_active_context` | Resume packet: current task, recent attempts, active rules |
 | `switch_project`     | Switch project scope (creates if not exists)               |
 | `export_memory`      | Export all memory as JSON                                  |
+| `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
+| `update_rule`        | Update an existing rule's category and/or content          |
 
 ## MCP Client Configuration
 

@@ -174,7 +174,8 @@ impl LoreServer {
          5. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning) when the USER explicitly confirms success. If unsure, use 'pending'.\n\
          6. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
          7. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
-         8. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         8. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
+         9. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -688,6 +689,81 @@ impl LoreServer {
             "tasks": tasks,
             "attempts": all_attempts,
         }), "Export complete.")
+    }
+
+    #[tool(description = "Get a cold-start briefing: active/blocked tasks with attempt stats, stale pending attempts, and recent lessons. Call this at the start of a new session to know what to work on without resuming prior context.")]
+    pub async fn get_next_steps(&self) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+
+        let summaries = db::tasks::get_task_summaries(
+            self.pool(),
+            project_id,
+            &[db::TaskStatus::Active, db::TaskStatus::Blocked],
+        )
+        .await
+        .map_err(Self::db_err)?;
+
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+        )
+        .await
+        .map_err(Self::db_err)?;
+        // Only show most recent 5 lessons
+        let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
+
+        // Build action items
+        let mut actions: Vec<String> = Vec::new();
+        for s in &summaries {
+            match s.status {
+                db::TaskStatus::Active if s.pending_attempts > 0 => {
+                    actions.push(format!(
+                        "Task '{}' has {} pending attempt(s) awaiting outcome resolution",
+                        s.description, s.pending_attempts
+                    ));
+                }
+                db::TaskStatus::Active => {
+                    actions.push(format!(
+                        "Task '{}' is active ({} attempts, {} rejected) — propose next approach",
+                        s.description, s.total_attempts, s.rejected_attempts
+                    ));
+                }
+                db::TaskStatus::Blocked => {
+                    actions.push(format!(
+                        "Task '{}' is BLOCKED — needs unblocking before progress",
+                        s.description
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if actions.is_empty() {
+            actions.push("No active or blocked tasks. Call start_task(description) for a new goal.".into());
+        }
+
+        let nudge = if summaries.iter().any(|s| s.pending_attempts > 0) {
+            "Resolve pending attempts first: ask the user for confirmation, then log_outcome."
+        } else if summaries.iter().any(|s| s.status == db::TaskStatus::Blocked) {
+            "Unblock blocked tasks before starting new work."
+        } else if summaries.iter().any(|s| s.status == db::TaskStatus::Active) {
+            "Continue active tasks: call review_ledger(task_id) then propose_attempt."
+        } else {
+            "No pending work. Call start_task(description) when the user gives a new goal."
+        };
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "project": project,
+                "tasks": summaries,
+                "actions": actions,
+                "recent_lessons": recent_lessons,
+            }),
+            nudge,
+        )
     }
 
     #[tool(description = "Re-read the mandatory episodic memory protocol. Call this if you are unsure what Lore tool to use next.")]

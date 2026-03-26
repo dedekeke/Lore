@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio transport with PostgreSQL + pgvector. All 16 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 11 unit + 28 integration tests. CI via GitHub Actions.
+Server runs on stdio transport with PostgreSQL + pgvector. 18 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -21,49 +21,40 @@ Server runs on stdio transport with PostgreSQL + pgvector. All 16 MCP tools impl
 | 11 | Replace OpenAI embeddings with Gemini API | PR #9 |
 | 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10, #11 |
 | 13 | AI protocol enforcement: nudges, `get_protocol` tool | Done |
-| 14 | Unknown outcome variant + stale pending escalation + retention | In progress |
+| 14 | Unknown outcome variant + stale pending escalation + retention | Done |
+| 15 | Auto-project detection from cwd, input validation, `update_rule`, `list_tasks`, `abandon_task`, `get_next_steps` cold-start briefing | In progress |
 
 ---
 
 ## Next Steps
 
-### Critical
-
-| Task | Notes |
-|------|-------|
-| **Auto-project detection** | Infer project from `cwd` on first tool call — skip mandatory `switch_project` |
-
 ### High
 
 | Task | Notes |
 |------|-------|
-| **Input validation** | Max content length (4KB), category enum validation, approach_summary cap |
-| **`update_rule` tool** | Edit existing semantic rules (currently delete + re-create) |
-| **`list_tasks` tool** | Browse tasks across a project |
-| **`abandon_task` tool** | Mark tasks as abandoned with reason |
+| **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
+| **Markdown export** | Add markdown format to `export_memory` |
+| **SSE transport** | Enable remote MCP connections (HTTP+SSE or Streamable HTTP) |
 
 ### Medium
 
 | Task | Notes |
 |------|-------|
-| **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
-| **Task analytics** | `get_task_stats` — attempt count, rejection rate, time-to-resolution |
+| **Task analytics** | `get_task_stats` — attempt count, rejection rate, avg time-to-resolution |
 | **Context snapshots** | Wire into `get_active_context` to track context wipes |
-| **Markdown export** | Add markdown format to `export_memory` |
-| **SSE transport** | Enable remote MCP connections |
 | **Intelligent decay** | Auto-consolidate old accepted attempts into lessons |
 | **Local ONNX embedding** | Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings |
+| **Rule deduplication** | Detect cosine > 0.95 duplicates on insert, warn or merge |
+| **Batch embedding on startup** | Re-embed stale rules/attempts missing embeddings |
 
 ### Low
 
 | Task | Notes |
 |------|-------|
-| Batch embedding on startup | Re-embed stale rules/attempts |
-| Rule deduplication | Detect cosine > 0.95 duplicates on insert |
 | Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
 | Cross-project search | `find_similar_failures` across all projects |
 | Web dashboard | Lightweight UI to browse/edit the ledger |
-| Multi-agent support | Tag attempts with `agent_id` |
+| Multi-agent support | Tag attempts with `agent_id` for multi-agent workflows |
 
 ---
 
@@ -72,6 +63,18 @@ Server runs on stdio transport with PostgreSQL + pgvector. All 16 MCP tools impl
 ### Side-Prompt Prioritization
 
 Classify attempts by relevance to active task. Schema additions: `description_embedding` on tasks, `interaction_type` enum + `relevance_score` on attempts. Resume packet filters to `task_aligned` + `clarification` only.
+
+### Conversation Handoff Protocol
+
+When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.
+
+### Configurable Tool Visibility
+
+Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.
+
+### Webhook Notifications
+
+Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.
 
 ### Architecture Reference
 

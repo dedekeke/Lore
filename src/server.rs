@@ -107,7 +107,9 @@ impl LoreServer {
             "abandoned" => Ok(db::TaskStatus::Abandoned),
             "blocked" => Ok(db::TaskStatus::Blocked),
             other => Err(rmcp::Error::invalid_params(
-                format!("Invalid task status: '{other}'. Valid: active, completed, abandoned, blocked"),
+                format!(
+                    "Invalid task status: '{other}'. Valid: active, completed, abandoned, blocked"
+                ),
                 None,
             )),
         }
@@ -158,7 +160,10 @@ impl LoreServer {
         let mut obj = serde_json::to_value(val)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
         if let Some(map) = obj.as_object_mut() {
-            map.insert("_next_step".into(), serde_json::Value::String(next_step.into()));
+            map.insert(
+                "_next_step".into(),
+                serde_json::Value::String(next_step.into()),
+            );
         }
         let json = serde_json::to_string_pretty(&obj)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
@@ -383,14 +388,18 @@ impl LoreServer {
         )
     }
 
-    #[tool(description = "Log the outcome of an attempt. ONLY mark 'accepted' when the user explicitly confirms success. Use 'pending' if awaiting confirmation.")]
+    #[tool(
+        description = "Log the outcome of an attempt. ONLY mark 'accepted' when the user explicitly confirms success. Use 'pending' if awaiting confirmation."
+    )]
     pub async fn log_outcome(
         &self,
         #[tool(param)]
         #[schemars(description = "UUID of the attempt")]
         attempt_id: String,
         #[tool(param)]
-        #[schemars(description = "Outcome: pending (awaiting user confirmation), accepted (user confirmed), rejected (user reported failure), or unknown (stale/abandoned)")]
+        #[schemars(
+            description = "Outcome: pending (awaiting user confirmation), accepted (user confirmed), rejected (user reported failure), or unknown (stale/abandoned)"
+        )]
         outcome: String,
         #[tool(param)]
         #[schemars(description = "Reasoning for the outcome")]
@@ -537,10 +546,7 @@ impl LoreServer {
         status: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
-        let st = status
-            .as_deref()
-            .map(Self::parse_task_status)
-            .transpose()?;
+        let st = status.as_deref().map(Self::parse_task_status).transpose()?;
         let tasks = db::tasks::list_tasks(self.pool(), project_id, st)
             .await
             .map_err(Self::db_err)?;
@@ -683,15 +689,20 @@ impl LoreServer {
             all_attempts.extend(attempts);
         }
 
-        Self::json_content_with_nudge(&serde_json::json!({
-            "project_id": project_id.to_string(),
-            "rules": rules,
-            "tasks": tasks,
-            "attempts": all_attempts,
-        }), "Export complete.")
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "project_id": project_id.to_string(),
+                "rules": rules,
+                "tasks": tasks,
+                "attempts": all_attempts,
+            }),
+            "Export complete.",
+        )
     }
 
-    #[tool(description = "Get a cold-start briefing: active/blocked tasks with attempt stats, stale pending attempts, and recent lessons. Call this at the start of a new session to know what to work on without resuming prior context.")]
+    #[tool(
+        description = "Get a cold-start briefing: active/blocked tasks with attempt stats, stale pending attempts, and recent lessons. Call this at the start of a new session to know what to work on without resuming prior context."
+    )]
     pub async fn get_next_steps(&self) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
@@ -706,13 +717,10 @@ impl LoreServer {
         .await
         .map_err(Self::db_err)?;
 
-        let lessons = db::semantic::list_rules(
-            self.pool(),
-            project_id,
-            Some(db::RuleCategory::Lesson),
-        )
-        .await
-        .map_err(Self::db_err)?;
+        let lessons =
+            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
+                .await
+                .map_err(Self::db_err)?;
         // Only show most recent 5 lessons
         let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
 
@@ -742,12 +750,17 @@ impl LoreServer {
             }
         }
         if actions.is_empty() {
-            actions.push("No active or blocked tasks. Call start_task(description) for a new goal.".into());
+            actions.push(
+                "No active or blocked tasks. Call start_task(description) for a new goal.".into(),
+            );
         }
 
         let nudge = if summaries.iter().any(|s| s.pending_attempts > 0) {
             "Resolve pending attempts first: ask the user for confirmation, then log_outcome."
-        } else if summaries.iter().any(|s| s.status == db::TaskStatus::Blocked) {
+        } else if summaries
+            .iter()
+            .any(|s| s.status == db::TaskStatus::Blocked)
+        {
             "Unblock blocked tasks before starting new work."
         } else if summaries.iter().any(|s| s.status == db::TaskStatus::Active) {
             "Continue active tasks: call review_ledger(task_id) then propose_attempt."
@@ -766,9 +779,13 @@ impl LoreServer {
         )
     }
 
-    #[tool(description = "Re-read the mandatory episodic memory protocol. Call this if you are unsure what Lore tool to use next.")]
+    #[tool(
+        description = "Re-read the mandatory episodic memory protocol. Call this if you are unsure what Lore tool to use next."
+    )]
     pub async fn get_protocol(&self) -> Result<CallToolResult, rmcp::Error> {
-        Ok(CallToolResult::success(vec![Content::text(Self::protocol_text())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            Self::protocol_text(),
+        )]))
     }
 }
 

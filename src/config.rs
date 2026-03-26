@@ -112,7 +112,10 @@ impl Config {
             retention_snapshots_days: parse_warn_or("RETENTION_SNAPSHOTS_DAYS", 7),
             retention_tasks_archive_days: parse_warn_or("RETENTION_TASKS_ARCHIVE_DAYS", 90),
             retention_unknown_days: parse_warn_or("RETENTION_UNKNOWN_DAYS", 7),
-            retention_pending_escalation_hours: parse_warn_or("RETENTION_PENDING_ESCALATION_HOURS", 72),
+            retention_pending_escalation_hours: parse_warn_or(
+                "RETENTION_PENDING_ESCALATION_HOURS",
+                72,
+            ),
 
             default_project_name: env::var("DEFAULT_PROJECT_NAME")
                 .unwrap_or_else(|_| "default".into()),

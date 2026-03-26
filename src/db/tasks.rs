@@ -121,12 +121,15 @@ pub async fn get_task_summaries(
     project_id: Uuid,
     statuses: &[TaskStatus],
 ) -> Result<Vec<TaskSummary>, sqlx::Error> {
-    let status_strs: Vec<String> = statuses.iter().map(|s| match s {
-        TaskStatus::Active => "active".into(),
-        TaskStatus::Completed => "completed".into(),
-        TaskStatus::Abandoned => "abandoned".into(),
-        TaskStatus::Blocked => "blocked".into(),
-    }).collect();
+    let status_strs: Vec<String> = statuses
+        .iter()
+        .map(|s| match s {
+            TaskStatus::Active => "active".into(),
+            TaskStatus::Completed => "completed".into(),
+            TaskStatus::Abandoned => "abandoned".into(),
+            TaskStatus::Blocked => "blocked".into(),
+        })
+        .collect();
 
     sqlx::query_as(
         "SELECT t.id, t.description, t.status, t.created_at, \

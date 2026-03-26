@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio transport with PostgreSQL + pgvector. 18 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio transport with PostgreSQL + pgvector. 19 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -22,7 +22,8 @@ Server runs on stdio transport with PostgreSQL + pgvector. 18 MCP tools implemen
 | 12 | HNSW indexes, BM25 hybrid search (RRF), LRU cache (`moka`) | PR #10, #11 |
 | 13 | AI protocol enforcement: nudges, `get_protocol` tool | Done |
 | 14 | Unknown outcome variant + stale pending escalation + retention | Done |
-| 15 | Auto-project detection from cwd, input validation, `update_rule`, `list_tasks`, `abandon_task`, `get_next_steps` cold-start briefing | In progress |
+| 15 | Auto-project detection, input validation, `update_rule`, `list_tasks`, `abandon_task`, `get_next_steps` | PR #13 |
+| 16 | Markdown export format, `get_task_stats` analytics tool | In progress |
 
 ---
 
@@ -33,14 +34,12 @@ Server runs on stdio transport with PostgreSQL + pgvector. 18 MCP tools implemen
 | Task | Notes |
 |------|-------|
 | **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
-| **Markdown export** | Add markdown format to `export_memory` |
 | **SSE transport** | Enable remote MCP connections (HTTP+SSE or Streamable HTTP) |
 
 ### Medium
 
 | Task | Notes |
 |------|-------|
-| **Task analytics** | `get_task_stats` — attempt count, rejection rate, avg time-to-resolution |
 | **Context snapshots** | Wire into `get_active_context` to track context wipes |
 | **Intelligent decay** | Auto-consolidate old accepted attempts into lessons |
 | **Local ONNX embedding** | Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings |

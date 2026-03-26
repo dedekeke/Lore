@@ -123,7 +123,8 @@ All settings via environment variables (see `.env.example`):
 |----------------------|------------------------------------------------------------|
 | `get_active_context` | Resume packet: current task, recent attempts, active rules |
 | `switch_project`     | Switch project scope (creates if not exists)               |
-| `export_memory`      | Export all memory as JSON                                  |
+| `get_task_stats`     | Task analytics: attempt counts, rejection rate, resolution |
+| `export_memory`      | Export all memory as JSON or markdown                      |
 | `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
 | `update_rule`        | Update an existing rule's category and/or content          |

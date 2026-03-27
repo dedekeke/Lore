@@ -132,7 +132,7 @@ All settings via environment variables (see `.env.example`):
 
 ## MCP Client Configuration
 
-Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`):
+Add to your MCP client config. For Claude Code, create `.mcp.json` in your project root:
 
 ```json
 {
@@ -140,12 +140,20 @@ Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`)
     "lore": {
       "command": "/path/to/lore",
       "env": {
-        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory"
+        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory",
+        "EMBEDDING_PROVIDER": "gemini",
+        "GEMINI_API_KEY": "your-api-key",
+        "EMBEDDING_MODEL": "gemini-embedding-001",
+        "EMBEDDING_DIMENSIONS": "384"
       }
     }
   }
 }
 ```
+
+For Claude Desktop, use `claude_desktop_config.json` with the same structure.
+
+> **Important:** The binary loads `.env` from the current working directory via `dotenvy`, but MCP clients may launch it from a different directory. Always pass all required env vars explicitly in the MCP config to avoid falling back to defaults.
 
 ## Database Schema
 

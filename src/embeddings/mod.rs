@@ -105,6 +105,11 @@ fn create_gemini_provider(config: &Config) -> Result<AnyEmbeddingProvider, Embed
             )
         })?;
 
+    tracing::info!(
+        model = %config.embedding_model,
+        dimensions = config.embedding_dimensions,
+        "Creating Gemini embedding provider"
+    );
     let provider = gemini::GeminiEmbeddingProvider::new(
         api_key,
         &config.embedding_model,

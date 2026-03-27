@@ -9,7 +9,7 @@ async fn test_create_and_get_attempt() {
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
 
-    let aid = attempts::create_attempt(&pool, tid, "try X", Some("code"))
+    let aid = attempts::create_attempt(&pool, tid, "try X", Some("code"), None)
         .await
         .unwrap();
     let attempt = attempts::get_attempt(&pool, aid).await.unwrap().unwrap();
@@ -24,7 +24,7 @@ async fn test_log_outcome() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "try", None)
+    let aid = attempts::create_attempt(&pool, tid, "try", None, None)
         .await
         .unwrap();
 
@@ -53,10 +53,10 @@ async fn test_list_attempts_with_filter() {
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "try1", None)
+    let a1 = attempts::create_attempt(&pool, tid, "try1", None, None)
         .await
         .unwrap();
-    attempts::create_attempt(&pool, tid, "try2", None)
+    attempts::create_attempt(&pool, tid, "try2", None, None)
         .await
         .unwrap();
     attempts::log_outcome(&pool, a1, AttemptOutcome::Rejected, "nope", None, None)
@@ -78,10 +78,10 @@ async fn test_search_similar_failures() {
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "approach A", None)
+    let a1 = attempts::create_attempt(&pool, tid, "approach A", None, None)
         .await
         .unwrap();
-    let a2 = attempts::create_attempt(&pool, tid, "approach B", None)
+    let a2 = attempts::create_attempt(&pool, tid, "approach B", None, None)
         .await
         .unwrap();
 
@@ -110,7 +110,7 @@ async fn test_search_similar_failures() {
 
     // Search with vector close to emb1
     let query = vec![0.1_f32; 384];
-    let results = attempts::search_similar_failures(&pool, pid, &query, 5)
+    let results = attempts::search_similar_failures(&pool, Some(pid), &query, 5)
         .await
         .unwrap();
 

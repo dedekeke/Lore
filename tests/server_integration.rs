@@ -71,6 +71,7 @@ async fn test_full_task_lifecycle() {
             task_id.clone(),
             "try approach A".into(),
             Some("fn foo(){}".into()),
+            None,
         )
         .await
         .unwrap();

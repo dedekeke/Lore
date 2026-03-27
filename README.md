@@ -157,6 +157,28 @@ For Claude Desktop, use `claude_desktop_config.json` with the same structure.
 
 > **Important:** The binary loads `.env` from the current working directory via `dotenvy`, but MCP clients may launch it from a different directory. Always pass all required env vars explicitly in the MCP config to avoid falling back to defaults.
 
+### SSE Transport (Remote)
+
+To run Lore as a remote HTTP server instead of stdio:
+
+```bash
+MCP_TRANSPORT=sse MCP_SSE_PORT=3100 ./target/release/lore
+```
+
+Clients connect via SSE at `http://host:3100/sse` and post messages to `http://host:3100/message?sessionId=<id>`. Multiple clients can connect simultaneously — each SSE session gets its own server instance sharing the same database pool.
+
+For MCP clients that support SSE, configure the server URL instead of a command:
+
+```json
+{
+  "mcpServers": {
+    "lore": {
+      "url": "http://localhost:3100/sse"
+    }
+  }
+}
+```
+
 ## Database Schema
 
 Five tables in the `ai_memory` schema:

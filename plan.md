@@ -26,7 +26,11 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 16 | Markdown export format, `get_task_stats` analytics tool | PR #14 |
 | 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | PR #16 |
 | 18 | README env var docs, embedding debug logging | PR #17 |
-| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | In progress |
+| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | PR #18 |
+| 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | In progress |
+| 21 | MCP Resources: expose protocol and active-context as readable resources | In progress |
+| 22 | Cross-project search: find_similar_failures with cross_project flag | In progress |
+| 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | In progress |
 
 ---
 
@@ -36,8 +40,8 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 
 | Task | Notes |
 |------|-------|
-| **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
-| **SSE transport** | Enable remote MCP connections (HTTP+SSE or Streamable HTTP) |
+| **~~MCP Resources~~** | ~~Expose `active_context` and `protocol` as subscriptions~~ Done (phase 21) |
+| **~~SSE transport~~** | ~~Enable remote MCP connections (HTTP+SSE or Streamable HTTP)~~ Done (phase 20) |
 
 ### Medium
 
@@ -54,9 +58,9 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | Task | Notes |
 |------|-------|
 | Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
-| Cross-project search | `find_similar_failures` across all projects |
+| ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
 | Web dashboard | Lightweight UI to browse/edit the ledger |
-| Multi-agent support | Tag attempts with `agent_id` for multi-agent workflows |
+| ~~Multi-agent support~~ | ~~Tag attempts with `agent_id` for multi-agent workflows~~ Done (phase 23) |
 
 ---
 

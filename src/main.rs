@@ -1,6 +1,7 @@
-use lore::config::Config;
+use lore::config::{Config, McpTransport};
 use lore::{db, embeddings, server};
 use rmcp::ServiceExt;
+use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -54,20 +55,39 @@ async fn main() {
         config.clone(),
     ));
 
-    let server = server::LoreServer::new(pool, embeddings, config);
-    let transport = rmcp::transport::io::stdio();
+    let server = server::LoreServer::new(pool, embeddings, config.clone());
 
-    tracing::info!("Lore MCP server listening on stdio");
-    let handle = match server.serve(transport).await {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to start MCP transport");
-            std::process::exit(1);
+    match config.mcp_transport {
+        McpTransport::Stdio => {
+            let transport = rmcp::transport::io::stdio();
+            tracing::info!("Lore MCP server listening on stdio");
+            let handle = match server.serve(transport).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to start MCP transport");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = handle.waiting().await {
+                tracing::error!(error = %e, "MCP server terminated with error");
+            }
         }
-    };
-
-    if let Err(e) = handle.waiting().await {
-        tracing::error!(error = %e, "MCP server terminated with error");
+        McpTransport::Sse => {
+            let addr: SocketAddr = ([0, 0, 0, 0], config.mcp_sse_port).into();
+            tracing::info!(%addr, "Lore MCP server listening on SSE");
+            let sse_server = match rmcp::transport::sse_server::SseServer::serve(addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to bind SSE server");
+                    std::process::exit(1);
+                }
+            };
+            let ct = sse_server.with_service(move || server.clone());
+            // Block until ctrl-c
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Shutting down SSE server");
+            ct.cancel();
+        }
     }
     tracing::info!("Lore MCP server shut down");
 }

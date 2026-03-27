@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::{model::*, tool, ServerHandler};
+use rmcp::{model::*, service::RequestContext, tool, RoleServer, ServerHandler};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -386,6 +386,9 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional code snippet for the attempt")]
         code_snippet: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Optional agent identifier for multi-agent workflows")]
+        agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         if let Some(ref code) = code_snippet {
@@ -397,6 +400,7 @@ impl LoreServer {
             tid,
             &approach_summary,
             code_snippet.as_deref(),
+            agent_id.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -628,9 +632,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Max results (default 5)")]
         limit: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Search across all projects (default false)")]
+        cross_project: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("error_description", &error_description, 2048)?;
-        let project_id = self.project_id().await?;
+        let project_id = if cross_project.unwrap_or(false) {
+            None
+        } else {
+            Some(self.project_id().await?)
+        };
         let embedding = self.embed(&error_description).await?;
         let attempts = db::attempts::search_similar_failures(
             self.pool(),
@@ -957,8 +968,92 @@ impl ServerHandler for LoreServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(Self::protocol_text().into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
+        }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::Error> {
+        use rmcp::model::AnnotateAble;
+
+        Ok(ListResourcesResult {
+            resources: vec![
+                RawResource {
+                    uri: "lore://protocol".into(),
+                    name: "Lore Protocol".into(),
+                    description: Some("Mandatory episodic memory protocol rules".into()),
+                    mime_type: Some("text/plain".into()),
+                    size: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://active-context".into(),
+                    name: "Active Context".into(),
+                    description: Some(
+                        "Current project, active tasks, and context wipe count".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                }
+                .no_annotation(),
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, rmcp::Error> {
+        match request.uri.as_str() {
+            "lore://protocol" => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(
+                    Self::protocol_text(),
+                    "lore://protocol",
+                )],
+            }),
+            "lore://active-context" => {
+                let project_id = self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = *project_id {
+                    drop(project_id);
+                    let project = db::projects::get_project(self.pool(), pid)
+                        .await
+                        .ok()
+                        .flatten();
+                    let tasks: Vec<db::tasks::Task> = db::tasks::list_tasks(self.pool(), pid, None)
+                        .await
+                        .unwrap_or_default();
+                    let wipes = db::snapshots::count_snapshots(self.pool(), pid)
+                        .await
+                        .unwrap_or(0);
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "project": project,
+                        "active_tasks": tasks.iter()
+                            .filter(|t| t.status == db::TaskStatus::Active)
+                            .count(),
+                        "total_tasks": tasks.len(),
+                        "context_wipes": wipes,
+                    }))
+                    .unwrap_or_default()
+                } else {
+                    r#"{"project": null, "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://active-context")],
+                })
+            }
+            _ => Err(ErrorData::resource_not_found(
+                "Unknown resource URI",
+                Some(serde_json::Value::String(request.uri)),
+            )),
         }
     }
 }

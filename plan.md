@@ -24,7 +24,9 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 14 | Unknown outcome variant + stale pending escalation + retention | Done |
 | 15 | Auto-project detection, input validation, `update_rule`, `list_tasks`, `abandon_task`, `get_next_steps` | PR #13 |
 | 16 | Markdown export format, `get_task_stats` analytics tool | PR #14 |
-| 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | In progress |
+| 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | PR #16 |
+| 18 | README env var docs, embedding debug logging | PR #17 |
+| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | In progress |
 
 ---
 
@@ -42,10 +44,10 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | Task | Notes |
 |------|-------|
 | **~~Context snapshots~~** | ~~Wire into `get_active_context` to track context wipes~~ Done (phase 17) |
-| **Intelligent decay** | Auto-consolidate old accepted attempts into lessons |
+| **~~Intelligent decay~~** | ~~Auto-consolidate old accepted attempts into lessons~~ Done (phase 19) |
 | **Local ONNX embedding** | Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings |
 | **~~Rule deduplication~~** | ~~Detect cosine > 0.95 duplicates on insert, warn or merge~~ Done (phase 17) |
-| **Batch embedding on startup** | Re-embed stale rules/attempts missing embeddings |
+| **~~Batch embedding on startup~~** | ~~Re-embed stale rules/attempts missing embeddings~~ Done (phase 19) |
 
 ### Low
 

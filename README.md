@@ -84,6 +84,8 @@ All settings via environment variables (see `.env.example`):
 | `RETENTION_TASKS_ARCHIVE_DAYS`    | `90`                                                | Auto-delete completed tasks older than N days   |
 | `RETENTION_UNKNOWN_DAYS`          | `7`                                                 | Auto-delete unknown/stale attempts after N days |
 | `RETENTION_PENDING_ESCALATION_HOURS` | `72`                                             | Escalate pending attempts to unknown after N hours |
+| `DECAY_AFTER_DAYS`                | `14`                                                | Consolidate accepted attempts into lessons after N days |
+| `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.

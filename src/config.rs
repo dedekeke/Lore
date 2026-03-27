@@ -54,6 +54,8 @@ pub struct Config {
     pub retention_tasks_archive_days: u32,
     pub retention_unknown_days: u32,
     pub retention_pending_escalation_hours: u32,
+    pub decay_after_days: u32,
+    pub decay_min_accepted: i64,
 
     pub default_project_name: String,
 }
@@ -116,6 +118,8 @@ impl Config {
                 "RETENTION_PENDING_ESCALATION_HOURS",
                 72,
             ),
+            decay_after_days: parse_warn_or("DECAY_AFTER_DAYS", 14),
+            decay_min_accepted: parse_warn_or("DECAY_MIN_ACCEPTED", 2),
 
             default_project_name: env::var("DEFAULT_PROJECT_NAME")
                 .unwrap_or_else(|_| "default".into()),
@@ -165,6 +169,8 @@ mod tests {
             "RETENTION_TASKS_ARCHIVE_DAYS",
             "RETENTION_UNKNOWN_DAYS",
             "RETENTION_PENDING_ESCALATION_HOURS",
+            "DECAY_AFTER_DAYS",
+            "DECAY_MIN_ACCEPTED",
             "DEFAULT_PROJECT_NAME",
         ] {
             std::env::remove_var(key);

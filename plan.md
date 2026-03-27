@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -27,10 +27,10 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | PR #16 |
 | 18 | README env var docs, embedding debug logging | PR #17 |
 | 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | PR #18 |
-| 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | In progress |
-| 21 | MCP Resources: expose protocol and active-context as readable resources | In progress |
-| 22 | Cross-project search: find_similar_failures with cross_project flag | In progress |
-| 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | In progress |
+| 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | PR #19 |
+| 21 | MCP Resources: expose protocol and active-context as readable resources | PR #19 |
+| 22 | Cross-project search: find_similar_failures with cross_project flag | PR #19 |
+| 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
 
 ---
 

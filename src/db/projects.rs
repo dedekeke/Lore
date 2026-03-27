@@ -71,6 +71,34 @@ pub async fn get_or_create_project(
     Ok(row.0)
 }
 
+/// Upsert by root_path: find existing project or create one using the directory name.
+pub async fn get_or_create_project_by_path(
+    pool: &PgPool,
+    root_path: &str,
+) -> Result<(Uuid, String), sqlx::Error> {
+    if let Some(project) = get_project_by_root_path(pool, root_path).await? {
+        return Ok((project.id, project.name));
+    }
+    let name = std::path::Path::new(root_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let id = get_or_create_project(pool, &name, root_path).await?;
+    Ok((id, name))
+}
+
+pub async fn get_project_by_root_path(
+    pool: &PgPool,
+    root_path: &str,
+) -> Result<Option<Project>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, name, root_path, created_at FROM ai_memory.projects WHERE root_path = $1",
+    )
+    .bind(root_path)
+    .fetch_optional(pool)
+    .await
+}
+
 #[allow(dead_code)]
 pub async fn delete_project(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.projects WHERE id = $1")

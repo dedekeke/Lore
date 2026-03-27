@@ -43,6 +43,7 @@ impl GeminiEmbeddingProvider {
     }
 
     async fn request_embedding(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        tracing::debug!(url = %self.embed_url(), model = %self.model, "Gemini embed request");
         let body = EmbedContentRequest {
             content: Content {
                 parts: vec![Part {

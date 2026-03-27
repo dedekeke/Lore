@@ -41,6 +41,14 @@ async fn main() {
         }
     };
 
+    // Background: batch backfill NULL embeddings
+    if let Ok(batch_provider) = embeddings::create_provider(&config) {
+        tokio::spawn(lore::batch_embed::backfill_embeddings(
+            pool.clone(),
+            batch_provider,
+        ));
+    }
+
     tokio::spawn(db::retention::run_retention_loop(
         pool.clone(),
         config.clone(),

@@ -25,8 +25,6 @@ After a context wipe, the AI queries the ledger and gets a dense summary of past
 
 **Option A: Local PostgreSQL** 
 
-If you have PostgreSQL installed locally (e.g. via Homebrew, apt, etc.):
-
 ```bash
 # Create user and database
 psql postgres -c "CREATE USER lore WITH PASSWORD 'password';"
@@ -86,6 +84,8 @@ All settings via environment variables (see `.env.example`):
 | `RETENTION_TASKS_ARCHIVE_DAYS`    | `90`                                                | Auto-delete completed tasks older than N days   |
 | `RETENTION_UNKNOWN_DAYS`          | `7`                                                 | Auto-delete unknown/stale attempts after N days |
 | `RETENTION_PENDING_ESCALATION_HOURS` | `72`                                             | Escalate pending attempts to unknown after N hours |
+| `DECAY_AFTER_DAYS`                | `14`                                                | Consolidate accepted attempts into lessons after N days |
+| `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
@@ -96,7 +96,7 @@ All settings via environment variables (see `.env.example`):
 
 | Tool            | Description                                                                 |
 |-----------------|-----------------------------------------------------------------------------|
-| `remember_rule` | Store a semantic rule (preference, fact, constraint, lesson) with embedding |
+| `remember_rule` | Store a rule with embedding (warns on cosine > 0.95 duplicates)            |
 | `recall_rules`  | Vector similarity search for relevant rules                                 |
 | `forget_rule`   | Delete a rule                                                               |
 | `list_rules`    | List all rules, optionally filtered by category                             |
@@ -110,6 +110,8 @@ All settings via environment variables (see `.env.example`):
 | `log_outcome`     | Record what happened (accepted/rejected) and why                 |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
 | `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
+| `abandon_task`    | Abandon a task with reason, optionally saving as lesson          |
+| `list_tasks`      | List tasks for current project, optionally filtered by status    |
 
 ### Search
 
@@ -121,14 +123,18 @@ All settings via environment variables (see `.env.example`):
 
 | Tool                 | Description                                                |
 |----------------------|------------------------------------------------------------|
-| `get_active_context` | Resume packet: current task, recent attempts, active rules |
+| `get_active_context` | Resume packet: current task, attempts, wipe count          |
+| `log_context_wipe`   | Record a context window exhaustion event                   |
 | `switch_project`     | Switch project scope (creates if not exists)               |
-| `export_memory`      | Export all memory as JSON                                  |
+| `get_task_stats`     | Task analytics: attempt counts, rejection rate, resolution |
+| `export_memory`      | Export all memory as JSON or markdown                      |
+| `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
+| `update_rule`        | Update an existing rule's category and/or content          |
 
 ## MCP Client Configuration
 
-Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`):
+Add to your MCP client config. For Claude Code, create `.mcp.json` in your project root:
 
 ```json
 {
@@ -136,12 +142,20 @@ Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`)
     "lore": {
       "command": "/path/to/lore",
       "env": {
-        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory"
+        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory",
+        "EMBEDDING_PROVIDER": "gemini",
+        "GEMINI_API_KEY": "your-api-key",
+        "EMBEDDING_MODEL": "gemini-embedding-001",
+        "EMBEDDING_DIMENSIONS": "384"
       }
     }
   }
 }
 ```
+
+For Claude Desktop, use `claude_desktop_config.json` with the same structure.
+
+> **Important:** The binary loads `.env` from the current working directory via `dotenvy`, but MCP clients may launch it from a different directory. Always pass all required env vars explicitly in the MCP config to avoid falling back to defaults.
 
 ## Database Schema
 

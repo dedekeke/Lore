@@ -386,6 +386,9 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional code snippet for the attempt")]
         code_snippet: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Optional agent identifier for multi-agent workflows")]
+        agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         if let Some(ref code) = code_snippet {
@@ -397,6 +400,7 @@ impl LoreServer {
             tid,
             &approach_summary,
             code_snippet.as_deref(),
+            agent_id.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;

@@ -628,9 +628,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Max results (default 5)")]
         limit: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Search across all projects (default false)")]
+        cross_project: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("error_description", &error_description, 2048)?;
-        let project_id = self.project_id().await?;
+        let project_id = if cross_project.unwrap_or(false) {
+            None
+        } else {
+            Some(self.project_id().await?)
+        };
         let embedding = self.embed(&error_description).await?;
         let attempts = db::attempts::search_similar_failures(
             self.pool(),

@@ -29,6 +29,7 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | PR #18 |
 | 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | In progress |
 | 21 | MCP Resources: expose protocol and active-context as readable resources | In progress |
+| 22 | Cross-project search: find_similar_failures with cross_project flag | In progress |
 
 ---
 
@@ -56,7 +57,7 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | Task | Notes |
 |------|-------|
 | Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
-| Cross-project search | `find_similar_failures` across all projects |
+| ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
 | Web dashboard | Lightweight UI to browse/edit the ledger |
 | Multi-agent support | Tag attempts with `agent_id` for multi-agent workflows |
 

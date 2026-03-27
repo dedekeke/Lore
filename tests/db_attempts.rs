@@ -110,7 +110,7 @@ async fn test_search_similar_failures() {
 
     // Search with vector close to emb1
     let query = vec![0.1_f32; 384];
-    let results = attempts::search_similar_failures(&pool, pid, &query, 5)
+    let results = attempts::search_similar_failures(&pool, Some(pid), &query, 5)
         .await
         .unwrap();
 

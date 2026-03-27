@@ -8,7 +8,7 @@ default = ["local-embeddings"]
 local-embeddings = ["dep:fastembed"]
 
 [dependencies]
-rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server", "macros"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

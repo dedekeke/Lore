@@ -26,7 +26,8 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 16 | Markdown export format, `get_task_stats` analytics tool | PR #14 |
 | 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | PR #16 |
 | 18 | README env var docs, embedding debug logging | PR #17 |
-| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | In progress |
+| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | PR #18 |
+| 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | In progress |
 
 ---
 
@@ -37,7 +38,7 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | Task | Notes |
 |------|-------|
 | **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
-| **SSE transport** | Enable remote MCP connections (HTTP+SSE or Streamable HTTP) |
+| **~~SSE transport~~** | ~~Enable remote MCP connections (HTTP+SSE or Streamable HTTP)~~ Done (phase 20) |
 
 ### Medium
 

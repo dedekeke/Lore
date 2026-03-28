@@ -7,7 +7,7 @@ async fn test_prune_old_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None, None)
         .await
         .unwrap();
 

@@ -31,6 +31,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 | 21 | MCP Resources: expose protocol and active-context as readable resources | PR #19 |
 | 22 | Cross-project search: find_similar_failures with cross_project flag | PR #19 |
 | 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
+| 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | In progress |
 
 ---
 
@@ -57,7 +58,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 
 | Task | Notes |
 |------|-------|
-| Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
+| ~~Git checkpointing~~ | ~~Tie `attempt_id` to git stash/commit for rollback~~ Done (phase 24) |
 | ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
 | Web dashboard | Lightweight UI to browse/edit the ledger |
 | ~~Multi-agent support~~ | ~~Tag attempts with `agent_id` for multi-agent workflows~~ Done (phase 23) |

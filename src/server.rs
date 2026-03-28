@@ -85,6 +85,28 @@ impl LoreServer {
         Ok(result)
     }
 
+    /// Capture current git HEAD commit hash for the project's root_path
+    async fn capture_git_ref(&self) -> Option<String> {
+        let pid = self.inner.current_project_id.read().await;
+        let project_id = (*pid)?;
+        drop(pid);
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .ok()
+            .flatten()?;
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&project.root_path)
+            .output()
+            .await
+            .ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            None
+        }
+    }
+
     fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
         match s.to_lowercase().as_str() {
             "preference" => Ok(db::RuleCategory::Preference),
@@ -395,17 +417,23 @@ impl LoreServer {
             Self::validate_len("code_snippet", code, 32768)?;
         }
         let tid = Self::parse_uuid(&task_id)?;
+        let git_ref = self.capture_git_ref().await;
         let id = db::attempts::create_attempt(
             self.pool(),
             tid,
             &approach_summary,
             code_snippet.as_deref(),
             agent_id.as_deref(),
+            git_ref.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
+        let mut result = serde_json::json!({ "attempt_id": id.to_string() });
+        if let Some(ref gr) = git_ref {
+            result["git_checkpoint"] = serde_json::Value::String(gr.clone());
+        }
         Self::json_content_with_nudge(
-            &serde_json::json!({ "attempt_id": id.to_string() }),
+            &result,
             "Attempt logged. Present the code to the user and WAIT for their feedback. Do NOT auto-accept. Call log_outcome only after the user confirms success ('accepted') or reports failure ('rejected').",
         )
     }

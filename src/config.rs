@@ -243,7 +243,10 @@ mod tests {
     fn test_disabled_tools_parsing() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_env();
-        std::env::set_var("DISABLED_TOOLS", "forget_rule, export_memory , log_context_wipe");
+        std::env::set_var(
+            "DISABLED_TOOLS",
+            "forget_rule, export_memory , log_context_wipe",
+        );
 
         let cfg = Config::from_env();
         assert_eq!(cfg.disabled_tools.len(), 3);

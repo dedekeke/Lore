@@ -1226,8 +1226,7 @@ impl ServerHandler for LoreServer {
                 Some(serde_json::json!({ "tool": request.name })),
             ));
         }
-        let context =
-            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let context = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         Self::tool_box().call(context).await
     }
 }
@@ -1300,7 +1299,11 @@ mod tests {
     #[test]
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
-        assert!(tools.len() >= 21, "Expected at least 21 tools, got {}", tools.len());
+        assert!(
+            tools.len() >= 21,
+            "Expected at least 21 tools, got {}",
+            tools.len()
+        );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"remember_rule"));
         assert!(names.contains(&"forget_rule"));
@@ -1310,8 +1313,10 @@ mod tests {
     #[test]
     fn test_disabled_tools_filter() {
         let all = LoreServer::tool_box().list();
-        let disabled: std::collections::HashSet<String> =
-            ["forget_rule", "export_memory"].iter().map(|s| s.to_string()).collect();
+        let disabled: std::collections::HashSet<String> = ["forget_rule", "export_memory"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let filtered: Vec<_> = all
             .into_iter()
             .filter(|t| !disabled.contains(t.name.as_ref()))

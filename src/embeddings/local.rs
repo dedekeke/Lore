@@ -7,8 +7,7 @@ use ort::value::TensorRef;
 
 use super::{EmbeddingError, EmbeddingProvider};
 
-const HF_BASE: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
+const HF_BASE: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
 
 pub struct LocalEmbeddingProvider {
     session: Arc<Mutex<Session>>,
@@ -189,10 +188,7 @@ fn mean_pool(token_embeddings: ArrayView3<f32>, attention_mask: &Array2<i64>) ->
 }
 
 fn l2_normalize(embeddings: Array2<f32>) -> Array2<f32> {
-    let norms = embeddings
-        .mapv(|x| x * x)
-        .sum_axis(Axis(1))
-        .mapv(f32::sqrt);
+    let norms = embeddings.mapv(|x| x * x).sum_axis(Axis(1)).mapv(f32::sqrt);
     let norms = norms.insert_axis(Axis(1));
     let norms = norms.broadcast(embeddings.dim()).unwrap().to_owned();
     embeddings / norms

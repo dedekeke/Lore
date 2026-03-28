@@ -59,6 +59,9 @@ pub struct Config {
     pub disabled_tools: HashSet<String>,
     pub context_warn_bytes: u64,
     pub context_critical_bytes: u64,
+    pub webhook_url: Option<String>,
+    pub webhook_events: HashSet<String>,
+    pub webhook_rejection_threshold: u32,
 }
 
 impl Config {
@@ -135,6 +138,15 @@ impl Config {
             // ~80KB = warning, ~150KB = critical (conservative defaults for 128K context models)
             context_warn_bytes: parse_warn_or("CONTEXT_WARN_BYTES", 80_000),
             context_critical_bytes: parse_warn_or("CONTEXT_CRITICAL_BYTES", 150_000),
+
+            webhook_url: env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+            webhook_events: env::var("WEBHOOK_EVENTS")
+                .unwrap_or_else(|_| "task_completed,task_abandoned,rejection_threshold".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            webhook_rejection_threshold: parse_warn_or("WEBHOOK_REJECTION_THRESHOLD", 3),
         }
     }
 }
@@ -187,6 +199,9 @@ mod tests {
             "DISABLED_TOOLS",
             "CONTEXT_WARN_BYTES",
             "CONTEXT_CRITICAL_BYTES",
+            "WEBHOOK_URL",
+            "WEBHOOK_EVENTS",
+            "WEBHOOK_REJECTION_THRESHOLD",
         ] {
             std::env::remove_var(key);
         }

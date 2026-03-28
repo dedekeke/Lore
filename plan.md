@@ -35,7 +35,9 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
 | 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
 | 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
-| 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | In progress |
+| 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | PR #25 |
+| 29 | Fix context counter reset: only reset on true session boundaries | PR #26 |
+| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | In progress |
 
 ---
 
@@ -83,9 +85,9 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 
 ~~Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.~~ Done (phase 27)
 
-### Webhook Notifications
+### ~~Webhook Notifications~~
 
-Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.
+~~Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.~~ Done (phase 30)
 
 ### Architecture Reference
 

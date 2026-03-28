@@ -34,7 +34,8 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | PR #20 |
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
 | 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
-| 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | In progress |
+| 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
+| 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | In progress |
 
 ---
 

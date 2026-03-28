@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -32,6 +32,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 | 22 | Cross-project search: find_similar_failures with cross_project flag | PR #19 |
 | 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
 | 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | In progress |
+| 25 | Conversation handoff: generate_handoff tool for seamless session transitions | In progress |
 
 ---
 
@@ -71,9 +72,9 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 
 Classify attempts by relevance to active task. Schema additions: `description_embedding` on tasks, `interaction_type` enum + `relevance_score` on attempts. Resume packet filters to `task_aligned` + `clarification` only.
 
-### Conversation Handoff Protocol
+### ~~Conversation Handoff Protocol~~
 
-When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.
+~~When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.~~ Done (phase 25)
 
 ### Configurable Tool Visibility
 

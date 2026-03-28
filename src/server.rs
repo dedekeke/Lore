@@ -989,6 +989,115 @@ impl LoreServer {
             Self::protocol_text(),
         )]))
     }
+
+    #[tool(
+        description = "Generate a handoff packet for session transitions. Call this before context exhaustion to create a dense briefing that the next session can ingest via get_next_steps. Automatically logs a context wipe event."
+    )]
+    pub async fn generate_handoff(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Approximate token count consumed in current session")]
+        token_count: Option<i32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        use std::fmt::Write;
+        let project_id = self.project_id().await?;
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+
+        let active_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                .await
+                .map_err(Self::db_err)?;
+        let blocked_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                .await
+                .map_err(Self::db_err)?;
+
+        let mut md = String::new();
+        let name = project
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("Unknown");
+        writeln!(md, "# Handoff Packet — {name}\n").unwrap();
+
+        // Active tasks with recent attempts
+        if !active_tasks.is_empty() {
+            writeln!(md, "## Active Tasks\n").unwrap();
+            for t in &active_tasks {
+                writeln!(md, "### {}\n- **ID:** `{}`", t.description, t.id).unwrap();
+                let attempts = db::attempts::list_attempts(self.pool(), t.id, None)
+                    .await
+                    .unwrap_or_default();
+                let recent: Vec<_> = attempts.iter().rev().take(5).collect();
+                if !recent.is_empty() {
+                    writeln!(md, "- **Recent attempts:**").unwrap();
+                    for a in recent.iter().rev() {
+                        let outcome = format!("{:?}", a.outcome).to_lowercase();
+                        let summary = if a.reasoning.is_empty() {
+                            a.approach_summary.clone()
+                        } else {
+                            format!("{}: {}", a.approach_summary, a.reasoning)
+                        };
+                        let git = a
+                            .git_ref
+                            .as_deref()
+                            .map(|g| format!(" @ {g}"))
+                            .unwrap_or_default();
+                        writeln!(md, "  - [{outcome}] {summary}{git}").unwrap();
+                    }
+                }
+                writeln!(md).unwrap();
+            }
+        }
+
+        // Blocked tasks
+        if !blocked_tasks.is_empty() {
+            writeln!(md, "## Blocked Tasks\n").unwrap();
+            for t in &blocked_tasks {
+                writeln!(md, "- `{}`: {}", t.id, t.description).unwrap();
+            }
+            writeln!(md).unwrap();
+        }
+
+        // Recent lessons
+        let lessons =
+            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
+                .await
+                .unwrap_or_default();
+        let recent_lessons: Vec<_> = lessons.iter().rev().take(5).collect();
+        if !recent_lessons.is_empty() {
+            writeln!(md, "## Recent Lessons\n").unwrap();
+            for l in recent_lessons.iter().rev() {
+                let preview: String = l.content.chars().take(200).collect();
+                writeln!(md, "- {preview}").unwrap();
+            }
+            writeln!(md).unwrap();
+        }
+
+        // Log context wipe if there's an active task
+        if let Some(task) = active_tasks.first() {
+            let last_attempt = db::attempts::list_attempts(self.pool(), task.id, None)
+                .await
+                .ok()
+                .and_then(|a| a.last().map(|a| a.id));
+            let _ = db::snapshots::create_snapshot(
+                self.pool(),
+                task.id,
+                token_count.unwrap_or(0),
+                last_attempt,
+            )
+            .await;
+        }
+
+        writeln!(
+            md,
+            "---\n*Handoff generated. Next session: call `get_next_steps()` to resume.*"
+        )
+        .unwrap();
+
+        Ok(CallToolResult::success(vec![Content::text(md)]))
+    }
 }
 
 #[tool(tool_box)]

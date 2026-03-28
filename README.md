@@ -131,6 +131,7 @@ All settings via environment variables (see `.env.example`):
 | `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
 | `update_rule`        | Update an existing rule's category and/or content          |
+| `generate_handoff`   | Dense handoff packet for session transitions (auto-logs wipe) |
 
 ## MCP Resources
 

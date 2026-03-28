@@ -34,6 +34,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | PR #20 |
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
 | 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
+| 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | In progress |
 
 ---
 
@@ -77,9 +78,9 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 
 ~~When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.~~ Done (phase 25)
 
-### Configurable Tool Visibility
+### ~~Configurable Tool Visibility~~
 
-Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.
+~~Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.~~ Done (phase 27)
 
 ### Webhook Notifications
 

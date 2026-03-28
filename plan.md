@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -31,7 +31,9 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 | 21 | MCP Resources: expose protocol and active-context as readable resources | PR #19 |
 | 22 | Cross-project search: find_similar_failures with cross_project flag | PR #19 |
 | 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
-| 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | In progress |
+| 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | PR #20 |
+| 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
+| 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | In progress |
 
 ---
 
@@ -50,7 +52,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 20 MCP tools +
 |------|-------|
 | **~~Context snapshots~~** | ~~Wire into `get_active_context` to track context wipes~~ Done (phase 17) |
 | **~~Intelligent decay~~** | ~~Auto-consolidate old accepted attempts into lessons~~ Done (phase 19) |
-| **Local ONNX embedding** | Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings |
+| **~~Local ONNX embedding~~** | ~~Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings~~ Done (phase 26) |
 | **~~Rule deduplication~~** | ~~Detect cosine > 0.95 duplicates on insert, warn or merge~~ Done (phase 17) |
 | **~~Batch embedding on startup~~** | ~~Re-embed stale rules/attempts missing embeddings~~ Done (phase 19) |
 

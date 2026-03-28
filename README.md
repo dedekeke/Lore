@@ -55,7 +55,7 @@ cargo build --release
 
 ### Without local embeddings
 
-To skip the fastembed dependency (smaller binary, faster build):
+To skip the local ONNX runtime dependency (smaller binary, faster build):
 
 ```bash
 cargo build --release --no-default-features
@@ -72,7 +72,7 @@ All settings via environment variables (see `.env.example`):
 | `DATABASE_URL`                    | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string                    |
 | `DATABASE_MAX_CONNECTIONS`        | `10`                                                | Connection pool size                            |
 | `DATABASE_STATEMENT_TIMEOUT_SECS` | `5`                                                 | Per-query timeout                               |
-| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (fastembed) or `gemini`                 |
+| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (ONNX via ort) or `gemini`              |
 | `GEMINI_API_KEY`                  | —                                                   | Required when provider is `gemini`              |
 | `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Embedding model name                            |
 | `EMBEDDING_DIMENSIONS`            | `384`                                               | Must match model and DB schema                  |

@@ -87,6 +87,7 @@ All settings via environment variables (see `.env.example`):
 | `DECAY_AFTER_DAYS`                | `14`                                                | Consolidate accepted attempts into lessons after N days |
 | `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
+| `DISABLED_TOOLS`                  | —                                                   | Comma-separated tool names to hide and reject   |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 

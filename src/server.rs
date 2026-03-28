@@ -1100,7 +1100,6 @@ impl LoreServer {
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for LoreServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -1193,6 +1192,44 @@ impl ServerHandler for LoreServer {
             )),
         }
     }
+
+    async fn list_tools(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::Error> {
+        let disabled = &self.config().disabled_tools;
+        let tools = if disabled.is_empty() {
+            Self::tool_box().list()
+        } else {
+            Self::tool_box()
+                .list()
+                .into_iter()
+                .filter(|t| !disabled.contains(t.name.as_ref()))
+                .collect()
+        };
+        Ok(ListToolsResult {
+            next_cursor: None,
+            tools,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let disabled = &self.config().disabled_tools;
+        if disabled.contains(request.name.as_ref()) {
+            return Err(ErrorData::invalid_params(
+                "Tool is disabled via DISABLED_TOOLS config",
+                Some(serde_json::json!({ "tool": request.name })),
+            ));
+        }
+        let context =
+            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_box().call(context).await
+    }
 }
 
 #[cfg(test)]
@@ -1258,5 +1295,30 @@ mod tests {
     fn test_validate_len_exceeds() {
         let long = "x".repeat(5000);
         assert!(LoreServer::validate_len("f", &long, 4096).is_err());
+    }
+
+    #[test]
+    fn test_tool_box_lists_all_tools() {
+        let tools = LoreServer::tool_box().list();
+        assert!(tools.len() >= 21, "Expected at least 21 tools, got {}", tools.len());
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"remember_rule"));
+        assert!(names.contains(&"forget_rule"));
+        assert!(names.contains(&"generate_handoff"));
+    }
+
+    #[test]
+    fn test_disabled_tools_filter() {
+        let all = LoreServer::tool_box().list();
+        let disabled: std::collections::HashSet<String> =
+            ["forget_rule", "export_memory"].iter().map(|s| s.to_string()).collect();
+        let filtered: Vec<_> = all
+            .into_iter()
+            .filter(|t| !disabled.contains(t.name.as_ref()))
+            .collect();
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_ref()).collect();
+        assert!(!names.contains(&"forget_rule"));
+        assert!(!names.contains(&"export_memory"));
+        assert!(names.contains(&"remember_rule"));
     }
 }

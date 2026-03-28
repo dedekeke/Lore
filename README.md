@@ -106,7 +106,7 @@ All settings via environment variables (see `.env.example`):
 | Tool              | Description                                                      |
 |-------------------|------------------------------------------------------------------|
 | `start_task`      | Create a new task (supports subtask hierarchies)                 |
-| `propose_attempt` | Log an approach before executing it                              |
+| `propose_attempt` | Log an approach before executing it (auto-captures git HEAD)     |
 | `log_outcome`     | Record what happened (accepted/rejected) and why                 |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
 | `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
@@ -117,7 +117,7 @@ All settings via environment variables (see `.env.example`):
 
 | Tool                    | Description                                     |
 |-------------------------|-------------------------------------------------|
-| `find_similar_failures` | Semantic search across past rejection reasoning |
+| `find_similar_failures` | Semantic search across past rejection reasoning (supports cross-project) |
 
 ### System
 
@@ -131,6 +131,13 @@ All settings via environment variables (see `.env.example`):
 | `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
 | `update_rule`        | Update an existing rule's category and/or content          |
+
+## MCP Resources
+
+| Resource URI            | Description                                              |
+|-------------------------|----------------------------------------------------------|
+| `lore://protocol`       | Mandatory episodic memory protocol rules (text/plain)    |
+| `lore://active-context` | Current project, active tasks, wipe count (JSON)         |
 
 ## MCP Client Configuration
 

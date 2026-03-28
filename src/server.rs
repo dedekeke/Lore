@@ -1322,10 +1322,8 @@ impl ServerHandler for LoreServer {
         }
 
         // Reset counters on session-boundary tools
-        let is_session_boundary = matches!(
-            request.name.as_ref(),
-            "get_next_steps" | "get_active_context" | "switch_project"
-        );
+        let is_session_boundary =
+            matches!(request.name.as_ref(), "get_next_steps" | "switch_project");
         if is_session_boundary {
             self.reset_context_counters();
         }

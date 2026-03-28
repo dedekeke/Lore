@@ -33,7 +33,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
 | 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | PR #20 |
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
-| 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | In progress |
+| 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
 
 ---
 
@@ -73,9 +73,9 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 
 Classify attempts by relevance to active task. Schema additions: `description_embedding` on tasks, `interaction_type` enum + `relevance_score` on attempts. Resume packet filters to `task_aligned` + `clarification` only.
 
-### Conversation Handoff Protocol
+### ~~Conversation Handoff Protocol~~
 
-When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.
+~~When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.~~ Done (phase 25)
 
 ### Configurable Tool Visibility
 

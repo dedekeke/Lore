@@ -57,6 +57,8 @@ pub struct Config {
 
     pub default_project_name: String,
     pub disabled_tools: HashSet<String>,
+    pub context_warn_bytes: u64,
+    pub context_critical_bytes: u64,
 }
 
 impl Config {
@@ -129,6 +131,10 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+
+            // ~80KB = warning, ~150KB = critical (conservative defaults for 128K context models)
+            context_warn_bytes: parse_warn_or("CONTEXT_WARN_BYTES", 80_000),
+            context_critical_bytes: parse_warn_or("CONTEXT_CRITICAL_BYTES", 150_000),
         }
     }
 }
@@ -179,6 +185,8 @@ mod tests {
             "DECAY_MIN_ACCEPTED",
             "DEFAULT_PROJECT_NAME",
             "DISABLED_TOOLS",
+            "CONTEXT_WARN_BYTES",
+            "CONTEXT_CRITICAL_BYTES",
         ] {
             std::env::remove_var(key);
         }
@@ -197,6 +205,8 @@ mod tests {
         assert_eq!(cfg.retention_attempts_days, 30);
         assert_eq!(cfg.default_project_name, "default");
         assert!(cfg.disabled_tools.is_empty());
+        assert_eq!(cfg.context_warn_bytes, 80_000);
+        assert_eq!(cfg.context_critical_bytes, 150_000);
     }
 
     #[test]

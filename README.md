@@ -88,6 +88,8 @@ All settings via environment variables (see `.env.example`):
 | `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 | `DISABLED_TOOLS`                  | —                                                   | Comma-separated tool names to hide and reject   |
+| `CONTEXT_WARN_BYTES`              | `80000`                                             | Warn AI to handoff at this cumulative response size |
+| `CONTEXT_CRITICAL_BYTES`          | `150000`                                            | Auto-snapshot and urgent nudge at this threshold |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 

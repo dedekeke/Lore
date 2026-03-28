@@ -90,6 +90,9 @@ All settings via environment variables (see `.env.example`):
 | `DISABLED_TOOLS`                  | —                                                   | Comma-separated tool names to hide and reject   |
 | `CONTEXT_WARN_BYTES`              | `80000`                                             | Warn AI to handoff at this cumulative response size |
 | `CONTEXT_CRITICAL_BYTES`          | `150000`                                            | Auto-snapshot and urgent nudge at this threshold |
+| `WEBHOOK_URL`                     | —                                                   | HTTP endpoint for event notifications           |
+| `WEBHOOK_EVENTS`                  | `task_completed,task_abandoned,rejection_threshold`  | Comma-separated event types to fire             |
+| `WEBHOOK_REJECTION_THRESHOLD`     | `3`                                                 | Fire webhook after N rejections on same task    |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 

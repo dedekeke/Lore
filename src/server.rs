@@ -10,6 +10,7 @@ use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
+use crate::webhooks;
 
 #[derive(Clone)]
 pub struct LoreServer {
@@ -174,6 +175,13 @@ impl LoreServer {
 
     fn db_err(e: sqlx::Error) -> rmcp::Error {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
+    }
+
+    fn fire_webhook(&self, event: &str, data: serde_json::Value) {
+        if let Some(url) = &self.config().webhook_url {
+            let project = self.config().default_project_name.clone();
+            webhooks::fire(url, &self.config().webhook_events, event, &project, data);
+        }
     }
 
     fn reset_context_counters(&self) {
@@ -558,6 +566,30 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
+        // Check rejection threshold for webhook
+        if out == db::AttemptOutcome::Rejected {
+            if let Ok(Some(attempt)) = db::attempts::get_attempt(self.pool(), aid).await {
+                let rejected = db::attempts::list_attempts(
+                    self.pool(),
+                    attempt.task_id,
+                    Some(db::AttemptOutcome::Rejected),
+                )
+                .await
+                .unwrap_or_default();
+                let threshold = self.config().webhook_rejection_threshold as usize;
+                if rejected.len() == threshold {
+                    self.fire_webhook(
+                        "rejection_threshold",
+                        serde_json::json!({
+                            "task_id": attempt.task_id,
+                            "rejection_count": rejected.len(),
+                            "latest_reasoning": reasoning,
+                        }),
+                    );
+                }
+            }
+        }
+
         let nudge = match out {
             db::AttemptOutcome::Rejected => {
                 "Outcome logged. Next: call review_ledger(task_id) to review all past failures, then propose_attempt with a new approach."
@@ -629,6 +661,13 @@ impl LoreServer {
             }
         }
 
+        if success {
+            self.fire_webhook(
+                "task_completed",
+                serde_json::json!({ "task_id": task_id, "lesson": lesson }),
+            );
+        }
+
         Self::json_content_with_nudge(
             &serde_json::json!({ "success": success }),
             "Task closed. For your next goal, call start_task(description).",
@@ -666,6 +705,13 @@ impl LoreServer {
             )
             .await
             .map_err(Self::db_err)?;
+        }
+
+        if success {
+            self.fire_webhook(
+                "task_abandoned",
+                serde_json::json!({ "task_id": task_id, "reason": reason }),
+            );
         }
 
         Self::json_content_with_nudge(

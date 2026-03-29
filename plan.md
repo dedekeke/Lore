@@ -93,6 +93,14 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 
 ~~Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.~~ Done (phase 30)
 
+### Token Savings / Efficiency Analytics (Needs Research)
+
+Measure the actual value Lore provides: how many tokens are saved by having episodic memory vs re-discovering solutions from scratch. Research needed on:
+- How to quantify "tokens saved" — e.g., rejected attempts that Lore surfaced via `review_ledger`/`find_similar_failures` preventing the AI from re-trying the same approach
+- Before/after comparison model: estimate retry cost without Lore vs actual cost with Lore
+- Dashboard visualization of efficiency over time (trend lines, per-project comparison)
+- Whether to track this passively (instrument existing tools) or require explicit measurement points
+
 ### Follow-up Improvements
 
 | Item | Context |
@@ -102,6 +110,14 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 | Atomic file writes for ONNX model download | Write to `.tmp` then rename for crash safety during model download |
 | Zero-norm guard in `l2_normalize` | Defensive check for zero-length vectors in local embedding normalization |
 | Track `ort` 2.0 stable release | Currently on `2.0.0-rc.12` — move to stable when available |
+
+### Research Needed for Further Improvement
+
+All major planned features are implemented. Next improvements require research into:
+- Token savings analytics (see above)
+- Side-prompt prioritization (relevance scoring for attempts)
+- Better embedding models as ecosystem matures (track `ort` 2.0, newer MiniLM variants)
+- Dashboard real-time updates (WebSocket/SSE push instead of page reload)
 
 ### Architecture Reference
 

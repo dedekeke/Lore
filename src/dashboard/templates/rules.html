@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Rules{% endblock %}
+{% block content %}
+<h1>Rules</h1>
+
+{% if projects %}
+<div style="margin-bottom: 1rem;">
+  {% for p in projects %}
+  <a href="/rules?project_id={{ p.id }}" class="btn" style="margin-right: 0.25rem;">{{ p.name }}</a>
+  {% endfor %}
+  <a href="/rules" class="btn">All</a>
+</div>
+{% endif %}
+
+{% if rules %}
+<table>
+  <thead><tr><th>Category</th><th>Content</th><th>Project</th><th>Actions</th></tr></thead>
+  <tbody id="rules-body">
+    {% for r in rules %}
+    <tr id="rule-{{ r.id }}">
+      <td><span class="badge badge-{{ r.category | lower }}">{{ r.category }}</span></td>
+      <td class="truncate" style="max-width: 500px;">{{ r.content | truncate(length=100) }}</td>
+      <td class="mono">{{ r.project_id | truncate(length=8) }}</td>
+      <td>
+        <button class="btn btn-danger" hx-delete="/rules/{{ r.id }}" hx-target="#rule-{{ r.id }}" hx-swap="outerHTML" hx-confirm="Delete this rule?">Delete</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No rules found</div>
+{% endif %}
+{% endblock %}

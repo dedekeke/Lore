@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<h1>Projects</h1>
+{% if projects %}
+<table>
+  <thead><tr><th>Name</th><th>Root Path</th><th>Created</th></tr></thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/projects/{{ p.id }}">{{ p.name }}</a></td>
+      <td class="mono truncate">{{ p.root_path }}</td>
+      <td class="mono">{{ p.created_at | truncate(length=10) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No projects yet</div>
+{% endif %}
+{% endblock %}

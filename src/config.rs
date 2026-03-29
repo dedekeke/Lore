@@ -62,6 +62,8 @@ pub struct Config {
     pub webhook_url: Option<String>,
     pub webhook_events: HashSet<String>,
     pub webhook_rejection_threshold: u32,
+    pub dashboard_enabled: bool,
+    pub dashboard_port: u16,
 }
 
 impl Config {
@@ -147,6 +149,12 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             webhook_rejection_threshold: parse_warn_or("WEBHOOK_REJECTION_THRESHOLD", 3),
+
+            dashboard_enabled: env::var("DASHBOARD_ENABLED")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
+            dashboard_port: parse_warn_or("DASHBOARD_PORT", 3101),
         }
     }
 }
@@ -202,6 +210,8 @@ mod tests {
             "WEBHOOK_URL",
             "WEBHOOK_EVENTS",
             "WEBHOOK_REJECTION_THRESHOLD",
+            "DASHBOARD_ENABLED",
+            "DASHBOARD_PORT",
         ] {
             std::env::remove_var(key);
         }

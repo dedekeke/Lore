@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Web dashboard (axum + htmx). Test suite: 18 unit + 34 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -37,7 +37,8 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
 | 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | PR #25 |
 | 29 | Fix context counter reset: only reset on true session boundaries | PR #26 |
-| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | In progress |
+| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | PR #27 |
+| 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | In progress |
 
 ---
 
@@ -66,7 +67,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 |------|-------|
 | ~~Git checkpointing~~ | ~~Tie `attempt_id` to git stash/commit for rollback~~ Done (phase 24) |
 | ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
-| Web dashboard | Lightweight UI to browse/edit the ledger |
+| ~~Web dashboard~~ | ~~Lightweight UI to browse/edit the ledger~~ Done (phase 31) |
 | ~~Multi-agent support~~ | ~~Tag attempts with `agent_id` for multi-agent workflows~~ Done (phase 23) |
 
 ---
@@ -88,6 +89,16 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 ### ~~Webhook Notifications~~
 
 ~~Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.~~ Done (phase 30)
+
+### Follow-up Improvements
+
+| Item | Context |
+|------|---------|
+| Share `reqwest::Client` in webhooks | Currently builds a new client per `fire()` call — should store in `LoreServerInner` |
+| Resolve actual project name in webhook payload | Uses `default_project_name` config instead of current project from DB |
+| Atomic file writes for ONNX model download | Write to `.tmp` then rename for crash safety during model download |
+| Zero-norm guard in `l2_normalize` | Defensive check for zero-length vectors in local embedding normalization |
+| Track `ort` 2.0 stable release | Currently on `2.0.0-rc.12` — move to stable when available |
 
 ### Architecture Reference
 

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+<h1>Analytics</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="value">{{ total_projects }}</div>
+    <div class="label">Projects</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_tasks }}</div>
+    <div class="label">Total Tasks</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ active_tasks }}</div>
+    <div class="label">Active Tasks</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_attempts }}</div>
+    <div class="label">Total Attempts</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_rules }}</div>
+    <div class="label">Rules</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ rejection_rate }}%</div>
+    <div class="label">Rejection Rate</div>
+  </div>
+</div>
+
+{% if projects %}
+<h2>Per-Project Breakdown</h2>
+<table>
+  <thead><tr><th>Project</th><th>Tasks</th><th>Active</th><th>Attempts</th><th>Rules</th></tr></thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/projects/{{ p.id }}">{{ p.name }}</a></td>
+      <td>{{ p.task_count }}</td>
+      <td>{{ p.active_count }}</td>
+      <td>{{ p.attempt_count }}</td>
+      <td>{{ p.rule_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

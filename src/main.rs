@@ -55,6 +55,12 @@ async fn main() {
         config.clone(),
     ));
 
+    if config.dashboard_enabled {
+        let dash_pool = pool.clone();
+        let dash_port = config.dashboard_port;
+        tokio::spawn(lore::dashboard::serve(dash_pool, dash_port));
+    }
+
     let server = server::LoreServer::new(pool, embeddings, config.clone());
 
     match config.mcp_transport {

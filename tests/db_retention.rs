@@ -7,7 +7,7 @@ async fn test_prune_old_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
     let tid = tasks::create_task(&pool, pid, "task", None).await.unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "old attempt", None)
+    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None)
         .await
         .unwrap();
 
@@ -34,7 +34,7 @@ async fn test_purge_completed_tasks() {
         .await
         .unwrap();
 
-    tasks::complete_task(&pool, tid).await.unwrap();
+    tasks::complete_task(&pool, tid, None).await.unwrap();
 
     // Backdate completed_at
     sqlx::query(

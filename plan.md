@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemented. Performance pipeline: LRU cache, Gemini/local embedding, HNSW + BM25 hybrid search (RRF). Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Web dashboard (axum + htmx). Test suite: 18 unit + 34 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -26,7 +26,20 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 | 16 | Markdown export format, `get_task_stats` analytics tool | PR #14 |
 | 17 | Context snapshots (`log_context_wipe`), rule deduplication on insert | PR #16 |
 | 18 | README env var docs, embedding debug logging | PR #17 |
-| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | In progress |
+| 19 | Intelligent decay (consolidate accepted attempts into lessons), batch embedding backfill on startup | PR #18 |
+| 20 | SSE transport: remote MCP connections via HTTP+SSE, multi-session support | PR #19 |
+| 21 | MCP Resources: expose protocol and active-context as readable resources | PR #19 |
+| 22 | Cross-project search: find_similar_failures with cross_project flag | PR #19 |
+| 23 | Multi-agent support: agent_id column on attempts, wired into propose_attempt tool | PR #19 |
+| 24 | Git checkpointing: auto-capture git HEAD on propose_attempt, store as git_ref | PR #20 |
+| 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
+| 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
+| 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
+| 28 | ~~Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net~~ | Reverted (phase 32) — MCP server can't observe full context |
+| 29 | ~~Fix context counter reset: only reset on true session boundaries~~ | Reverted (phase 32) — part of removed auto-snapshot system |
+| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | PR #27 |
+| 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | In progress |
+| 32 | Remove broken auto-snapshot system, delegate context preservation to AI client via CLAUDE.md protocol | In progress |
 
 ---
 
@@ -36,8 +49,8 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 
 | Task | Notes |
 |------|-------|
-| **MCP Resources** | Expose `active_context` and `protocol` as subscriptions |
-| **SSE transport** | Enable remote MCP connections (HTTP+SSE or Streamable HTTP) |
+| **~~MCP Resources~~** | ~~Expose `active_context` and `protocol` as subscriptions~~ Done (phase 21) |
+| **~~SSE transport~~** | ~~Enable remote MCP connections (HTTP+SSE or Streamable HTTP)~~ Done (phase 20) |
 
 ### Medium
 
@@ -45,7 +58,7 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 |------|-------|
 | **~~Context snapshots~~** | ~~Wire into `get_active_context` to track context wipes~~ Done (phase 17) |
 | **~~Intelligent decay~~** | ~~Auto-consolidate old accepted attempts into lessons~~ Done (phase 19) |
-| **Local ONNX embedding** | Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings |
+| **~~Local ONNX embedding~~** | ~~Run `all-MiniLM-L6-v2` via `ort` for ~10ms embeddings~~ Done (phase 26) |
 | **~~Rule deduplication~~** | ~~Detect cosine > 0.95 duplicates on insert, warn or merge~~ Done (phase 17) |
 | **~~Batch embedding on startup~~** | ~~Re-embed stale rules/attempts missing embeddings~~ Done (phase 19) |
 
@@ -53,10 +66,10 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 
 | Task | Notes |
 |------|-------|
-| Git checkpointing | Tie `attempt_id` to git stash/commit for rollback |
-| Cross-project search | `find_similar_failures` across all projects |
-| Web dashboard | Lightweight UI to browse/edit the ledger |
-| Multi-agent support | Tag attempts with `agent_id` for multi-agent workflows |
+| ~~Git checkpointing~~ | ~~Tie `attempt_id` to git stash/commit for rollback~~ Done (phase 24) |
+| ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
+| ~~Web dashboard~~ | ~~Lightweight UI to browse/edit the ledger~~ Done (phase 31) |
+| ~~Multi-agent support~~ | ~~Tag attempts with `agent_id` for multi-agent workflows~~ Done (phase 23) |
 
 ---
 
@@ -66,17 +79,27 @@ Server runs on stdio transport with PostgreSQL + pgvector. 20 MCP tools implemen
 
 Classify attempts by relevance to active task. Schema additions: `description_embedding` on tasks, `interaction_type` enum + `relevance_score` on attempts. Resume packet filters to `task_aligned` + `clarification` only.
 
-### Conversation Handoff Protocol
+### ~~Conversation Handoff Protocol~~
 
-When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.
+~~When AI context window is about to be exhausted, auto-export a handoff packet (active task, last N attempts, key lessons) that a fresh session can ingest via `get_next_steps`. Enables seamless multi-session workflows.~~ Done (phase 25)
 
-### Configurable Tool Visibility
+### ~~Configurable Tool Visibility~~
 
-Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.
+~~Allow projects to enable/disable specific tools via config (e.g., disable `forget_rule` in production). Reduces tool surface area for simpler use cases.~~ Done (phase 27)
 
-### Webhook Notifications
+### ~~Webhook Notifications~~
 
-Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.
+~~Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.~~ Done (phase 30)
+
+### Follow-up Improvements
+
+| Item | Context |
+|------|---------|
+| Share `reqwest::Client` in webhooks | Currently builds a new client per `fire()` call — should store in `LoreServerInner` |
+| Resolve actual project name in webhook payload | Uses `default_project_name` config instead of current project from DB |
+| Atomic file writes for ONNX model download | Write to `.tmp` then rename for crash safety during model download |
+| Zero-norm guard in `l2_normalize` | Defensive check for zero-length vectors in local embedding normalization |
+| Track `ort` 2.0 stable release | Currently on `2.0.0-rc.12` — move to stable when available |
 
 ### Architecture Reference
 

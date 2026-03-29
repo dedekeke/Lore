@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fmt;
 
@@ -42,11 +43,8 @@ pub struct Config {
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
-    #[allow(dead_code)]
     pub mcp_transport: McpTransport,
-    #[allow(dead_code)]
     pub mcp_sse_port: u16,
-    #[allow(dead_code)]
     pub log_level: String,
 
     pub retention_attempts_days: u32,
@@ -58,6 +56,12 @@ pub struct Config {
     pub decay_min_accepted: i64,
 
     pub default_project_name: String,
+    pub disabled_tools: HashSet<String>,
+    pub webhook_url: Option<String>,
+    pub webhook_events: HashSet<String>,
+    pub webhook_rejection_threshold: u32,
+    pub dashboard_enabled: bool,
+    pub dashboard_port: u16,
 }
 
 impl Config {
@@ -123,6 +127,28 @@ impl Config {
 
             default_project_name: env::var("DEFAULT_PROJECT_NAME")
                 .unwrap_or_else(|_| "default".into()),
+
+            disabled_tools: env::var("DISABLED_TOOLS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+
+            webhook_url: env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+            webhook_events: env::var("WEBHOOK_EVENTS")
+                .unwrap_or_else(|_| "task_completed,task_abandoned,rejection_threshold".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            webhook_rejection_threshold: parse_warn_or("WEBHOOK_REJECTION_THRESHOLD", 3),
+
+            dashboard_enabled: env::var("DASHBOARD_ENABLED")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
+            dashboard_port: parse_warn_or("DASHBOARD_PORT", 3101),
         }
     }
 }
@@ -172,6 +198,12 @@ mod tests {
             "DECAY_AFTER_DAYS",
             "DECAY_MIN_ACCEPTED",
             "DEFAULT_PROJECT_NAME",
+            "DISABLED_TOOLS",
+            "WEBHOOK_URL",
+            "WEBHOOK_EVENTS",
+            "WEBHOOK_REJECTION_THRESHOLD",
+            "DASHBOARD_ENABLED",
+            "DASHBOARD_PORT",
         ] {
             std::env::remove_var(key);
         }
@@ -189,6 +221,7 @@ mod tests {
         assert_eq!(cfg.database_max_connections, 10);
         assert_eq!(cfg.retention_attempts_days, 30);
         assert_eq!(cfg.default_project_name, "default");
+        assert!(cfg.disabled_tools.is_empty());
     }
 
     #[test]
@@ -229,5 +262,21 @@ mod tests {
 
         let cfg = Config::from_env();
         assert!(cfg.gemini_api_key.is_none());
+    }
+
+    #[test]
+    fn test_disabled_tools_parsing() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var(
+            "DISABLED_TOOLS",
+            "forget_rule, export_memory , log_context_wipe",
+        );
+
+        let cfg = Config::from_env();
+        assert_eq!(cfg.disabled_tools.len(), 3);
+        assert!(cfg.disabled_tools.contains("forget_rule"));
+        assert!(cfg.disabled_tools.contains("export_memory"));
+        assert!(cfg.disabled_tools.contains("log_context_wipe"));
     }
 }

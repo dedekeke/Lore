@@ -18,6 +18,7 @@ pub struct Task {
     pub description: String,
     pub status: TaskStatus,
     pub parent_task_id: Option<Uuid>,
+    pub resolved_attempt_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -43,7 +44,7 @@ pub async fn create_task(
 #[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, description, status, parent_task_id, created_at, completed_at \
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
          FROM ai_memory.tasks WHERE id = $1",
     )
     .bind(id)
@@ -58,7 +59,7 @@ pub async fn list_tasks(
 ) -> Result<Vec<Task>, sqlx::Error> {
     match status {
         Some(s) => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
                  FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at",
         )
         .bind(project_id)
@@ -66,7 +67,7 @@ pub async fn list_tasks(
         .fetch_all(pool)
         .await,
         None => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
                  FROM ai_memory.tasks WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -210,11 +211,17 @@ pub async fn get_task_stats(
     }
 }
 
-pub async fn complete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn complete_task(
+    pool: &PgPool,
+    id: Uuid,
+    resolved_attempt_id: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW() WHERE id = $1",
+        "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
+         resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
     )
     .bind(id)
+    .bind(resolved_attempt_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)

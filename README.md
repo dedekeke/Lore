@@ -55,7 +55,7 @@ cargo build --release
 
 ### Without local embeddings
 
-To skip the fastembed dependency (smaller binary, faster build):
+To skip the local ONNX runtime dependency (smaller binary, faster build):
 
 ```bash
 cargo build --release --no-default-features
@@ -72,7 +72,7 @@ All settings via environment variables (see `.env.example`):
 | `DATABASE_URL`                    | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string                    |
 | `DATABASE_MAX_CONNECTIONS`        | `10`                                                | Connection pool size                            |
 | `DATABASE_STATEMENT_TIMEOUT_SECS` | `5`                                                 | Per-query timeout                               |
-| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (fastembed) or `gemini`                 |
+| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (ONNX via ort) or `gemini`              |
 | `GEMINI_API_KEY`                  | —                                                   | Required when provider is `gemini`              |
 | `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Embedding model name                            |
 | `EMBEDDING_DIMENSIONS`            | `384`                                               | Must match model and DB schema                  |
@@ -87,6 +87,12 @@ All settings via environment variables (see `.env.example`):
 | `DECAY_AFTER_DAYS`                | `14`                                                | Consolidate accepted attempts into lessons after N days |
 | `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
+| `DISABLED_TOOLS`                  | —                                                   | Comma-separated tool names to hide and reject   |
+| `DASHBOARD_ENABLED`               | `false`                                             | Enable web dashboard                            |
+| `DASHBOARD_PORT`                  | `3101`                                              | Dashboard HTTP port                             |
+| `WEBHOOK_URL`                     | —                                                   | HTTP endpoint for event notifications           |
+| `WEBHOOK_EVENTS`                  | `task_completed,task_abandoned,rejection_threshold`  | Comma-separated event types to fire             |
+| `WEBHOOK_REJECTION_THRESHOLD`     | `3`                                                 | Fire webhook after N rejections on same task    |
 
 > **Note:** Changing `EMBEDDING_DIMENSIONS` requires a database migration to alter the vector column size.
 
@@ -106,10 +112,10 @@ All settings via environment variables (see `.env.example`):
 | Tool              | Description                                                      |
 |-------------------|------------------------------------------------------------------|
 | `start_task`      | Create a new task (supports subtask hierarchies)                 |
-| `propose_attempt` | Log an approach before executing it                              |
-| `log_outcome`     | Record what happened (accepted/rejected) and why                 |
+| `propose_attempt` | Log an approach before executing it (auto-captures git HEAD)     |
+| `log_outcome`     | Record what happened (accepted/rejected), why, and the code      |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
-| `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
+| `complete_task`   | Close a task, link resolved attempt, optionally extract a lesson |
 | `abandon_task`    | Abandon a task with reason, optionally saving as lesson          |
 | `list_tasks`      | List tasks for current project, optionally filtered by status    |
 
@@ -117,7 +123,7 @@ All settings via environment variables (see `.env.example`):
 
 | Tool                    | Description                                     |
 |-------------------------|-------------------------------------------------|
-| `find_similar_failures` | Semantic search across past rejection reasoning |
+| `find_similar_failures` | Semantic search across past rejection reasoning (supports cross-project) |
 
 ### System
 
@@ -131,6 +137,14 @@ All settings via environment variables (see `.env.example`):
 | `get_next_steps`     | Cold-start briefing: pending work, blocked tasks, lessons  |
 | `get_protocol`       | Re-read the mandatory episodic memory protocol             |
 | `update_rule`        | Update an existing rule's category and/or content          |
+| `generate_handoff`   | Dense handoff packet for session transitions (auto-logs wipe) |
+
+## MCP Resources
+
+| Resource URI            | Description                                              |
+|-------------------------|----------------------------------------------------------|
+| `lore://protocol`       | Mandatory episodic memory protocol rules (text/plain)    |
+| `lore://active-context` | Current project, active tasks, wipe count (JSON)         |
 
 ## MCP Client Configuration
 
@@ -156,6 +170,28 @@ Add to your MCP client config. For Claude Code, create `.mcp.json` in your proje
 For Claude Desktop, use `claude_desktop_config.json` with the same structure.
 
 > **Important:** The binary loads `.env` from the current working directory via `dotenvy`, but MCP clients may launch it from a different directory. Always pass all required env vars explicitly in the MCP config to avoid falling back to defaults.
+
+### SSE Transport (Remote)
+
+To run Lore as a remote HTTP server instead of stdio:
+
+```bash
+MCP_TRANSPORT=sse MCP_SSE_PORT=3100 ./target/release/lore
+```
+
+Clients connect via SSE at `http://host:3100/sse` and post messages to `http://host:3100/message?sessionId=<id>`. Multiple clients can connect simultaneously — each SSE session gets its own server instance sharing the same database pool.
+
+For MCP clients that support SSE, configure the server URL instead of a command:
+
+```json
+{
+  "mcpServers": {
+    "lore": {
+      "url": "http://localhost:3100/sse"
+    }
+  }
+}
+```
 
 ## Database Schema
 

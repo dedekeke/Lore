@@ -5,10 +5,10 @@ edition = "2021"
 
 [features]
 default = ["local-embeddings"]
-local-embeddings = ["dep:fastembed"]
+local-embeddings = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 
 [dependencies]
-rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server", "macros"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,10 +19,15 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-fastembed = { version = "4", optional = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+dirs-next = "2.0"
+ort = { version = "2.0.0-rc.12", optional = true }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig"] }
+ndarray = { version = "0.17", optional = true }
 pgvector = { version = "0.4", features = ["sqlx"] }
 moka = { version = "0.12", features = ["future"] }
+axum = "0.8"
+minijinja = "2"
 
 [dev-dependencies]
 testcontainers = "0.23"

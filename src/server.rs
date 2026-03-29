@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rmcp::{model::*, tool, ServerHandler};
+use rmcp::{model::*, service::RequestContext, tool, RoleServer, ServerHandler};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -9,6 +10,7 @@ use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
+use crate::webhooks;
 
 #[derive(Clone)]
 pub struct LoreServer {
@@ -21,6 +23,7 @@ pub struct LoreServerInner {
     pub config: Config,
     pub current_project_id: RwLock<Option<Uuid>>,
     pub cache: LoreCache,
+    pub tool_call_count: AtomicU64,
 }
 
 impl LoreServer {
@@ -32,6 +35,7 @@ impl LoreServer {
                 config,
                 current_project_id: RwLock::new(None),
                 cache: LoreCache::new(1000, 500),
+                tool_call_count: AtomicU64::new(0),
             }),
         }
     }
@@ -83,6 +87,28 @@ impl LoreServer {
             .insert(key, Arc::new(result.clone()))
             .await;
         Ok(result)
+    }
+
+    /// Capture current git HEAD commit hash for the project's root_path
+    async fn capture_git_ref(&self) -> Option<String> {
+        let pid = self.inner.current_project_id.read().await;
+        let project_id = (*pid)?;
+        drop(pid);
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .ok()
+            .flatten()?;
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&project.root_path)
+            .output()
+            .await
+            .ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            None
+        }
     }
 
     fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
@@ -147,6 +173,17 @@ impl LoreServer {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
     }
 
+    fn fire_webhook(&self, event: &str, data: serde_json::Value) {
+        if let Some(url) = &self.config().webhook_url {
+            let project = self.config().default_project_name.clone();
+            webhooks::fire(url, &self.config().webhook_events, event, &project, data);
+        }
+    }
+
+    fn reset_session_counter(&self) {
+        self.inner.tool_call_count.store(0, Ordering::Relaxed);
+    }
+
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
         let json = serde_json::to_string_pretty(val)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
@@ -174,13 +211,14 @@ impl LoreServer {
         "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
          1. FIRST CALL: switch_project(name, root_path) to set context (optional — project is auto-detected from cwd if not called).\n\
          2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
-         3. PROPOSING CODE: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.\n\
-         4. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning) BEFORE suggesting a fix.\n\
-         5. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning) when the USER explicitly confirms success. If unsure, use 'pending'.\n\
-         6. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
-         7. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
-         8. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
-         9. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         3. SUBTASKS: if a task involves 3+ distinct steps, decompose it — call start_task(description, parent_task_id) for each subtask.\n\
+         4. PROPOSING CODE: call propose_attempt(task_id, approach) BEFORE writing code to the user.\n\
+         5. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning, code_snippet) BEFORE suggesting a fix.\n\
+         6. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning, code_snippet) when the USER explicitly confirms success. If unsure, use 'pending'. Include code_snippet with the actual code written.\n\
+         7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
+         8. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
+         9. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
+         10. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -384,24 +422,27 @@ impl LoreServer {
         #[schemars(description = "Summary of the approach being attempted")]
         approach_summary: String,
         #[tool(param)]
-        #[schemars(description = "Optional code snippet for the attempt")]
-        code_snippet: Option<String>,
+        #[schemars(description = "Optional agent identifier for multi-agent workflows")]
+        agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
-        if let Some(ref code) = code_snippet {
-            Self::validate_len("code_snippet", code, 32768)?;
-        }
         let tid = Self::parse_uuid(&task_id)?;
+        let git_ref = self.capture_git_ref().await;
         let id = db::attempts::create_attempt(
             self.pool(),
             tid,
             &approach_summary,
-            code_snippet.as_deref(),
+            agent_id.as_deref(),
+            git_ref.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
+        let mut result = serde_json::json!({ "attempt_id": id.to_string() });
+        if let Some(ref gr) = git_ref {
+            result["git_checkpoint"] = serde_json::Value::String(gr.clone());
+        }
         Self::json_content_with_nudge(
-            &serde_json::json!({ "attempt_id": id.to_string() }),
+            &result,
             "Attempt logged. Present the code to the user and WAIT for their feedback. Do NOT auto-accept. Call log_outcome only after the user confirms success ('accepted') or reports failure ('rejected').",
         )
     }
@@ -425,8 +466,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional git reference (commit hash, branch)")]
         git_ref: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Optional code snippet — include the actual code that was written for this attempt"
+        )]
+        code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("reasoning", &reasoning, 4096)?;
+        if let Some(ref code) = code_snippet {
+            Self::validate_len("code_snippet", code, 32768)?;
+        }
         let aid = Self::parse_uuid(&attempt_id)?;
         let out = Self::parse_attempt_outcome(&outcome)?;
         let embedding = self.embed(&reasoning).await?;
@@ -437,9 +486,34 @@ impl LoreServer {
             &reasoning,
             Some(&embedding),
             git_ref.as_deref(),
+            code_snippet.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
+        // Check rejection threshold for webhook
+        if out == db::AttemptOutcome::Rejected {
+            if let Ok(Some(attempt)) = db::attempts::get_attempt(self.pool(), aid).await {
+                let rejected = db::attempts::list_attempts(
+                    self.pool(),
+                    attempt.task_id,
+                    Some(db::AttemptOutcome::Rejected),
+                )
+                .await
+                .unwrap_or_default();
+                let threshold = self.config().webhook_rejection_threshold as usize;
+                if rejected.len() == threshold {
+                    self.fire_webhook(
+                        "rejection_threshold",
+                        serde_json::json!({
+                            "task_id": attempt.task_id,
+                            "rejection_count": rejected.len(),
+                            "latest_reasoning": reasoning,
+                        }),
+                    );
+                }
+            }
+        }
+
         let nudge = match out {
             db::AttemptOutcome::Rejected => {
                 "Outcome logged. Next: call review_ledger(task_id) to review all past failures, then propose_attempt with a new approach."
@@ -486,12 +560,27 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
         lesson: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
+        )]
+        resolved_attempt_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         if let Some(ref l) = lesson {
             Self::validate_len("lesson", l, 4096)?;
         }
         let tid = Self::parse_uuid(&task_id)?;
-        let success = db::tasks::complete_task(self.pool(), tid)
+        // Resolve the winning attempt: explicit param or last accepted
+        let resolved = match resolved_attempt_id {
+            Some(ref id) => Some(Self::parse_uuid(id)?),
+            None => {
+                db::attempts::list_attempts(self.pool(), tid, Some(db::AttemptOutcome::Accepted))
+                    .await
+                    .ok()
+                    .and_then(|a| a.last().map(|a| a.id))
+            }
+        };
+        let success = db::tasks::complete_task(self.pool(), tid, resolved)
             .await
             .map_err(Self::db_err)?;
 
@@ -509,6 +598,13 @@ impl LoreServer {
                 .await
                 .map_err(Self::db_err)?;
             }
+        }
+
+        if success {
+            self.fire_webhook(
+                "task_completed",
+                serde_json::json!({ "task_id": task_id, "lesson": lesson }),
+            );
         }
 
         Self::json_content_with_nudge(
@@ -548,6 +644,13 @@ impl LoreServer {
             )
             .await
             .map_err(Self::db_err)?;
+        }
+
+        if success {
+            self.fire_webhook(
+                "task_abandoned",
+                serde_json::json!({ "task_id": task_id, "reason": reason }),
+            );
         }
 
         Self::json_content_with_nudge(
@@ -628,9 +731,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Max results (default 5)")]
         limit: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Search across all projects (default false)")]
+        cross_project: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("error_description", &error_description, 2048)?;
-        let project_id = self.project_id().await?;
+        let project_id = if cross_project.unwrap_or(false) {
+            None
+        } else {
+            Some(self.project_id().await?)
+        };
         let embedding = self.embed(&error_description).await?;
         let attempts = db::attempts::search_similar_failures(
             self.pool(),
@@ -950,16 +1060,254 @@ impl LoreServer {
             Self::protocol_text(),
         )]))
     }
+
+    #[tool(
+        description = "Generate a handoff packet for session transitions. Call this before context exhaustion to create a dense briefing that the next session can ingest via get_next_steps. Automatically logs a context wipe event."
+    )]
+    pub async fn generate_handoff(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Approximate token count consumed in current session")]
+        token_count: Option<i32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        use std::fmt::Write;
+        let project_id = self.project_id().await?;
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+
+        let active_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                .await
+                .map_err(Self::db_err)?;
+        let blocked_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                .await
+                .map_err(Self::db_err)?;
+
+        let mut md = String::new();
+        let name = project
+            .as_ref()
+            .map(|p| p.name.as_str())
+            .unwrap_or("Unknown");
+        writeln!(md, "# Handoff Packet — {name}\n").unwrap();
+
+        // Active tasks with recent attempts
+        if !active_tasks.is_empty() {
+            writeln!(md, "## Active Tasks\n").unwrap();
+            for t in &active_tasks {
+                writeln!(md, "### {}\n- **ID:** `{}`", t.description, t.id).unwrap();
+                let attempts = db::attempts::list_attempts(self.pool(), t.id, None)
+                    .await
+                    .unwrap_or_default();
+                let recent: Vec<_> = attempts.iter().rev().take(5).collect();
+                if !recent.is_empty() {
+                    writeln!(md, "- **Recent attempts:**").unwrap();
+                    for a in recent.iter().rev() {
+                        let outcome = format!("{:?}", a.outcome).to_lowercase();
+                        let summary = if a.reasoning.is_empty() {
+                            a.approach_summary.clone()
+                        } else {
+                            format!("{}: {}", a.approach_summary, a.reasoning)
+                        };
+                        let git = a
+                            .git_ref
+                            .as_deref()
+                            .map(|g| format!(" @ {g}"))
+                            .unwrap_or_default();
+                        writeln!(md, "  - [{outcome}] {summary}{git}").unwrap();
+                    }
+                }
+                writeln!(md).unwrap();
+            }
+        }
+
+        // Blocked tasks
+        if !blocked_tasks.is_empty() {
+            writeln!(md, "## Blocked Tasks\n").unwrap();
+            for t in &blocked_tasks {
+                writeln!(md, "- `{}`: {}", t.id, t.description).unwrap();
+            }
+            writeln!(md).unwrap();
+        }
+
+        // Recent lessons
+        let lessons =
+            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
+                .await
+                .unwrap_or_default();
+        let recent_lessons: Vec<_> = lessons.iter().rev().take(5).collect();
+        if !recent_lessons.is_empty() {
+            writeln!(md, "## Recent Lessons\n").unwrap();
+            for l in recent_lessons.iter().rev() {
+                let preview: String = l.content.chars().take(200).collect();
+                writeln!(md, "- {preview}").unwrap();
+            }
+            writeln!(md).unwrap();
+        }
+
+        // Log context wipe if there's an active task
+        if let Some(task) = active_tasks.first() {
+            let last_attempt = db::attempts::list_attempts(self.pool(), task.id, None)
+                .await
+                .ok()
+                .and_then(|a| a.last().map(|a| a.id));
+            let _ = db::snapshots::create_snapshot(
+                self.pool(),
+                task.id,
+                token_count.unwrap_or(0),
+                last_attempt,
+            )
+            .await;
+        }
+
+        writeln!(
+            md,
+            "---\n*Handoff generated. Next session: call `get_next_steps()` to resume.*"
+        )
+        .unwrap();
+
+        Ok(CallToolResult::success(vec![Content::text(md)]))
+    }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for LoreServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(Self::protocol_text().into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::Error> {
+        use rmcp::model::AnnotateAble;
+
+        Ok(ListResourcesResult {
+            resources: vec![
+                RawResource {
+                    uri: "lore://protocol".into(),
+                    name: "Lore Protocol".into(),
+                    description: Some("Mandatory episodic memory protocol rules".into()),
+                    mime_type: Some("text/plain".into()),
+                    size: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://active-context".into(),
+                    name: "Active Context".into(),
+                    description: Some(
+                        "Current project, active tasks, and context wipe count".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                }
+                .no_annotation(),
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, rmcp::Error> {
+        match request.uri.as_str() {
+            "lore://protocol" => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::text(
+                    Self::protocol_text(),
+                    "lore://protocol",
+                )],
+            }),
+            "lore://active-context" => {
+                let project_id = self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = *project_id {
+                    drop(project_id);
+                    let project = db::projects::get_project(self.pool(), pid)
+                        .await
+                        .ok()
+                        .flatten();
+                    let tasks: Vec<db::tasks::Task> = db::tasks::list_tasks(self.pool(), pid, None)
+                        .await
+                        .unwrap_or_default();
+                    let wipes = db::snapshots::count_snapshots(self.pool(), pid)
+                        .await
+                        .unwrap_or(0);
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "project": project,
+                        "active_tasks": tasks.iter()
+                            .filter(|t| t.status == db::TaskStatus::Active)
+                            .count(),
+                        "total_tasks": tasks.len(),
+                        "context_wipes": wipes,
+                    }))
+                    .unwrap_or_default()
+                } else {
+                    r#"{"project": null, "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://active-context")],
+                })
+            }
+            _ => Err(ErrorData::resource_not_found(
+                "Unknown resource URI",
+                Some(serde_json::Value::String(request.uri)),
+            )),
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::Error> {
+        let disabled = &self.config().disabled_tools;
+        let tools = if disabled.is_empty() {
+            Self::tool_box().list()
+        } else {
+            Self::tool_box()
+                .list()
+                .into_iter()
+                .filter(|t| !disabled.contains(t.name.as_ref()))
+                .collect()
+        };
+        Ok(ListToolsResult {
+            next_cursor: None,
+            tools,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let disabled = &self.config().disabled_tools;
+        if disabled.contains(request.name.as_ref()) {
+            return Err(ErrorData::invalid_params(
+                "Tool is disabled via DISABLED_TOOLS config",
+                Some(serde_json::json!({ "tool": request.name })),
+            ));
+        }
+
+        if matches!(request.name.as_ref(), "get_next_steps" | "switch_project") {
+            self.reset_session_counter();
+        }
+
+        let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = Self::tool_box().call(ctx).await?;
+
+        self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
+
+        Ok(result)
     }
 }
 
@@ -1026,5 +1374,36 @@ mod tests {
     fn test_validate_len_exceeds() {
         let long = "x".repeat(5000);
         assert!(LoreServer::validate_len("f", &long, 4096).is_err());
+    }
+
+    #[test]
+    fn test_tool_box_lists_all_tools() {
+        let tools = LoreServer::tool_box().list();
+        assert!(
+            tools.len() >= 21,
+            "Expected at least 21 tools, got {}",
+            tools.len()
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"remember_rule"));
+        assert!(names.contains(&"forget_rule"));
+        assert!(names.contains(&"generate_handoff"));
+    }
+
+    #[test]
+    fn test_disabled_tools_filter() {
+        let all = LoreServer::tool_box().list();
+        let disabled: std::collections::HashSet<String> = ["forget_rule", "export_memory"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let filtered: Vec<_> = all
+            .into_iter()
+            .filter(|t| !disabled.contains(t.name.as_ref()))
+            .collect();
+        let names: Vec<&str> = filtered.iter().map(|t| t.name.as_ref()).collect();
+        assert!(!names.contains(&"forget_rule"));
+        assert!(!names.contains(&"export_memory"));
+        assert!(names.contains(&"remember_rule"));
     }
 }

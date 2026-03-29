@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }}{% endblock %}
+{% block content %}
+<h1>{{ project.name }}</h1>
+<p class="mono" style="color: var(--muted); margin-bottom: 1rem;">{{ project.root_path }}</p>
+
+<h2>Tasks ({{ tasks | length }})</h2>
+{% if tasks %}
+<table>
+  <thead><tr><th>Description</th><th>Status</th><th>Created</th></tr></thead>
+  <tbody>
+    {% for t in tasks %}
+    <tr id="task-{{ t.id }}">
+      <td><a href="/tasks/{{ t.id }}">{{ t.description | truncate(length=80) }}</a></td>
+      <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
+      <td class="mono">{{ t.created_at | truncate(length=10) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No tasks</div>
+{% endif %}
+{% endblock %}

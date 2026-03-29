@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Task — {{ task.description | truncate(length=40) }}{% endblock %}
+{% block content %}
+<h1>{{ task.description }}</h1>
+<div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;">
+  <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
+  <span class="mono" style="color: var(--muted);">{{ task.id }}</span>
+  {% if task.status == "Active" %}
+  <button class="btn" hx-post="/tasks/{{ task.id }}/complete" hx-target="#task-status" hx-swap="outerHTML">Complete</button>
+  <button class="btn btn-danger" hx-post="/tasks/{{ task.id }}/abandon" hx-target="#task-status" hx-swap="outerHTML">Abandon</button>
+  {% endif %}
+</div>
+<div id="task-status"></div>
+
+<h2>Attempts ({{ attempts | length }})</h2>
+{% if attempts %}
+<table>
+  <thead><tr><th>Approach</th><th>Outcome</th><th>Reasoning</th><th>Created</th></tr></thead>
+  <tbody>
+    {% for a in attempts %}
+    <tr>
+      <td class="truncate">{{ a.approach_summary | truncate(length=60) }}</td>
+      <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
+      <td class="truncate">{{ a.reasoning | truncate(length=60) }}</td>
+      <td class="mono">{{ a.created_at | truncate(length=10) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No attempts</div>
+{% endif %}
+{% endblock %}

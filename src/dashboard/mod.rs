@@ -72,9 +72,17 @@ pub fn router(pool: PgPool) -> Router {
 pub async fn serve(pool: PgPool, port: u16) {
     let app = router(pool);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(port, error = %e, "Dashboard failed to bind — port in use?");
+            return;
+        }
+    };
     tracing::info!(port, "Dashboard server started");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!(error = %e, "Dashboard server error");
+    }
 }
 
 fn render(

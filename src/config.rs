@@ -57,8 +57,6 @@ pub struct Config {
 
     pub default_project_name: String,
     pub disabled_tools: HashSet<String>,
-    pub context_warn_bytes: u64,
-    pub context_critical_bytes: u64,
     pub webhook_url: Option<String>,
     pub webhook_events: HashSet<String>,
     pub webhook_rejection_threshold: u32,
@@ -137,10 +135,6 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
 
-            // ~80KB = warning, ~150KB = critical (conservative defaults for 128K context models)
-            context_warn_bytes: parse_warn_or("CONTEXT_WARN_BYTES", 80_000),
-            context_critical_bytes: parse_warn_or("CONTEXT_CRITICAL_BYTES", 150_000),
-
             webhook_url: env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
             webhook_events: env::var("WEBHOOK_EVENTS")
                 .unwrap_or_else(|_| "task_completed,task_abandoned,rejection_threshold".into())
@@ -205,8 +199,6 @@ mod tests {
             "DECAY_MIN_ACCEPTED",
             "DEFAULT_PROJECT_NAME",
             "DISABLED_TOOLS",
-            "CONTEXT_WARN_BYTES",
-            "CONTEXT_CRITICAL_BYTES",
             "WEBHOOK_URL",
             "WEBHOOK_EVENTS",
             "WEBHOOK_REJECTION_THRESHOLD",
@@ -230,8 +222,6 @@ mod tests {
         assert_eq!(cfg.retention_attempts_days, 30);
         assert_eq!(cfg.default_project_name, "default");
         assert!(cfg.disabled_tools.is_empty());
-        assert_eq!(cfg.context_warn_bytes, 80_000);
-        assert_eq!(cfg.context_critical_bytes, 150_000);
     }
 
     #[test]

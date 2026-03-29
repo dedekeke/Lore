@@ -88,8 +88,8 @@ All settings via environment variables (see `.env.example`):
 | `DECAY_MIN_ACCEPTED`              | `2`                                                 | Min accepted attempts before consolidation      |
 | `DEFAULT_PROJECT_NAME`            | `default`                                           | Fallback project name for `switch_project`      |
 | `DISABLED_TOOLS`                  | —                                                   | Comma-separated tool names to hide and reject   |
-| `CONTEXT_WARN_BYTES`              | `80000`                                             | Warn AI to handoff at this cumulative response size |
-| `CONTEXT_CRITICAL_BYTES`          | `150000`                                            | Auto-snapshot and urgent nudge at this threshold |
+| `DASHBOARD_ENABLED`               | `false`                                             | Enable web dashboard                            |
+| `DASHBOARD_PORT`                  | `3101`                                              | Dashboard HTTP port                             |
 | `WEBHOOK_URL`                     | —                                                   | HTTP endpoint for event notifications           |
 | `WEBHOOK_EVENTS`                  | `task_completed,task_abandoned,rejection_threshold`  | Comma-separated event types to fire             |
 | `WEBHOOK_REJECTION_THRESHOLD`     | `3`                                                 | Fire webhook after N rejections on same task    |

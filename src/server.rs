@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, tool, RoleServer, ServerHandler};
@@ -24,8 +24,6 @@ pub struct LoreServerInner {
     pub current_project_id: RwLock<Option<Uuid>>,
     pub cache: LoreCache,
     pub tool_call_count: AtomicU64,
-    pub cumulative_response_bytes: AtomicU64,
-    pub auto_snapshot_fired: AtomicBool,
 }
 
 impl LoreServer {
@@ -38,8 +36,6 @@ impl LoreServer {
                 current_project_id: RwLock::new(None),
                 cache: LoreCache::new(1000, 500),
                 tool_call_count: AtomicU64::new(0),
-                cumulative_response_bytes: AtomicU64::new(0),
-                auto_snapshot_fired: AtomicBool::new(false),
             }),
         }
     }
@@ -184,83 +180,8 @@ impl LoreServer {
         }
     }
 
-    fn reset_context_counters(&self) {
+    fn reset_session_counter(&self) {
         self.inner.tool_call_count.store(0, Ordering::Relaxed);
-        self.inner
-            .cumulative_response_bytes
-            .store(0, Ordering::Relaxed);
-        self.inner
-            .auto_snapshot_fired
-            .store(false, Ordering::Relaxed);
-    }
-
-    fn track_response(&self, result: &CallToolResult) -> u64 {
-        self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
-        let bytes: u64 = result
-            .content
-            .iter()
-            .map(|c| match &c.raw {
-                RawContent::Text(t) => t.text.len() as u64,
-                _ => 0,
-            })
-            .sum();
-        self.inner
-            .cumulative_response_bytes
-            .fetch_add(bytes, Ordering::Relaxed)
-            + bytes
-    }
-
-    fn context_pressure_nudge(&self, total_bytes: u64) -> Option<&'static str> {
-        let critical = self.config().context_critical_bytes;
-        let warn = self.config().context_warn_bytes;
-        if total_bytes >= critical {
-            Some("CRITICAL: Context exhaustion imminent. Call generate_handoff() NOW to preserve state before context is lost.")
-        } else if total_bytes >= warn {
-            Some("WARNING: High context usage detected. Consider calling generate_handoff() soon to save progress.")
-        } else {
-            None
-        }
-    }
-
-    fn fire_auto_snapshot(&self) {
-        if self
-            .inner
-            .auto_snapshot_fired
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        let pool = self.pool().clone();
-        let inner = self.inner.clone();
-        let bytes = self.inner.cumulative_response_bytes.load(Ordering::Relaxed);
-        // ~3 bytes per token
-        let estimated_tokens = (bytes / 3) as i32;
-        tokio::spawn(async move {
-            let pid = match *inner.current_project_id.read().await {
-                Some(id) => id,
-                None => return,
-            };
-            let tasks = match db::tasks::list_tasks(&pool, pid, Some(db::TaskStatus::Active)).await
-            {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            for task in &tasks {
-                let last_attempt = db::attempts::list_attempts(&pool, task.id, None)
-                    .await
-                    .ok()
-                    .and_then(|a| a.last().map(|a| a.id));
-                let _ =
-                    db::snapshots::create_snapshot(&pool, task.id, estimated_tokens, last_attempt)
-                        .await;
-            }
-            tracing::info!(
-                estimated_tokens,
-                task_count = tasks.len(),
-                "Auto-snapshot fired at critical context threshold"
-            );
-        });
     }
 
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
@@ -858,9 +779,6 @@ impl LoreServer {
             "Use the active task and attempts above to continue. Call propose_attempt for your next approach."
         };
 
-        let session_calls = self.inner.tool_call_count.load(Ordering::Relaxed);
-        let session_bytes = self.inner.cumulative_response_bytes.load(Ordering::Relaxed);
-
         Self::json_content_with_nudge(
             &serde_json::json!({
                 "project": project,
@@ -868,11 +786,6 @@ impl LoreServer {
                 "recent_attempts": recent_attempts,
                 "active_rules_count": active_rules.len(),
                 "context_wipes": context_wipes,
-                "session_metrics": {
-                    "tool_calls": session_calls,
-                    "response_bytes": session_bytes,
-                    "estimated_response_tokens": session_bytes / 3,
-                },
             }),
             nudge,
         )
@@ -1367,31 +1280,14 @@ impl ServerHandler for LoreServer {
             ));
         }
 
-        // Reset counters on session-boundary tools
-        let is_session_boundary =
-            matches!(request.name.as_ref(), "get_next_steps" | "switch_project");
-        if is_session_boundary {
-            self.reset_context_counters();
+        if matches!(request.name.as_ref(), "get_next_steps" | "switch_project") {
+            self.reset_session_counter();
         }
 
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let mut result = Self::tool_box().call(ctx).await?;
+        let result = Self::tool_box().call(ctx).await?;
 
-        let total_bytes = self.track_response(&result);
-
-        // Inject context pressure warning into response
-        if let Some(nudge) = self.context_pressure_nudge(total_bytes) {
-            result.content.push(Content::text(format!(
-                "\n\n⚠️ {nudge}\n(Session: {} calls, ~{}KB response data)",
-                self.inner.tool_call_count.load(Ordering::Relaxed),
-                total_bytes / 1024
-            )));
-        }
-
-        // Auto-snapshot safety net at critical threshold
-        if total_bytes >= self.config().context_critical_bytes {
-            self.fire_auto_snapshot();
-        }
+        self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(result)
     }

@@ -35,10 +35,11 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
 | 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
 | 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
-| 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | PR #25 |
-| 29 | Fix context counter reset: only reset on true session boundaries | PR #26 |
+| 28 | ~~Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net~~ | Reverted (phase 32) — MCP server can't observe full context |
+| 29 | ~~Fix context counter reset: only reset on true session boundaries~~ | Reverted (phase 32) — part of removed auto-snapshot system |
 | 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | PR #27 |
 | 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | In progress |
+| 32 | Remove broken auto-snapshot system, delegate context preservation to AI client via CLAUDE.md protocol | In progress |
 
 ---
 

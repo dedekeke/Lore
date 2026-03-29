@@ -25,7 +25,7 @@ async fn test_list_tasks_with_status_filter() {
 
     let t1 = tasks::create_task(&pool, pid, "task1", None).await.unwrap();
     tasks::create_task(&pool, pid, "task2", None).await.unwrap();
-    tasks::complete_task(&pool, t1).await.unwrap();
+    tasks::complete_task(&pool, t1, None).await.unwrap();
 
     let active = tasks::list_tasks(&pool, pid, Some(TaskStatus::Active))
         .await
@@ -44,7 +44,7 @@ async fn test_complete_task() {
         .await
         .unwrap();
 
-    assert!(tasks::complete_task(&pool, tid).await.unwrap());
+    assert!(tasks::complete_task(&pool, tid, None).await.unwrap());
 
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Completed);

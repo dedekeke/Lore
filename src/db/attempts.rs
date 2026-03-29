@@ -34,17 +34,15 @@ pub async fn create_attempt(
     pool: &PgPool,
     task_id: Uuid,
     approach_summary: &str,
-    code_snippet: Option<&str>,
     agent_id: Option<&str>,
     git_ref: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.attempts (task_id, approach_summary, code_snippet, agent_id, git_ref) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO ai_memory.attempts (task_id, approach_summary, agent_id, git_ref) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(task_id)
     .bind(approach_summary)
-    .bind(code_snippet)
     .bind(agent_id)
     .bind(git_ref)
     .fetch_one(pool)
@@ -101,11 +99,13 @@ pub async fn log_outcome(
     reasoning: &str,
     reasoning_embedding: Option<&[f32]>,
     git_ref: Option<&str>,
+    code_snippet: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let emb = reasoning_embedding.map(|e| Vector::from(e.to_vec()));
     let result = sqlx::query(
         "UPDATE ai_memory.attempts \
-         SET outcome = $2, reasoning = $3, reasoning_embedding = $4, git_ref = $5, resolved_at = NOW() \
+         SET outcome = $2, reasoning = $3, reasoning_embedding = $4, git_ref = $5, \
+         code_snippet = COALESCE($6, code_snippet), resolved_at = NOW() \
          WHERE id = $1",
     )
     .bind(id)
@@ -113,6 +113,7 @@ pub async fn log_outcome(
     .bind(reasoning)
     .bind(emb.as_ref())
     .bind(git_ref)
+    .bind(code_snippet)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)

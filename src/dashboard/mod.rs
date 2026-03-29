@@ -18,8 +18,20 @@ pub struct DashboardState {
     env: Arc<Environment<'static>>,
 }
 
+fn truncate_filter(value: String, kwargs: minijinja::value::Kwargs) -> String {
+    let length: usize = kwargs.get("length").unwrap_or(255);
+    if value.len() <= length {
+        value
+    } else {
+        let mut s: String = value.chars().take(length.saturating_sub(3)).collect();
+        s.push_str("...");
+        s
+    }
+}
+
 pub fn router(pool: PgPool) -> Router {
     let mut env = Environment::new();
+    env.add_filter("truncate", truncate_filter);
     env.add_template("base.html", include_str!("templates/base.html"))
         .unwrap();
     env.add_template("projects.html", include_str!("templates/projects.html"))
@@ -131,7 +143,7 @@ async fn complete_task(
     State(state): State<DashboardState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Html<String>, StatusCode> {
-    db::tasks::complete_task(&state.pool, id)
+    db::tasks::complete_task(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Html(

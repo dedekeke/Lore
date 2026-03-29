@@ -211,13 +211,14 @@ impl LoreServer {
         "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
          1. FIRST CALL: switch_project(name, root_path) to set context (optional — project is auto-detected from cwd if not called).\n\
          2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
-         3. PROPOSING CODE: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.\n\
-         4. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning) BEFORE suggesting a fix.\n\
-         5. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning) when the USER explicitly confirms success. If unsure, use 'pending'.\n\
-         6. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
-         7. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
-         8. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
-         9. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         3. SUBTASKS: if a task involves 3+ distinct steps, decompose it — call start_task(description, parent_task_id) for each subtask.\n\
+         4. PROPOSING CODE: call propose_attempt(task_id, approach) BEFORE writing code to the user.\n\
+         5. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning, code_snippet) BEFORE suggesting a fix.\n\
+         6. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning, code_snippet) when the USER explicitly confirms success. If unsure, use 'pending'. Include code_snippet with the actual code written.\n\
+         7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
+         8. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
+         9. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
+         10. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -421,23 +422,16 @@ impl LoreServer {
         #[schemars(description = "Summary of the approach being attempted")]
         approach_summary: String,
         #[tool(param)]
-        #[schemars(description = "Optional code snippet for the attempt")]
-        code_snippet: Option<String>,
-        #[tool(param)]
         #[schemars(description = "Optional agent identifier for multi-agent workflows")]
         agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
-        if let Some(ref code) = code_snippet {
-            Self::validate_len("code_snippet", code, 32768)?;
-        }
         let tid = Self::parse_uuid(&task_id)?;
         let git_ref = self.capture_git_ref().await;
         let id = db::attempts::create_attempt(
             self.pool(),
             tid,
             &approach_summary,
-            code_snippet.as_deref(),
             agent_id.as_deref(),
             git_ref.as_deref(),
         )
@@ -472,8 +466,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional git reference (commit hash, branch)")]
         git_ref: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Optional code snippet — include the actual code that was written for this attempt"
+        )]
+        code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("reasoning", &reasoning, 4096)?;
+        if let Some(ref code) = code_snippet {
+            Self::validate_len("code_snippet", code, 32768)?;
+        }
         let aid = Self::parse_uuid(&attempt_id)?;
         let out = Self::parse_attempt_outcome(&outcome)?;
         let embedding = self.embed(&reasoning).await?;
@@ -484,6 +486,7 @@ impl LoreServer {
             &reasoning,
             Some(&embedding),
             git_ref.as_deref(),
+            code_snippet.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -557,12 +560,27 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
         lesson: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
+        )]
+        resolved_attempt_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         if let Some(ref l) = lesson {
             Self::validate_len("lesson", l, 4096)?;
         }
         let tid = Self::parse_uuid(&task_id)?;
-        let success = db::tasks::complete_task(self.pool(), tid)
+        // Resolve the winning attempt: explicit param or last accepted
+        let resolved = match resolved_attempt_id {
+            Some(ref id) => Some(Self::parse_uuid(id)?),
+            None => {
+                db::attempts::list_attempts(self.pool(), tid, Some(db::AttemptOutcome::Accepted))
+                    .await
+                    .ok()
+                    .and_then(|a| a.last().map(|a| a.id))
+            }
+        };
+        let success = db::tasks::complete_task(self.pool(), tid, resolved)
             .await
             .map_err(Self::db_err)?;
 

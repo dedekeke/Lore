@@ -113,9 +113,9 @@ All settings via environment variables (see `.env.example`):
 |-------------------|------------------------------------------------------------------|
 | `start_task`      | Create a new task (supports subtask hierarchies)                 |
 | `propose_attempt` | Log an approach before executing it (auto-captures git HEAD)     |
-| `log_outcome`     | Record what happened (accepted/rejected) and why                 |
+| `log_outcome`     | Record what happened (accepted/rejected), why, and the code      |
 | `review_ledger`   | Query the ledger for a task, optionally filtered by outcome      |
-| `complete_task`   | Close a task, optionally extracting a lesson to long-term memory |
+| `complete_task`   | Close a task, link resolved attempt, optionally extract a lesson |
 | `abandon_task`    | Abandon a task with reason, optionally saving as lesson          |
 | `list_tasks`      | List tasks for current project, optionally filtered by status    |
 

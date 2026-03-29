@@ -67,12 +67,7 @@ async fn test_full_task_lifecycle() {
         .to_string();
 
     let attempt_result = server
-        .propose_attempt(
-            task_id.clone(),
-            "try approach A".into(),
-            Some("fn foo(){}".into()),
-            None,
-        )
+        .propose_attempt(task_id.clone(), "try approach A".into(), None)
         .await
         .unwrap();
     let attempt_id = extract_json(&attempt_result)["attempt_id"]
@@ -81,7 +76,13 @@ async fn test_full_task_lifecycle() {
         .to_string();
 
     let outcome = server
-        .log_outcome(attempt_id, "rejected".into(), "didn't compile".into(), None)
+        .log_outcome(
+            attempt_id,
+            "rejected".into(),
+            "didn't compile".into(),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(extract_json(&outcome)["success"].as_bool().unwrap());
@@ -90,7 +91,7 @@ async fn test_full_task_lifecycle() {
     assert_eq!(extract_json(&ledger).as_array().unwrap().len(), 1);
 
     let complete = server
-        .complete_task(task_id, Some("always check compilation first".into()))
+        .complete_task(task_id, Some("always check compilation first".into()), None)
         .await
         .unwrap();
     assert!(extract_json(&complete)["success"].as_bool().unwrap());

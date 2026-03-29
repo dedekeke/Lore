@@ -19,8 +19,8 @@
     {% for r in rules %}
     <tr id="rule-{{ r.id }}">
       <td><span class="badge badge-{{ r.category | lower }}">{{ r.category }}</span></td>
-      <td class="truncate" style="max-width: 500px;">{{ r.content | truncate(length=100) }}</td>
-      <td class="mono">{{ r.project_id | truncate(length=8) }}</td>
+      <td class="clickable-cell" onclick="showModal('Rule', this.dataset.full)" data-full="{{ r.content }}">{{ r.content | truncate(length=100) }}</td>
+      <td>{{ r.project_name }}</td>
       <td>
         <button class="btn btn-danger" hx-delete="/rules/{{ r.id }}" hx-target="#rule-{{ r.id }}" hx-swap="outerHTML" hx-confirm="Delete this rule?">Delete</button>
       </td>

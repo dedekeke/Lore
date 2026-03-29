@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -92,6 +93,16 @@ fn render(
     Ok(Html(html))
 }
 
+/// Build project_id -> project_name lookup
+async fn project_name_map(pool: &PgPool) -> HashMap<uuid::Uuid, String> {
+    db::projects::list_projects(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect()
+}
+
 async fn projects_page(State(state): State<DashboardState>) -> Result<Html<String>, StatusCode> {
     let projects = db::projects::list_projects(&state.pool)
         .await
@@ -176,6 +187,8 @@ async fn rules_page(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let pnames = project_name_map(&state.pool).await;
+
     let rules = if let Some(pid) = q.project_id {
         db::semantic::list_rules(&state.pool, pid, None)
             .await
@@ -191,10 +204,31 @@ async fn rules_page(
         all
     };
 
+    // Attach project names to rules for display
+    #[derive(serde::Serialize)]
+    struct RuleView {
+        id: uuid::Uuid,
+        category: db::RuleCategory,
+        content: String,
+        project_name: String,
+    }
+    let rule_views: Vec<RuleView> = rules
+        .iter()
+        .map(|r| RuleView {
+            id: r.id,
+            category: r.category.clone(),
+            content: r.content.clone(),
+            project_name: pnames
+                .get(&r.project_id)
+                .cloned()
+                .unwrap_or_else(|| r.project_id.to_string()),
+        })
+        .collect();
+
     render(
         &state.env,
         "rules.html",
-        context! { rules => rules, projects => projects },
+        context! { rules => rule_views, projects => projects },
     )
 }
 
@@ -214,19 +248,29 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut total_tasks: usize = 0;
+    let mut completed_tasks: usize = 0;
     let mut active_tasks: usize = 0;
     let mut total_attempts: usize = 0;
     let mut total_rejected: usize = 0;
+    let mut total_accepted: usize = 0;
     let mut total_rules: usize = 0;
+    let mut first_try_success: usize = 0;
+    let mut total_rule_bytes: usize = 0;
+    let mut total_attempt_bytes: usize = 0;
+    let mut total_context_wipes: usize = 0;
 
     #[derive(serde::Serialize)]
     struct ProjectStats {
         id: uuid::Uuid,
         name: String,
         task_count: usize,
+        completed_count: usize,
         active_count: usize,
         attempt_count: usize,
+        rejected_count: usize,
         rule_count: usize,
+        first_try_count: usize,
+        knowledge_bytes: usize,
     }
 
     let mut project_stats = Vec::new();
@@ -238,36 +282,74 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
             .iter()
             .filter(|t| t.status == db::TaskStatus::Active)
             .count();
+        let completed = tasks
+            .iter()
+            .filter(|t| t.status == db::TaskStatus::Completed)
+            .count();
         let rules = db::semantic::list_rules(&state.pool, p.id, None)
             .await
             .unwrap_or_default();
 
+        let p_rule_bytes: usize = rules.iter().map(|r| r.content.len()).sum();
+
         let mut p_attempts: usize = 0;
         let mut p_rejected: usize = 0;
+        let mut p_accepted: usize = 0;
+        let mut p_first_try: usize = 0;
+        let mut p_attempt_bytes: usize = 0;
         for t in &tasks {
             let attempts = db::attempts::list_attempts(&state.pool, t.id, None)
                 .await
                 .unwrap_or_default();
-            p_rejected += attempts
+            let t_rejected = attempts
                 .iter()
                 .filter(|a| a.outcome == db::AttemptOutcome::Rejected)
                 .count();
+            let t_accepted = attempts
+                .iter()
+                .filter(|a| a.outcome == db::AttemptOutcome::Accepted)
+                .count();
+            // First-try success: completed with accepted attempts but zero rejections
+            if t.status == db::TaskStatus::Completed && t_rejected == 0 && t_accepted > 0 {
+                p_first_try += 1;
+            }
+            for a in &attempts {
+                p_attempt_bytes += a.approach_summary.len()
+                    + a.reasoning.len()
+                    + a.code_snippet.as_ref().map_or(0, |c| c.len());
+            }
+            p_rejected += t_rejected;
+            p_accepted += t_accepted;
             p_attempts += attempts.len();
+
+            let wipes = db::snapshots::count_snapshots(&state.pool, t.id)
+                .await
+                .unwrap_or(0) as usize;
+            total_context_wipes += wipes;
         }
 
         total_tasks += tasks.len();
+        completed_tasks += completed;
         active_tasks += active;
         total_attempts += p_attempts;
         total_rejected += p_rejected;
+        total_accepted += p_accepted;
         total_rules += rules.len();
+        first_try_success += p_first_try;
+        total_rule_bytes += p_rule_bytes;
+        total_attempt_bytes += p_attempt_bytes;
 
         project_stats.push(ProjectStats {
             id: p.id,
             name: p.name.clone(),
             task_count: tasks.len(),
+            completed_count: completed,
             active_count: active,
             attempt_count: p_attempts,
+            rejected_count: p_rejected,
             rule_count: rules.len(),
+            first_try_count: p_first_try,
+            knowledge_bytes: p_rule_bytes + p_attempt_bytes,
         });
     }
 
@@ -276,6 +358,18 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     } else {
         0
     };
+    let first_try_rate = if completed_tasks > 0 {
+        (first_try_success * 100) / completed_tasks
+    } else {
+        0
+    };
+    // ~3 bytes per token estimate
+    let knowledge_tokens = (total_rule_bytes + total_attempt_bytes) / 3;
+    let avg_attempts_per_task = if completed_tasks > 0 {
+        format!("{:.1}", total_attempts as f64 / completed_tasks as f64)
+    } else {
+        "—".to_string()
+    };
 
     render(
         &state.env,
@@ -283,10 +377,20 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
         context! {
             total_projects => projects.len(),
             total_tasks => total_tasks,
+            completed_tasks => completed_tasks,
             active_tasks => active_tasks,
             total_attempts => total_attempts,
+            total_accepted => total_accepted,
+            total_rejected => total_rejected,
             total_rules => total_rules,
             rejection_rate => rejection_rate,
+            first_try_success => first_try_success,
+            first_try_rate => first_try_rate,
+            knowledge_tokens => knowledge_tokens,
+            total_rule_bytes => total_rule_bytes,
+            total_attempt_bytes => total_attempt_bytes,
+            context_wipes => total_context_wipes,
+            avg_attempts_per_task => avg_attempts_per_task,
             projects => project_stats,
         },
     )

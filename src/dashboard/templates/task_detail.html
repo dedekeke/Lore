@@ -19,9 +19,9 @@
   <tbody>
     {% for a in attempts %}
     <tr>
-      <td class="truncate">{{ a.approach_summary | truncate(length=60) }}</td>
+      <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
-      <td class="truncate">{{ a.reasoning | truncate(length=60) }}</td>
+      <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
       <td class="mono">{{ a.created_at | truncate(length=10) }}</td>
     </tr>
     {% endfor %}

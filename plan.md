@@ -38,8 +38,10 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 28 | ~~Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net~~ | Reverted (phase 32) — MCP server can't observe full context |
 | 29 | ~~Fix context counter reset: only reset on true session boundaries~~ | Reverted (phase 32) — part of removed auto-snapshot system |
 | 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | PR #27 |
-| 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | In progress |
-| 32 | Remove broken auto-snapshot system, delegate context preservation to AI client via CLAUDE.md protocol | In progress |
+| 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | PR #28 |
+| 32 | Remove broken auto-snapshot system, delegate context preservation to AI client via CLAUDE.md protocol | PR #28 |
+| 33 | Move code_snippet to log_outcome, add resolved_attempt_id to tasks, subtask protocol | PR #28 |
+| 34 | Dashboard UX: content modals, project names, effectiveness analytics (first-try rate, knowledge tokens) | In progress |
 
 ---
 

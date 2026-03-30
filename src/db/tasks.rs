@@ -179,7 +179,7 @@ pub async fn get_task_stats(
                  COUNT(a.id) FILTER (WHERE a.outcome = 'rejected') AS rejected_attempts, \
                  COUNT(a.id) FILTER (WHERE a.outcome = 'accepted') AS accepted_attempts, \
                  COUNT(a.id) FILTER (WHERE a.outcome = 'unknown') AS unknown_attempts, \
-                 EXTRACT(EPOCH FROM (t.completed_at - t.created_at)) / 60.0 AS resolution_minutes \
+                 (EXTRACT(EPOCH FROM (t.completed_at - t.created_at)) / 60.0)::FLOAT8 AS resolution_minutes \
                  FROM ai_memory.tasks t \
                  LEFT JOIN ai_memory.attempts a ON a.task_id = t.id \
                  WHERE t.project_id = $1 AND t.status = $2 \
@@ -198,7 +198,7 @@ pub async fn get_task_stats(
                  COUNT(a.id) FILTER (WHERE a.outcome = 'rejected') AS rejected_attempts, \
                  COUNT(a.id) FILTER (WHERE a.outcome = 'accepted') AS accepted_attempts, \
                  COUNT(a.id) FILTER (WHERE a.outcome = 'unknown') AS unknown_attempts, \
-                 EXTRACT(EPOCH FROM (t.completed_at - t.created_at)) / 60.0 AS resolution_minutes \
+                 (EXTRACT(EPOCH FROM (t.completed_at - t.created_at)) / 60.0)::FLOAT8 AS resolution_minutes \
                  FROM ai_memory.tasks t \
                  LEFT JOIN ai_memory.attempts a ON a.task_id = t.id \
                  WHERE t.project_id = $1 \

@@ -86,6 +86,31 @@ pub async fn list_rules(
     }
 }
 
+pub async fn count_rules(
+    pool: &PgPool,
+    project_id: Uuid,
+    category: Option<RuleCategory>,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = match category {
+        Some(cat) => {
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1 AND category = $2",
+            )
+            .bind(project_id)
+            .bind(&cat)
+            .fetch_one(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1")
+                .bind(project_id)
+                .fetch_one(pool)
+                .await?
+        }
+    };
+    Ok(row.0)
+}
+
 pub async fn update_rule(
     pool: &PgPool,
     id: Uuid,
@@ -116,6 +141,14 @@ pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn batch_delete_rules(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM ai_memory.semantic_rules WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 /// Hybrid search: combines vector similarity (cosine) with full-text keyword search (BM25)

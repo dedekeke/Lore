@@ -4,25 +4,39 @@
 <h1>Rules</h1>
 
 {% if projects %}
-<div style="margin-bottom: 1rem;">
+<div style="display: flex; gap: 0.4rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
   {% for p in projects %}
-  <a href="/rules?project_id={{ p.id }}" class="btn" style="margin-right: 0.25rem;">{{ p.name }}</a>
+  <a href="/rules?project_id={{ p.id }}" class="btn">{{ p.name }}</a>
   {% endfor %}
   <a href="/rules" class="btn">All</a>
 </div>
 {% endif %}
 
+<div id="batch-bar" style="display: none; gap: 0.5rem; margin-bottom: 1rem; align-items: center;">
+  <span id="selected-count" class="mono" style="color: var(--muted);"></span>
+  <button class="btn btn-danger" onclick="batchDeleteRules()">Delete Selected</button>
+</div>
+
 {% if rules %}
 <table>
-  <thead><tr><th>Category</th><th>Content</th><th>Project</th><th>Actions</th></tr></thead>
+  <thead>
+    <tr>
+      <th style="width: 30px;"><input type="checkbox" id="select-all" onchange="toggleAll(this)"></th>
+      <th style="width: 100px;">Category</th>
+      <th>Content</th>
+      <th style="width: 120px;">Project</th>
+      <th style="width: 70px;"></th>
+    </tr>
+  </thead>
   <tbody id="rules-body">
     {% for r in rules %}
     <tr id="rule-{{ r.id }}">
+      <td><input type="checkbox" class="rule-cb" value="{{ r.id }}" onchange="updateBatchBar()"></td>
       <td><span class="badge badge-{{ r.category | lower }}">{{ r.category }}</span></td>
       <td class="clickable-cell" onclick="showModal('Rule', this.dataset.full)" data-full="{{ r.content }}">{{ r.content | truncate(length=100) }}</td>
-      <td>{{ r.project_name }}</td>
+      <td style="color: var(--muted);">{{ r.project_name }}</td>
       <td>
-        <button class="btn btn-danger" hx-delete="/rules/{{ r.id }}" hx-target="#rule-{{ r.id }}" hx-swap="outerHTML" hx-confirm="Delete this rule?">Delete</button>
+        <button class="btn btn-danger" style="font-size: 0.7rem; padding: 0.2rem 0.5rem;" hx-delete="/rules/{{ r.id }}" hx-target="#rule-{{ r.id }}" hx-swap="outerHTML" hx-confirm="Delete this rule?">Delete</button>
       </td>
     </tr>
     {% endfor %}
@@ -31,4 +45,30 @@
 {% else %}
 <div class="empty">No rules found</div>
 {% endif %}
+
+<script>
+function toggleAll(el) {
+  document.querySelectorAll('.rule-cb').forEach(cb => cb.checked = el.checked);
+  updateBatchBar();
+}
+function getSelectedIds() {
+  return Array.from(document.querySelectorAll('.rule-cb:checked')).map(cb => cb.value);
+}
+function updateBatchBar() {
+  const ids = getSelectedIds();
+  const bar = document.getElementById('batch-bar');
+  bar.style.display = ids.length > 0 ? 'flex' : 'none';
+  document.getElementById('selected-count').textContent = ids.length + ' selected';
+}
+async function batchDeleteRules() {
+  const ids = getSelectedIds();
+  if (!ids.length || !confirm('Delete ' + ids.length + ' rule(s)?')) return;
+  const res = await fetch('/batch/rules/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids})
+  });
+  if (res.ok) ids.forEach(id => document.getElementById('rule-' + id)?.remove());
+  updateBatchBar();
+}
+</script>
 {% endblock %}

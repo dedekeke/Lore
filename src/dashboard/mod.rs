@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::Html,
     routing::{delete, get, post},
-    Router,
+    Json, Router,
 };
 use minijinja::{context, Environment};
 use sqlx::PgPool;
@@ -30,9 +30,18 @@ fn truncate_filter(value: String, kwargs: minijinja::value::Kwargs) -> String {
     }
 }
 
+/// Format a DateTime string as dd-mm-yyyy
+fn dateformat(value: String) -> String {
+    // Input is ISO 8601 like "2026-03-29T13:57:14.579090Z"
+    chrono::DateTime::parse_from_rfc3339(&value)
+        .map(|dt| dt.format("%d-%m-%Y").to_string())
+        .unwrap_or_else(|_| value.chars().take(10).collect())
+}
+
 pub fn router(pool: PgPool) -> Router {
     let mut env = Environment::new();
     env.add_filter("truncate", truncate_filter);
+    env.add_filter("dateformat", dateformat);
     env.add_template("base.html", include_str!("templates/base.html"))
         .unwrap();
     env.add_template("projects.html", include_str!("templates/projects.html"))
@@ -60,9 +69,12 @@ pub fn router(pool: PgPool) -> Router {
     Router::new()
         .route("/", get(projects_page))
         .route("/projects/{id}", get(project_detail))
-            .route("/tasks/{id}", get(task_detail).delete(delete_task_handler))
+        .route("/tasks/{id}", get(task_detail).delete(delete_task_handler))
         .route("/tasks/{id}/complete", post(complete_task))
         .route("/tasks/{id}/abandon", post(abandon_task))
+        .route("/batch/tasks/delete", post(batch_delete_tasks))
+        .route("/batch/tasks/status", post(batch_update_tasks_status))
+        .route("/batch/rules/delete", post(batch_delete_rules))
         .route("/rules", get(rules_page))
         .route("/rules/{id}", delete(delete_rule))
         .route("/analytics", get(analytics_page))
@@ -122,21 +134,107 @@ async fn projects_page(State(state): State<DashboardState>) -> Result<Html<Strin
     )
 }
 
+#[derive(serde::Deserialize)]
+pub struct ProjectDetailQuery {
+    status: Option<String>,
+    priority: Option<String>,
+    task_type: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+    sort: Option<String>,
+    dir: Option<String>,
+}
+
 async fn project_detail(
     State(state): State<DashboardState>,
     Path(id): Path<uuid::Uuid>,
+    Query(q): Query<ProjectDetailQuery>,
 ) -> Result<Html<String>, StatusCode> {
     let project = db::projects::get_project(&state.pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let tasks = db::tasks::list_tasks(&state.pool, id, None)
+
+    let status_filter = q.status.as_deref().and_then(|s| match s {
+        "active" => Some(db::TaskStatus::Active),
+        "completed" => Some(db::TaskStatus::Completed),
+        "abandoned" => Some(db::TaskStatus::Abandoned),
+        "blocked" => Some(db::TaskStatus::Blocked),
+        _ => None,
+    });
+
+    let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
+    let page = q.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * per_page;
+    let sort_col = q.sort.as_deref().unwrap_or("created_at");
+    let sort_dir = q.dir.as_deref().unwrap_or("desc");
+
+    let total = db::tasks::count_tasks(&state.pool, id, status_filter.clone())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let total_pages = (total + per_page - 1) / per_page;
+
+    let mut tasks = db::tasks::list_tasks_paginated(
+        &state.pool,
+        id,
+        status_filter,
+        sort_col,
+        sort_dir,
+        per_page,
+        offset,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // In-memory filtering for priority and task_type (pending DB-level filter)
+    if let Some(ref p) = q.priority {
+        tasks.retain(|t| t.priority.as_deref() == Some(p.as_str()));
+    }
+    if let Some(ref tt) = q.task_type {
+        tasks.retain(|t| t.task_type.as_deref() == Some(tt.as_str()));
+    }
+
+    // Collect distinct values for filter dropdowns
+    let all_tasks = db::tasks::list_tasks(&state.pool, id, None)
+        .await
+        .unwrap_or_default();
+    let priorities: Vec<String> = {
+        let mut v: Vec<String> = all_tasks
+            .iter()
+            .filter_map(|t| t.priority.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let task_types: Vec<String> = {
+        let mut v: Vec<String> = all_tasks
+            .iter()
+            .filter_map(|t| t.task_type.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+
     render(
         &state.env,
         "project_detail.html",
-        context! { project => project, tasks => tasks },
+        context! {
+            project => project,
+            tasks => tasks,
+            priorities => priorities,
+            task_types => task_types,
+            current_status => q.status,
+            current_priority => q.priority,
+            current_task_type => q.task_type,
+            page => page,
+            per_page => per_page,
+            total_pages => total_pages,
+            total => total,
+            sort => sort_col,
+            dir => sort_dir,
+        },
     )
 }
 
@@ -192,6 +290,58 @@ async fn delete_task_handler(
     Ok(Html(String::new()))
 }
 
+// --- Batch operations ---
+
+#[derive(serde::Deserialize)]
+struct BatchIdsPayload {
+    ids: Vec<uuid::Uuid>,
+}
+
+#[derive(serde::Deserialize)]
+struct BatchStatusPayload {
+    ids: Vec<uuid::Uuid>,
+    status: String,
+}
+
+async fn batch_delete_tasks(
+    State(state): State<DashboardState>,
+    Json(payload): Json<BatchIdsPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let count = db::tasks::batch_delete_tasks(&state.pool, &payload.ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "deleted": count })))
+}
+
+async fn batch_update_tasks_status(
+    State(state): State<DashboardState>,
+    Json(payload): Json<BatchStatusPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let status = match payload.status.as_str() {
+        "active" => db::TaskStatus::Active,
+        "completed" => db::TaskStatus::Completed,
+        "abandoned" => db::TaskStatus::Abandoned,
+        "blocked" => db::TaskStatus::Blocked,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    let count = db::tasks::batch_update_task_status(&state.pool, &payload.ids, status)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "updated": count })))
+}
+
+async fn batch_delete_rules(
+    State(state): State<DashboardState>,
+    Json(payload): Json<BatchIdsPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let count = db::semantic::batch_delete_rules(&state.pool, &payload.ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "deleted": count })))
+}
+
+// --- Rules ---
+
 #[derive(serde::Deserialize)]
 pub struct RulesQuery {
     project_id: Option<uuid::Uuid>,
@@ -222,7 +372,6 @@ async fn rules_page(
         all
     };
 
-    // Attach project names to rules for display
     #[derive(serde::Serialize)]
     struct RuleView {
         id: uuid::Uuid,
@@ -327,7 +476,6 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
                 .iter()
                 .filter(|a| a.outcome == db::AttemptOutcome::Accepted)
                 .count();
-            // First-try success: completed with accepted attempts but zero rejections
             if t.status == db::TaskStatus::Completed && t_rejected == 0 && t_accepted > 0 {
                 p_first_try += 1;
             }
@@ -381,7 +529,6 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     } else {
         0
     };
-    // ~3 bytes per token estimate
     let knowledge_tokens = (total_rule_bytes + total_attempt_bytes) / 3;
     let avg_attempts_per_task = if completed_tasks > 0 {
         format!("{:.1}", total_attempts as f64 / completed_tasks as f64)

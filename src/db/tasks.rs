@@ -21,6 +21,9 @@ pub struct Task {
     pub resolved_attempt_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub priority: Option<String>,
+    pub task_type: Option<String>,
+    pub summary: Option<String>,
 }
 
 pub async fn create_task(
@@ -29,22 +32,36 @@ pub async fn create_task(
     description: &str,
     parent_task_id: Option<Uuid>,
 ) -> Result<Uuid, sqlx::Error> {
+    // Auto-generate summary from first sentence or first 120 chars
+    let summary = generate_summary(description);
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
     .bind(parent_task_id)
+    .bind(&summary)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
 }
 
+fn generate_summary(description: &str) -> String {
+    let first_line = description.lines().next().unwrap_or(description);
+    if first_line.len() <= 120 {
+        first_line.to_string()
+    } else {
+        let mut s: String = first_line.chars().take(117).collect();
+        s.push_str("...");
+        s
+    }
+}
+
 #[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
          FROM ai_memory.tasks WHERE id = $1",
     )
     .bind(id)
@@ -67,7 +84,7 @@ pub async fn list_tasks(
 ) -> Result<Vec<Task>, sqlx::Error> {
     match status {
         Some(s) => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
                  FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at",
         )
         .bind(project_id)
@@ -75,7 +92,7 @@ pub async fn list_tasks(
         .fetch_all(pool)
         .await,
         None => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
                  FROM ai_memory.tasks WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -224,13 +241,129 @@ pub async fn complete_task(
     id: Uuid,
     resolved_attempt_id: Option<Uuid>,
 ) -> Result<bool, sqlx::Error> {
+    // Auto-resolve attempts: accept latest pending, reject the rest
+    let auto_resolved = super::attempts::resolve_attempts_on_complete(pool, id).await?;
+    let final_resolved = resolved_attempt_id.or(auto_resolved);
+
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
          resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
     )
     .bind(id)
-    .bind(resolved_attempt_id)
+    .bind(final_resolved)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn count_tasks(
+    pool: &PgPool,
+    project_id: Uuid,
+    status: Option<TaskStatus>,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = match status {
+        Some(s) => {
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1 AND status = $2",
+            )
+            .bind(project_id)
+            .bind(&s)
+            .fetch_one(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1")
+                .bind(project_id)
+                .fetch_one(pool)
+                .await?
+        }
+    };
+    Ok(row.0)
+}
+
+/// Paginated + sorted task list for dashboard
+pub async fn list_tasks_paginated(
+    pool: &PgPool,
+    project_id: Uuid,
+    status: Option<TaskStatus>,
+    sort_col: &str,
+    sort_dir: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Task>, sqlx::Error> {
+    // Whitelist sort columns to prevent SQL injection
+    let col = match sort_col {
+        "status" => "status",
+        "priority" => "priority",
+        "task_type" => "task_type",
+        "summary" => "summary",
+        _ => "created_at",
+    };
+    let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
+    // NULLS LAST for ascending, NULLS FIRST for descending (default pg behavior is fine)
+    let nulls = if dir == "ASC" {
+        "NULLS LAST"
+    } else {
+        "NULLS FIRST"
+    };
+
+    let q = match status {
+        Some(ref s) => {
+            let sql = format!(
+                "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+                 created_at, completed_at, priority, task_type, summary \
+                 FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
+                 ORDER BY {col} {dir} {nulls} LIMIT $3 OFFSET $4"
+            );
+            sqlx::query_as(&sql)
+                .bind(project_id)
+                .bind(s)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+        None => {
+            let sql = format!(
+                "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+                 created_at, completed_at, priority, task_type, summary \
+                 FROM ai_memory.tasks WHERE project_id = $1 \
+                 ORDER BY {col} {dir} {nulls} LIMIT $2 OFFSET $3"
+            );
+            sqlx::query_as(&sql)
+                .bind(project_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+    };
+    q
+}
+
+pub async fn batch_delete_tasks(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn batch_update_task_status(
+    pool: &PgPool,
+    ids: &[Uuid],
+    status: TaskStatus,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = $2, \
+         completed_at = CASE WHEN $2 = 'completed' THEN NOW() \
+                             WHEN $2 = 'abandoned' THEN NOW() \
+                             ELSE NULL END \
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(&status)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }

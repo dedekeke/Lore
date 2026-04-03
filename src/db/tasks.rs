@@ -52,6 +52,14 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Err
     .await
 }
 
+pub async fn delete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn list_tasks(
     pool: &PgPool,
     project_id: Uuid,

@@ -60,7 +60,7 @@ pub fn router(pool: PgPool) -> Router {
     Router::new()
         .route("/", get(projects_page))
         .route("/projects/{id}", get(project_detail))
-        .route("/tasks/{id}", get(task_detail))
+            .route("/tasks/{id}", get(task_detail).delete(delete_task_handler))
         .route("/tasks/{id}/complete", post(complete_task))
         .route("/tasks/{id}/abandon", post(abandon_task))
         .route("/rules", get(rules_page))
@@ -180,6 +180,16 @@ async fn abandon_task(
     Ok(Html(
         r#"<span class="badge badge-abandoned">Abandoned</span>"#.to_string(),
     ))
+}
+
+async fn delete_task_handler(
+    State(state): State<DashboardState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Html<String>, StatusCode> {
+    db::tasks::delete_task(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Html(String::new()))
 }
 
 #[derive(serde::Deserialize)]

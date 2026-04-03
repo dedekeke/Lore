@@ -24,10 +24,16 @@ pub struct LoreServerInner {
     pub current_project_id: RwLock<Option<Uuid>>,
     pub cache: LoreCache,
     pub tool_call_count: AtomicU64,
+    pub http_client: reqwest::Client,
 }
 
 impl LoreServer {
     pub fn new(pool: PgPool, embeddings: AnyEmbeddingProvider, config: Config) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+            
         Self {
             inner: Arc::new(LoreServerInner {
                 pool,
@@ -36,6 +42,7 @@ impl LoreServer {
                 current_project_id: RwLock::new(None),
                 cache: LoreCache::new(1000, 500),
                 tool_call_count: AtomicU64::new(0),
+                http_client,
             }),
         }
     }
@@ -91,6 +98,7 @@ impl LoreServer {
 
     /// Capture current git HEAD commit hash for the project's root_path
     async fn capture_git_ref(&self) -> Option<String> {
+        if !self.config().capture_git_ref { return None; }
         let pid = self.inner.current_project_id.read().await;
         let project_id = (*pid)?;
         drop(pid);
@@ -173,10 +181,25 @@ impl LoreServer {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
     }
 
-    fn fire_webhook(&self, event: &str, data: serde_json::Value) {
+    async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
         if let Some(url) = &self.config().webhook_url {
-            let project = self.config().default_project_name.clone();
-            webhooks::fire(url, &self.config().webhook_events, event, &project, data);
+            let project_name = if let Some(pid) = *self.inner.current_project_id.read().await {
+                if let Ok(Some(project)) = db::projects::get_project(self.pool(), pid).await {
+                    project.name
+                } else {
+                    self.config().default_project_name.clone()
+                }
+            } else {
+                self.config().default_project_name.clone()
+            };
+            webhooks::fire(
+                &self.inner.http_client,
+                url,
+                &self.config().webhook_events,
+                event,
+                &project_name,
+                data,
+            );
         }
     }
 
@@ -509,7 +532,7 @@ impl LoreServer {
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
-                    );
+                    ).await;
                 }
             }
         }
@@ -604,7 +627,7 @@ impl LoreServer {
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({ "task_id": task_id, "lesson": lesson }),
-            );
+            ).await;
         }
 
         Self::json_content_with_nudge(
@@ -650,7 +673,7 @@ impl LoreServer {
             self.fire_webhook(
                 "task_abandoned",
                 serde_json::json!({ "task_id": task_id, "reason": reason }),
-            );
+            ).await;
         }
 
         Self::json_content_with_nudge(

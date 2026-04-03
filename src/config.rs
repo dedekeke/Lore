@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
+use std::io::BufRead;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {
@@ -62,6 +63,7 @@ pub struct Config {
     pub webhook_rejection_threshold: u32,
     pub dashboard_enabled: bool,
     pub dashboard_port: u16,
+    pub capture_git_ref: bool,
 }
 
 impl Config {
@@ -149,6 +151,10 @@ impl Config {
                 .to_lowercase()
                 == "true",
             dashboard_port: parse_warn_or("DASHBOARD_PORT", 3101),
+            capture_git_ref: env::var("CAPTURE_GIT_REF")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
         }
     }
 }
@@ -204,6 +210,7 @@ mod tests {
             "WEBHOOK_REJECTION_THRESHOLD",
             "DASHBOARD_ENABLED",
             "DASHBOARD_PORT",
+            "CAPTURE_GIT_REF",
         ] {
             std::env::remove_var(key);
         }
@@ -222,6 +229,7 @@ mod tests {
         assert_eq!(cfg.retention_attempts_days, 30);
         assert_eq!(cfg.default_project_name, "default");
         assert!(cfg.disabled_tools.is_empty());
+        assert!(!cfg.capture_git_ref);
     }
 
     #[test]

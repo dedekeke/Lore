@@ -189,6 +189,7 @@ fn mean_pool(token_embeddings: ArrayView3<f32>, attention_mask: &Array2<i64>) ->
 
 fn l2_normalize(embeddings: Array2<f32>) -> Array2<f32> {
     let norms = embeddings.mapv(|x| x * x).sum_axis(Axis(1)).mapv(f32::sqrt);
+    let norms = norms.mapv(|x| if x == 0.0 { 1.0 } else { x });
     let norms = norms.insert_axis(Axis(1));
     let norms = norms.broadcast(embeddings.dim()).unwrap().to_owned();
     embeddings / norms
@@ -217,8 +218,16 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<(), EmbeddingError> {
         .bytes()
         .map_err(|e| EmbeddingError::Api(format!("Failed to read response body: {e}")))?;
 
-    std::fs::write(dest, &bytes)
-        .map_err(|e| EmbeddingError::Model(format!("Failed to write {}: {e}", dest.display())))?;
+    // Atomic write by creating a temporary file first
+    let tmp_dest = dest.with_extension("tmp");
+    std::fs::write(&tmp_dest, &bytes)
+        .map_err(|e| EmbeddingError::Model(format!("Failed to write {}: {e}", tmp_dest.display())))?;
+        
+    std::fs::rename(&tmp_dest, dest)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_dest);
+            EmbeddingError::Model(format!("Failed to rename {} to {}: {e}", tmp_dest.display(), dest.display()))
+        })?;
 
     Ok(())
 }

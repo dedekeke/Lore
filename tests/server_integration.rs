@@ -58,7 +58,7 @@ async fn test_full_task_lifecycle() {
         .unwrap();
 
     let task_result = server
-        .start_task("implement feature X".into(), None)
+        .start_task("implement feature X".into(), None, None, None)
         .await
         .unwrap();
     let task_id = extract_json(&task_result)["task_id"]
@@ -179,7 +179,7 @@ async fn test_get_task_stats() {
     assert_eq!(json["summary"]["total_tasks"], 0);
 
     // Create task with attempts
-    let task = server.start_task("stats task".into(), None).await.unwrap();
+    let task = server.start_task("stats task".into(), None, None, None).await.unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let attempt = server
@@ -225,7 +225,7 @@ async fn test_abandon_task() {
         .await
         .unwrap();
 
-    let task = server.start_task("abandon me".into(), None).await.unwrap();
+    let task = server.start_task("abandon me".into(), None, None, None).await.unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let result = server
@@ -249,8 +249,8 @@ async fn test_list_tasks() {
         .await
         .unwrap();
 
-    server.start_task("task A".into(), None).await.unwrap();
-    server.start_task("task B".into(), None).await.unwrap();
+    server.start_task("task A".into(), None, None, None).await.unwrap();
+    server.start_task("task B".into(), None, None, None).await.unwrap();
 
     let list = server.list_tasks(None).await.unwrap();
     let tasks = extract_json(&list);
@@ -321,7 +321,7 @@ async fn test_generate_handoff() {
         .await
         .unwrap();
 
-    server.start_task("active task".into(), None).await.unwrap();
+    server.start_task("active task".into(), None, None, None).await.unwrap();
 
     let result = server.generate_handoff(Some(5000)).await.unwrap();
     let text = result
@@ -360,7 +360,7 @@ async fn test_log_context_wipe() {
         .await
         .unwrap();
 
-    let task = server.start_task("wipe task".into(), None).await.unwrap();
+    let task = server.start_task("wipe task".into(), None, None, None).await.unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let result = server.log_context_wipe(task_id, 10000, None).await.unwrap();

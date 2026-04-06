@@ -422,6 +422,12 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "UUID of parent task, if this is a subtask")]
         parent_task_id: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Priority level, e.g. P0, P1, P2, P3")]
+        priority: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
+        task_type: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
@@ -429,9 +435,16 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
-        let id = db::tasks::create_task(self.pool(), project_id, &description, parent)
-            .await
-            .map_err(Self::db_err)?;
+        let id = db::tasks::create_task(
+            self.pool(),
+            project_id,
+            &description,
+            parent,
+            priority.as_deref(),
+            task_type.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
             &serde_json::json!({ "task_id": id.to_string() }),
             "Task created. Next: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.",

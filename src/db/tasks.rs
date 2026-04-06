@@ -31,14 +31,20 @@ pub async fn create_task(
     project_id: Uuid,
     description: &str,
     parent_task_id: Option<Uuid>,
+    priority: Option<&str>,
+    task_type: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
+    let summary = generate_summary(description);
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
     .bind(parent_task_id)
+    .bind(&summary)
+    .bind(priority)
+    .bind(task_type)
     .fetch_one(pool)
     .await?;
     Ok(row.0)

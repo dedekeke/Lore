@@ -312,6 +312,34 @@ pub async fn list_tasks_paginated(
     }
 }
 
+/// Direct children only (depth=1), not recursive.
+pub async fn list_subtasks(
+    pool: &PgPool,
+    parent_task_id: Uuid,
+) -> Result<Vec<Task>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+         created_at, completed_at, priority, task_type, summary \
+         FROM ai_memory.tasks WHERE parent_task_id = $1 ORDER BY created_at",
+    )
+    .bind(parent_task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Returns true if parent has subtasks AND all are completed/abandoned
+pub async fn all_subtasks_done(pool: &PgPool, parent_task_id: Uuid) -> Result<bool, sqlx::Error> {
+    let row: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), \
+         COUNT(*) FILTER (WHERE status IN ('completed', 'abandoned')) \
+         FROM ai_memory.tasks WHERE parent_task_id = $1",
+    )
+    .bind(parent_task_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0 > 0 && row.0 == row.1)
+}
+
 pub async fn batch_delete_tasks(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = ANY($1)")
         .bind(ids)
@@ -342,17 +370,67 @@ pub async fn complete_task(
     id: Uuid,
     resolved_attempt_id: Option<Uuid>,
 ) -> Result<bool, sqlx::Error> {
-    // Auto-resolve attempts: accept latest pending, reject others
-    let auto_accepted = super::attempts::resolve_attempts_on_complete(pool, id).await?;
-    let final_attempt_id = resolved_attempt_id.or(auto_accepted);
-
+    // Guard: only transition non-completed tasks (prevents TOCTOU race on concurrent rollup)
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
-         resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
+         resolved_attempt_id = COALESCE($2, resolved_attempt_id) \
+         WHERE id = $1 AND status != 'completed'",
     )
     .bind(id)
-    .bind(final_attempt_id)
+    .bind(resolved_attempt_id)
     .execute(pool)
     .await?;
-    Ok(result.rows_affected() > 0)
+
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    // Auto-resolve attempts only after successful status transition
+    let auto_accepted = super::attempts::resolve_attempts_on_complete(pool, id).await?;
+    if resolved_attempt_id.is_none() {
+        if let Some(attempt_id) = auto_accepted {
+            sqlx::query(
+                "UPDATE ai_memory.tasks SET resolved_attempt_id = $2 \
+                 WHERE id = $1 AND resolved_attempt_id IS NULL",
+            )
+            .bind(id)
+            .bind(attempt_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    Ok(true)
+}
+
+/// Walk up the parent chain, auto-completing each ancestor whose subtasks are all done.
+/// Returns the number of parents rolled up. Caps at 10 levels.
+pub async fn try_rollup_parents(pool: &PgPool, task_id: Uuid) -> u32 {
+    let mut current_id = task_id;
+    let mut rolled = 0u32;
+    for _ in 0..10 {
+        let task = match get_task(pool, current_id).await {
+            Ok(Some(t)) => t,
+            _ => break,
+        };
+        let parent_id = match task.parent_task_id {
+            Some(pid) => pid,
+            None => break,
+        };
+        match all_subtasks_done(pool, parent_id).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, parent_id = %parent_id, "rollup check failed");
+                break;
+            }
+        }
+        if let Err(e) = complete_task(pool, parent_id, None).await {
+            tracing::warn!(error = %e, parent_id = %parent_id, "rollup complete failed");
+            break;
+        }
+        rolled += 1;
+        current_id = parent_id;
+    }
+    rolled
 }

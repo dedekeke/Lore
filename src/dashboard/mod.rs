@@ -249,10 +249,19 @@ async fn task_detail(
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let subtasks = db::tasks::list_subtasks(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parent = match task.parent_task_id {
+        Some(pid) => db::tasks::get_task(&state.pool, pid)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        None => None,
+    };
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts },
+        context! { task => task, attempts => attempts, subtasks => subtasks, parent => parent },
     )
 }
 
@@ -263,6 +272,7 @@ async fn complete_task(
     db::tasks::complete_task(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db::tasks::try_rollup_parents(&state.pool, id).await;
     Ok(Html(
         r#"<span class="badge badge-completed">Completed</span>"#.to_string(),
     ))
@@ -275,6 +285,7 @@ async fn abandon_task(
     db::tasks::abandon_task(&state.pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db::tasks::try_rollup_parents(&state.pool, id).await;
     Ok(Html(
         r#"<span class="badge badge-abandoned">Abandoned</span>"#.to_string(),
     ))

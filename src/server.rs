@@ -627,16 +627,22 @@ impl LoreServer {
             }
         }
 
+        let rolled_up = if success {
+            db::tasks::try_rollup_parents(self.pool(), tid).await
+        } else {
+            0
+        };
+
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson }),
+                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parents_rolled_up": rolled_up }),
             )
             .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task closed. For your next goal, call start_task(description).",
         )
     }
@@ -674,16 +680,22 @@ impl LoreServer {
             .map_err(Self::db_err)?;
         }
 
+        let rolled_up = if success {
+            db::tasks::try_rollup_parents(self.pool(), tid).await
+        } else {
+            0
+        };
+
         if success {
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason }),
+                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
             )
             .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task abandoned. For your next goal, call start_task(description).",
         )
     }
@@ -701,6 +713,20 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&tasks)
+    }
+
+    #[tool(description = "List subtasks of a parent task")]
+    pub async fn list_subtasks(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the parent task")]
+        parent_task_id: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let pid = Self::parse_uuid(&parent_task_id)?;
+        let subtasks = db::tasks::list_subtasks(self.pool(), pid)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&subtasks)
     }
 
     #[tool(

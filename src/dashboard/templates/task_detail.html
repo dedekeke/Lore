@@ -3,6 +3,9 @@
 {% block content %}
 <div style="margin-bottom: 2rem;">
   <a href="/projects/{{ task.project_id }}" class="btn">&larr; Tasks</a>
+  {% if parent %}
+  <a href="/tasks/{{ parent.id }}" class="btn">&larr; Parent: {{ parent.summary | default(value=parent.description) | truncate(length=40) }}</a>
+  {% endif %}
 </div>
 
 <h1>{{ task.summary | default(value=task.description | truncate(length=80)) }}</h1>
@@ -10,6 +13,7 @@
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
   {% if task.priority %}<span class="badge badge-priority">{{ task.priority }}</span>{% endif %}
   {% if task.task_type %}<span class="badge badge-type">{{ task.task_type }}</span>{% endif %}
+  {% if parent %}<span class="badge" style="background: var(--surface); border: 1px solid var(--border);">Subtask</span>{% endif %}
   <span class="mono" style="color: var(--muted);">{{ task.id }}</span>
   {% if task.status == "Active" %}
   <button class="btn" hx-post="/tasks/{{ task.id }}/complete" hx-target="#task-status" hx-swap="outerHTML">Complete</button>
@@ -21,6 +25,22 @@
 {% if task.summary %}
 <h2>Description</h2>
 <div class="section-note" style="white-space: pre-wrap;">{{ task.description }}</div>
+{% endif %}
+
+{% if subtasks %}
+<h2>Subtasks ({{ subtasks | length }})</h2>
+<table>
+  <thead><tr><th>Summary</th><th style="width: 90px;">Status</th><th style="width: 100px;">Created</th></tr></thead>
+  <tbody>
+    {% for s in subtasks %}
+    <tr>
+      <td><a href="/tasks/{{ s.id }}">{{ s.summary | default(value=s.description) | truncate(length=80) }}</a></td>
+      <td><span class="badge badge-{{ s.status | lower }}">{{ s.status }}</span></td>
+      <td class="mono" style="color: var(--muted);">{{ s.created_at | dateformat }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 
 <h2>Attempts ({{ attempts | length }})</h2>

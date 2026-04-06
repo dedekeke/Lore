@@ -9,7 +9,7 @@ async fn test_create_and_get_task() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let tid = tasks::create_task(&pool, pid, "do something", None)
+    let tid = tasks::create_task(&pool, pid, "do something", None, None, None)
         .await
         .unwrap();
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
@@ -24,8 +24,8 @@ async fn test_list_tasks_with_status_filter() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "task1", None).await.unwrap();
-    tasks::create_task(&pool, pid, "task2", None).await.unwrap();
+    let t1 = tasks::create_task(&pool, pid, "task1", None, None, None).await.unwrap();
+    tasks::create_task(&pool, pid, "task2", None, None, None).await.unwrap();
     tasks::complete_task(&pool, t1, None).await.unwrap();
 
     let active = tasks::list_tasks(&pool, pid, Some(TaskStatus::Active))
@@ -41,7 +41,7 @@ async fn test_list_tasks_with_status_filter() {
 async fn test_complete_task() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "finish me", None)
+    let tid = tasks::create_task(&pool, pid, "finish me", None, None, None)
         .await
         .unwrap();
 
@@ -56,7 +56,7 @@ async fn test_complete_task() {
 async fn test_update_task_status() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "block me", None)
+    let tid = tasks::create_task(&pool, pid, "block me", None, None, None)
         .await
         .unwrap();
 
@@ -72,10 +72,10 @@ async fn test_subtask_parent() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let parent = tasks::create_task(&pool, pid, "parent", None)
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None)
         .await
         .unwrap();
-    let child = tasks::create_task(&pool, pid, "child", Some(parent))
+    let child = tasks::create_task(&pool, pid, "child", Some(parent), None, None)
         .await
         .unwrap();
 
@@ -97,7 +97,7 @@ async fn test_get_task_stats_with_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "stats task", None)
+    let t1 = tasks::create_task(&pool, pid, "stats task", None, None, None)
         .await
         .unwrap();
     let a1 = attempts::create_attempt(&pool, t1, "approach 1", None, None)
@@ -148,10 +148,10 @@ async fn test_get_task_stats_filtered_by_status() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "active", None)
+    let t1 = tasks::create_task(&pool, pid, "active", None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "done", None).await.unwrap();
+    let t2 = tasks::create_task(&pool, pid, "done", None, None, None).await.unwrap();
     tasks::complete_task(&pool, t2, None).await.unwrap();
 
     let active = tasks::get_task_stats(&pool, pid, Some(TaskStatus::Active))

@@ -209,6 +209,38 @@ impl LoreServer {
         self.inner.tool_call_count.store(0, Ordering::Relaxed);
     }
 
+    /// Walk up the parent chain, auto-completing each ancestor whose subtasks are all done.
+    /// Returns the number of parents that were rolled up.
+    async fn try_rollup_parents(&self, task_id: Uuid) -> u32 {
+        let mut current_id = task_id;
+        let mut rolled = 0u32;
+        for _ in 0..10 {
+            let task = match db::tasks::get_task(self.pool(), current_id).await {
+                Ok(Some(t)) => t,
+                _ => break,
+            };
+            let parent_id = match task.parent_task_id {
+                Some(pid) => pid,
+                None => break,
+            };
+            match db::tasks::all_subtasks_done(self.pool(), parent_id).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::warn!(error = %e, parent_id = %parent_id, "rollup check failed");
+                    break;
+                }
+            }
+            if let Err(e) = db::tasks::complete_task(self.pool(), parent_id, None).await {
+                tracing::warn!(error = %e, parent_id = %parent_id, "rollup complete failed");
+                break;
+            }
+            rolled += 1;
+            current_id = parent_id;
+        }
+        rolled
+    }
+
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
         let json = serde_json::to_string_pretty(val)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
@@ -627,29 +659,22 @@ impl LoreServer {
             }
         }
 
-        // Rollup: if this task has a parent, check if all siblings are done
-        let mut parent_rolled_up = false;
-        if success {
-            if let Ok(Some(task)) = db::tasks::get_task(self.pool(), tid).await {
-                if let Some(parent_id) = task.parent_task_id {
-                    if let Ok(true) = db::tasks::all_subtasks_done(self.pool(), parent_id).await {
-                        let _ = db::tasks::complete_task(self.pool(), parent_id, None).await;
-                        parent_rolled_up = true;
-                    }
-                }
-            }
-        }
+        let rolled_up = if success {
+            self.try_rollup_parents(tid).await
+        } else {
+            0
+        };
 
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parent_rolled_up": parent_rolled_up }),
+                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parents_rolled_up": rolled_up }),
             )
             .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success, "parent_rolled_up": parent_rolled_up }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task closed. For your next goal, call start_task(description).",
         )
     }
@@ -687,16 +712,22 @@ impl LoreServer {
             .map_err(Self::db_err)?;
         }
 
+        let rolled_up = if success {
+            self.try_rollup_parents(tid).await
+        } else {
+            0
+        };
+
         if success {
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason }),
+                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
             )
             .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task abandoned. For your next goal, call start_task(description).",
         )
     }

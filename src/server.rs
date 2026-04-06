@@ -33,7 +33,7 @@ impl LoreServer {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-            
+
         Self {
             inner: Arc::new(LoreServerInner {
                 pool,
@@ -98,7 +98,9 @@ impl LoreServer {
 
     /// Capture current git HEAD commit hash for the project's root_path
     async fn capture_git_ref(&self) -> Option<String> {
-        if !self.config().capture_git_ref { return None; }
+        if !self.config().capture_git_ref {
+            return None;
+        }
         let pid = self.inner.current_project_id.read().await;
         let project_id = (*pid)?;
         drop(pid);
@@ -533,7 +535,8 @@ impl LoreServer {
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
-                    ).await;
+                    )
+                    .await;
                 }
             }
         }
@@ -628,7 +631,8 @@ impl LoreServer {
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({ "task_id": task_id, "lesson": lesson }),
-            ).await;
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(
@@ -674,7 +678,8 @@ impl LoreServer {
             self.fire_webhook(
                 "task_abandoned",
                 serde_json::json!({ "task_id": task_id, "reason": reason }),
-            ).await;
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(

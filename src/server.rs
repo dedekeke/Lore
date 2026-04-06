@@ -1289,7 +1289,7 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Search the indexed codebase for relevant code chunks. Returns the most relevant code snippets matching your query using hybrid vector + keyword search. Much faster and cheaper than reading entire files."
+        description = "Search the indexed codebase for relevant code chunks. Returns the most relevant code snippets matching your query using hybrid vector + keyword search with MMR diversity re-ranking. Much faster and cheaper than reading entire files."
     )]
     pub async fn search_codebase(
         &self,
@@ -1302,6 +1302,9 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
         file_pattern: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)")]
+        diversity: Option<f32>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;
         let project_id = self.project_id().await?;
@@ -1314,6 +1317,7 @@ impl LoreServer {
             &query,
             limit.unwrap_or(5),
             file_pattern.as_deref(),
+            Some(diversity.unwrap_or(0.3)),
         )
         .await
         .map_err(Self::db_err)?;

@@ -249,10 +249,19 @@ async fn task_detail(
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let subtasks = db::tasks::list_subtasks(&state.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let parent = match task.parent_task_id {
+        Some(pid) => db::tasks::get_task(&state.pool, pid)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        None => None,
+    };
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts },
+        context! { task => task, attempts => attempts, subtasks => subtasks, parent => parent },
     )
 }
 

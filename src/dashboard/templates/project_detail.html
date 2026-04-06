@@ -72,7 +72,7 @@
     {% for t in tasks %}
     <tr id="task-{{ t.id }}">
       <td><input type="checkbox" class="task-cb" value="{{ t.id }}" onchange="updateBatchBar()"></td>
-      <td><a href="/tasks/{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=80) }}</a></td>
+      <td>{% if t.parent_task_id %}<span style="color: var(--muted); margin-right: 0.3rem;">↳</span>{% endif %}<a href="/tasks/{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=80) }}</a></td>
       <td>{% if t.priority %}<span class="badge badge-priority">{{ t.priority }}</span>{% else %}<span style="color: var(--border);">—</span>{% endif %}</td>
       <td>{% if t.task_type %}<span class="badge badge-type">{{ t.task_type }}</span>{% else %}<span style="color: var(--border);">—</span>{% endif %}</td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>

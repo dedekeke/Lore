@@ -627,16 +627,29 @@ impl LoreServer {
             }
         }
 
+        // Rollup: if this task has a parent, check if all siblings are done
+        let mut parent_rolled_up = false;
+        if success {
+            if let Ok(Some(task)) = db::tasks::get_task(self.pool(), tid).await {
+                if let Some(parent_id) = task.parent_task_id {
+                    if let Ok(true) = db::tasks::all_subtasks_done(self.pool(), parent_id).await {
+                        let _ = db::tasks::complete_task(self.pool(), parent_id, None).await;
+                        parent_rolled_up = true;
+                    }
+                }
+            }
+        }
+
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson }),
+                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parent_rolled_up": parent_rolled_up }),
             )
             .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parent_rolled_up": parent_rolled_up }),
             "Task closed. For your next goal, call start_task(description).",
         )
     }
@@ -701,6 +714,20 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&tasks)
+    }
+
+    #[tool(description = "List subtasks of a parent task")]
+    pub async fn list_subtasks(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the parent task")]
+        parent_task_id: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let pid = Self::parse_uuid(&parent_task_id)?;
+        let subtasks = db::tasks::list_subtasks(self.pool(), pid)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&subtasks)
     }
 
     #[tool(

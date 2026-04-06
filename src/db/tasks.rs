@@ -312,6 +312,33 @@ pub async fn list_tasks_paginated(
     }
 }
 
+pub async fn list_subtasks(
+    pool: &PgPool,
+    parent_task_id: Uuid,
+) -> Result<Vec<Task>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+         created_at, completed_at, priority, task_type, summary \
+         FROM ai_memory.tasks WHERE parent_task_id = $1 ORDER BY created_at",
+    )
+    .bind(parent_task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Returns true if parent has subtasks AND all are completed/abandoned
+pub async fn all_subtasks_done(pool: &PgPool, parent_task_id: Uuid) -> Result<bool, sqlx::Error> {
+    let row: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), \
+         COUNT(*) FILTER (WHERE status IN ('completed', 'abandoned')) \
+         FROM ai_memory.tasks WHERE parent_task_id = $1",
+    )
+    .bind(parent_task_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0 > 0 && row.0 == row.1)
+}
+
 pub async fn batch_delete_tasks(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = ANY($1)")
         .bind(ids)

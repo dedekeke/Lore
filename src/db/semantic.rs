@@ -62,6 +62,15 @@ pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, s
     .await
 }
 
+pub async fn count_rules(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::Error> {
+    let row: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.0)
+}
+
 pub async fn list_rules(
     pool: &PgPool,
     project_id: Uuid,
@@ -152,24 +161,24 @@ pub async fn search_rules_hybrid(
     let candidate_limit = limit * 3;
     let emb = Vector::from(embedding.to_vec());
 
-    // Always bind category ($6) and task_type ($7) as nullable — simplifies parameter numbering
+    // Nullable params: $6=category, $7=task_type — pushed into CTEs for pre-filtering
     let cat_filter = "AND ($6::text IS NULL OR category::text = $6)";
-    let task_type_filter =
-        "AND (s.task_type_affinity IS NULL OR $7::text IS NULL OR $7 = ANY(s.task_type_affinity))";
+    let affinity_filter =
+        "AND (task_type_affinity IS NULL OR $7::text IS NULL OR $7 = ANY(task_type_affinity))";
 
     let sql = format!(
         "WITH vector_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
             FROM ai_memory.semantic_rules
             WHERE project_id = $1 AND embedding IS NOT NULL
-              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter}
+              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter} {affinity_filter}
             LIMIT $3
         ),
         fts_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, to_tsquery('english', $4)) DESC) AS f_rank
             FROM ai_memory.semantic_rules
             WHERE project_id = $1 AND content_tsv @@ to_tsquery('english', $4)
-              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter}
+              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter} {affinity_filter}
             LIMIT $3
         ),
         max_hits AS (
@@ -188,7 +197,6 @@ pub async fn search_rules_hybrid(
         FROM fused
         JOIN ai_memory.semantic_rules s ON s.id = fused.id
         CROSS JOIN max_hits mh
-        WHERE TRUE {task_type_filter}
         ORDER BY (
             0.35 * fused.v_score
           + 0.25 * fused.f_score
@@ -234,7 +242,7 @@ pub async fn search_rules_hybrid(
     Ok(results)
 }
 
-/// Async background increment of hit_count and last_used_at for returned search results
+/// Async background increment of hit_count and last_used_at (fire-and-forget with 5s timeout)
 fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
     if rules.is_empty() {
         return;
@@ -242,15 +250,20 @@ fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
     let ids: Vec<Uuid> = rules.iter().map(|r| r.id).collect();
     let pool = pool.clone();
     tokio::spawn(async move {
-        if let Err(e) = sqlx::query(
-            "UPDATE ai_memory.semantic_rules SET hit_count = hit_count + 1, last_used_at = NOW() \
-             WHERE id = ANY($1)",
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query(
+                "UPDATE ai_memory.semantic_rules SET hit_count = hit_count + 1, last_used_at = NOW() \
+                 WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .execute(&pool),
         )
-        .bind(&ids)
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!(error = %e, "Failed to increment hit_count for search results");
+        .await;
+        match result {
+            Err(_) => tracing::warn!("hit_count increment timed out"),
+            Ok(Err(e)) => tracing::warn!(error = %e, "Failed to increment hit_count"),
+            Ok(Ok(_)) => {}
         }
     });
 }

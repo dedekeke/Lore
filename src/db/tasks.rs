@@ -327,7 +327,7 @@ pub async fn batch_update_task_status(
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = $2, \
-         completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE NULL END \
+         completed_at = CASE WHEN $2 IN ('completed', 'abandoned') THEN NOW() ELSE NULL END \
          WHERE id = ANY($1)",
     )
     .bind(ids)

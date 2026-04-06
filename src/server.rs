@@ -803,7 +803,7 @@ impl LoreServer {
                 .map_err(Self::db_err)?;
         }
 
-        let active_rules = db::semantic::list_rules(self.pool(), project_id, None)
+        let active_rules_count = db::semantic::count_rules(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?;
 
@@ -826,7 +826,7 @@ impl LoreServer {
                 "project": project,
                 "active_tasks": active_tasks,
                 "recent_attempts": recent_attempts,
-                "active_rules_count": active_rules.len(),
+                "active_rules_count": active_rules_count,
                 "context_wipes": context_wipes,
             }),
             nudge,

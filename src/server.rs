@@ -1198,6 +1198,100 @@ impl LoreServer {
 
         Ok(CallToolResult::success(vec![Content::text(md)]))
     }
+
+    #[tool(
+        description = "Index a project's codebase into vector storage for semantic code search. Scans files respecting .gitignore, chunks by language-aware boundaries, embeds via ONNX, stores in pgvector. Incremental: only re-indexes changed files (SHA-256 fingerprinting). Call at session start for fast code retrieval."
+    )]
+    pub async fn index_codebase(
+        &self,
+        #[tool(param)]
+        #[schemars(
+            description = "Root path of the project to index (defaults to project root_path)"
+        )]
+        root_path: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+
+        let path = if let Some(ref p) = root_path {
+            p.clone()
+        } else {
+            let project = db::projects::get_project(self.pool(), project_id)
+                .await
+                .map_err(Self::db_err)?
+                .ok_or_else(|| rmcp::Error::internal_error("Project not found", None))?;
+            project.root_path
+        };
+
+        let result =
+            crate::indexer::index_codebase(self.pool(), self.embeddings(), project_id, &path, None)
+                .await
+                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        Self::json_content_with_nudge(
+            &result,
+            "Codebase indexed. Use search_codebase to find relevant code.",
+        )
+    }
+
+    #[tool(
+        description = "Search the indexed codebase for relevant code chunks. Returns the most relevant code snippets matching your query using hybrid vector + keyword search. Much faster and cheaper than reading entire files."
+    )]
+    pub async fn search_codebase(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Natural language query describing what code you're looking for")]
+        query: String,
+        #[tool(param)]
+        #[schemars(description = "Max results to return (default 5)")]
+        limit: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
+        file_pattern: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("query", &query, 2048)?;
+        let project_id = self.project_id().await?;
+        let embedding = self.embed(&query).await?;
+
+        let chunks = db::codebase::search_chunks(
+            self.pool(),
+            project_id,
+            &embedding,
+            &query,
+            limit.unwrap_or(5),
+            file_pattern.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
+
+        // Format results with file path and line numbers for easy navigation
+        let results: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "file": c.file_path,
+                    "lines": format!("{}:{}", c.start_line, c.end_line),
+                    "language": c.language,
+                    "content": c.content,
+                })
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &results,
+            "Use these code snippets as context for your current task.",
+        )
+    }
+
+    #[tool(
+        description = "Get statistics about the indexed codebase: file count, chunk count, last indexed time."
+    )]
+    pub async fn get_index_status(&self) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let stats = db::codebase::get_index_stats(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(&stats, "Call index_codebase to update the index if stale.")
+    }
 }
 
 impl ServerHandler for LoreServer {

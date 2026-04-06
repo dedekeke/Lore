@@ -4,6 +4,7 @@ pub mod config;
 pub mod dashboard;
 pub mod db;
 pub mod embeddings;
+pub mod indexer;
 pub mod server;
 pub mod tools;
 pub mod webhooks;

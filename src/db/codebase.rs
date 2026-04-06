@@ -53,6 +53,9 @@ pub async fn delete_stale_files(
     project_id: Uuid,
     current_files: &[String],
 ) -> Result<u64, sqlx::Error> {
+    if current_files.is_empty() {
+        return Ok(0);
+    }
     let result = sqlx::query(
         "DELETE FROM ai_memory.code_chunks WHERE project_id = $1 AND file_path != ALL($2)",
     )
@@ -76,7 +79,7 @@ pub async fn insert_chunks(
     let mut total = 0u64;
     // Insert in batches of 100 to avoid parameter limits
     for batch in chunks.chunks(100) {
-        let mut ids = Vec::with_capacity(batch.len());
+        let mut project_ids = Vec::with_capacity(batch.len());
         let mut paths = Vec::with_capacity(batch.len());
         let mut starts = Vec::with_capacity(batch.len());
         let mut ends = Vec::with_capacity(batch.len());
@@ -86,7 +89,7 @@ pub async fn insert_chunks(
         let mut hashes = Vec::with_capacity(batch.len());
 
         for c in batch {
-            ids.push(project_id);
+            project_ids.push(project_id);
             paths.push(c.file_path.as_str());
             starts.push(c.start_line);
             ends.push(c.end_line);
@@ -105,7 +108,7 @@ pub async fn insert_chunks(
                  file_hash = EXCLUDED.file_hash, end_line = EXCLUDED.end_line, \
                  language = EXCLUDED.language, indexed_at = NOW()",
         )
-        .bind(&ids)
+        .bind(&project_ids)
         .bind(&paths)
         .bind(&starts)
         .bind(&ends)
@@ -121,6 +124,7 @@ pub async fn insert_chunks(
 }
 
 /// Hybrid search: vector + BM25 RRF on code chunks
+/// Uses nullable param pattern: always bind file_pattern, filter with `$N::text IS NULL OR ...`
 pub async fn search_chunks(
     pool: &PgPool,
     project_id: Uuid,
@@ -130,16 +134,14 @@ pub async fn search_chunks(
     file_pattern: Option<&str>,
 ) -> Result<Vec<CodeChunk>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
-    let ts_query = to_tsquery_safe(query);
-
-    let file_filter = if file_pattern.is_some() {
-        "AND file_path LIKE $6"
-    } else {
-        ""
-    };
+    let file_filter = "AND ($4::text IS NULL OR file_path LIKE $4)";
 
     // If no usable text query, fall back to vector-only
-    if ts_query.is_empty() {
+    let has_words = query.split_whitespace().any(|w| {
+        !w.chars()
+            .all(|c| matches!(c, '\'' | '\\' | ':' | '&' | '|' | '!' | '(' | ')' | '*'))
+    });
+    if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
              embedding, file_hash, indexed_at \
@@ -147,22 +149,13 @@ pub async fn search_chunks(
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
         );
-        return if let Some(pat) = file_pattern {
-            sqlx::query_as(&sql)
-                .bind(project_id)
-                .bind(&emb)
-                .bind(limit)
-                .bind(pat)
-                .fetch_all(pool)
-                .await
-        } else {
-            sqlx::query_as(&sql)
-                .bind(project_id)
-                .bind(&emb)
-                .bind(limit)
-                .fetch_all(pool)
-                .await
-        };
+        return sqlx::query_as(&sql)
+            .bind(project_id)
+            .bind(&emb)
+            .bind(limit)
+            .bind(file_pattern)
+            .fetch_all(pool)
+            .await;
     }
 
     let candidate_limit = limit * 3;
@@ -172,13 +165,13 @@ pub async fn search_chunks(
             SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
             FROM ai_memory.code_chunks
             WHERE project_id = $1 AND embedding IS NOT NULL {file_filter}
-            LIMIT $3
+            LIMIT $5
         ),
         fts_ranked AS (
-            SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, to_tsquery('english', $4)) DESC) AS f_rank
+            SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, plainto_tsquery('english', $6)) DESC) AS f_rank
             FROM ai_memory.code_chunks
-            WHERE project_id = $1 AND content_tsv @@ to_tsquery('english', $4) {file_filter}
-            LIMIT $3
+            WHERE project_id = $1 AND content_tsv @@ plainto_tsquery('english', $6) {file_filter}
+            LIMIT $5
         ),
         fused AS (
             SELECT COALESCE(v.id, f.id) AS id,
@@ -191,29 +184,18 @@ pub async fn search_chunks(
         FROM fused
         JOIN ai_memory.code_chunks s ON s.id = fused.id
         ORDER BY fused.rrf_score DESC
-        LIMIT $5"
+        LIMIT $3"
     );
 
-    if let Some(pat) = file_pattern {
-        sqlx::query_as(&sql)
-            .bind(project_id)
-            .bind(&emb)
-            .bind(candidate_limit)
-            .bind(&ts_query)
-            .bind(limit)
-            .bind(pat)
-            .fetch_all(pool)
-            .await
-    } else {
-        sqlx::query_as(&sql)
-            .bind(project_id)
-            .bind(&emb)
-            .bind(candidate_limit)
-            .bind(&ts_query)
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-    }
+    sqlx::query_as(&sql)
+        .bind(project_id) // $1
+        .bind(&emb) // $2
+        .bind(limit) // $3
+        .bind(file_pattern) // $4
+        .bind(candidate_limit) // $5
+        .bind(query) // $6 — plainto_tsquery handles raw input safely
+        .fetch_all(pool)
+        .await
 }
 
 /// Count indexed chunks for a project
@@ -257,14 +239,4 @@ pub struct NewCodeChunk {
     pub content: String,
     pub embedding: Option<Vec<f32>>,
     pub file_hash: String,
-}
-
-fn to_tsquery_safe(input: &str) -> String {
-    input
-        .split_whitespace()
-        .filter(|w| !w.is_empty())
-        .map(|w| w.replace(['\'', '\\', ':', '&', '|', '!', '(', ')'], ""))
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" & ")
 }

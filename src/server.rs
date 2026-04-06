@@ -1212,13 +1212,29 @@ impl LoreServer {
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
 
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?
+            .ok_or_else(|| rmcp::Error::internal_error("Project not found", None))?;
+
         let path = if let Some(ref p) = root_path {
-            p.clone()
+            // Restrict to subdirectories of the project's registered root
+            let canonical = std::path::Path::new(p)
+                .canonicalize()
+                .map_err(|e| rmcp::Error::internal_error(format!("Invalid path: {e}"), None))?;
+            let project_root = std::path::Path::new(&project.root_path)
+                .canonicalize()
+                .map_err(|e| {
+                    rmcp::Error::internal_error(format!("Invalid project root: {e}"), None)
+                })?;
+            if !canonical.starts_with(&project_root) {
+                return Err(rmcp::Error::internal_error(
+                    "root_path must be within the project directory",
+                    None,
+                ));
+            }
+            canonical.to_string_lossy().to_string()
         } else {
-            let project = db::projects::get_project(self.pool(), project_id)
-                .await
-                .map_err(Self::db_err)?
-                .ok_or_else(|| rmcp::Error::internal_error("Project not found", None))?;
             project.root_path
         };
 

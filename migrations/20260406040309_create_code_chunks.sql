@@ -15,5 +15,5 @@ CREATE TABLE ai_memory.code_chunks (
 CREATE UNIQUE INDEX idx_code_chunks_unique ON ai_memory.code_chunks(project_id, file_path, start_line);
 CREATE INDEX idx_code_chunks_project ON ai_memory.code_chunks(project_id);
 CREATE INDEX idx_code_chunks_file ON ai_memory.code_chunks(project_id, file_path);
-CREATE INDEX idx_code_chunks_embedding ON ai_memory.code_chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_code_chunks_embedding ON ai_memory.code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX idx_code_chunks_tsv ON ai_memory.code_chunks USING gin (content_tsv);

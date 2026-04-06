@@ -137,6 +137,8 @@ pub fn chunk_file(content: &str, language: Option<&str>, max_lines: usize) -> Ve
     chunks
 }
 
+const MAX_CHUNK_LINES: usize = 80;
+
 /// Fallback: split by fixed size
 fn chunk_by_size(lines: &[&str], max_lines: usize) -> Vec<(usize, usize)> {
     let mut chunks = Vec::new();
@@ -169,7 +171,6 @@ pub async fn index_codebase(
         return Err(IndexError::InvalidPath(root_path.to_string()));
     }
 
-    // Build file walker respecting .gitignore
     let mut builder = ignore::WalkBuilder::new(root);
     builder.hidden(true).git_ignore(true).git_global(true);
     if let Some(pats) = patterns {
@@ -178,15 +179,16 @@ pub async fn index_codebase(
         }
     }
 
-    // Get existing file hashes for incremental check
     let existing_hashes: HashMap<String, String> = db::codebase::get_file_hashes(pool, project_id)
         .await
         .map_err(IndexError::Db)?
         .into_iter()
         .collect();
 
+    // Collect changed files and their chunks (no DB writes yet)
     let mut all_chunks: Vec<db::codebase::NewCodeChunk> = Vec::new();
     let mut current_files: Vec<String> = Vec::new();
+    let mut changed_files: Vec<String> = Vec::new();
     let mut files_scanned = 0u64;
     let mut files_changed = 0u64;
     let mut files_skipped = 0u64;
@@ -197,7 +199,6 @@ pub async fn index_codebase(
             continue;
         }
 
-        // Skip binary/non-text files by extension
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if is_binary_ext(ext) {
             continue;
@@ -209,7 +210,6 @@ pub async fn index_codebase(
             .to_string_lossy()
             .to_string();
 
-        // Skip common non-code directories/files
         if should_skip_path(&rel_path) {
             continue;
         }
@@ -219,25 +219,23 @@ pub async fn index_codebase(
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => continue, // skip binary/unreadable files
+            Err(e) => {
+                tracing::warn!(path = %rel_path, error = %e, "Failed to read file, skipping");
+                continue;
+            }
         };
 
         let hash = sha256_hex(&content);
 
-        // Incremental: skip if hash unchanged
         if existing_hashes.get(&rel_path).map(|h| h.as_str()) == Some(&hash) {
             files_skipped += 1;
             continue;
         }
         files_changed += 1;
-
-        // Delete old chunks for this file
-        let _ = db::codebase::delete_file_chunks(pool, project_id, &rel_path)
-            .await
-            .map_err(IndexError::Db)?;
+        changed_files.push(rel_path.clone());
 
         let language = detect_language(&rel_path);
-        let ranges = chunk_file(&content, language.as_deref(), 80);
+        let ranges = chunk_file(&content, language.as_deref(), MAX_CHUNK_LINES);
         let lines: Vec<&str> = content.lines().collect();
 
         for (start, end) in ranges {
@@ -248,34 +246,49 @@ pub async fn index_codebase(
 
             all_chunks.push(db::codebase::NewCodeChunk {
                 file_path: rel_path.clone(),
-                start_line: (start + 1) as i32, // 1-indexed
+                start_line: (start + 1) as i32,
                 end_line: end as i32,
                 language: language.clone(),
                 content: chunk_content,
-                embedding: None, // filled in batch below
+                embedding: None,
                 file_hash: hash.clone(),
             });
         }
     }
 
-    // Delete chunks for files that no longer exist
     let stale_deleted = db::codebase::delete_stale_files(pool, project_id, &current_files)
         .await
         .map_err(IndexError::Db)?;
 
-    // Batch embed all new chunks
+    // Batch embed in groups of 64 (provider-level batching)
     let mut embed_errors = 0u64;
-    for chunk in &mut all_chunks {
-        match embeddings.embed(&chunk.content).await {
-            Ok(emb) => chunk.embedding = Some(emb),
+    for batch in all_chunks.chunks_mut(64) {
+        let texts: Vec<&str> = batch.iter().map(|c| c.content.as_str()).collect();
+        match embeddings.embed_batch(&texts).await {
+            Ok(embeddings_vec) => {
+                for (chunk, emb) in batch.iter_mut().zip(embeddings_vec) {
+                    chunk.embedding = Some(emb);
+                }
+            }
             Err(e) => {
-                tracing::warn!(file = %chunk.file_path, error = %e, "Failed to embed chunk");
-                embed_errors += 1;
+                tracing::warn!(error = %e, "Batch embed failed for {} chunks", batch.len());
+                embed_errors += batch.len() as u64;
             }
         }
     }
 
-    // Batch insert
+    // Only delete old chunks for files that were successfully embedded
+    for file_path in &changed_files {
+        let has_embedded = all_chunks
+            .iter()
+            .any(|c| &c.file_path == file_path && c.embedding.is_some());
+        if has_embedded {
+            let _ = db::codebase::delete_file_chunks(pool, project_id, file_path)
+                .await
+                .map_err(IndexError::Db)?;
+        }
+    }
+
     let chunks_inserted = db::codebase::insert_chunks(pool, project_id, &all_chunks)
         .await
         .map_err(IndexError::Db)?;

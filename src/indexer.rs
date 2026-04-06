@@ -290,9 +290,16 @@ pub async fn index_codebase(
             .filter(|c| c.file_path == *file_path)
             .map(|c| c.start_line)
             .collect();
-        let _ = db::codebase::delete_stale_start_lines(pool, project_id, file_path, &valid_starts)
-            .await
-            .map_err(IndexError::Db)?;
+        if valid_starts.is_empty() {
+            let _ = db::codebase::delete_file_chunks(pool, project_id, file_path)
+                .await
+                .map_err(IndexError::Db)?;
+        } else {
+            let _ =
+                db::codebase::delete_stale_start_lines(pool, project_id, file_path, &valid_starts)
+                    .await
+                    .map_err(IndexError::Db)?;
+        }
     }
 
     Ok(IndexResult {

@@ -228,13 +228,13 @@ pub async fn search_rules_hybrid(
     });
 
     let results: Vec<SemanticRule> = sqlx::query_as(&sql)
-        .bind(project_id)       // $1
-        .bind(&emb)             // $2
-        .bind(candidate_limit)  // $3
-        .bind(&ts_query)        // $4
-        .bind(limit)            // $5
-        .bind(cat_str)          // $6 (nullable)
-        .bind(task_type)        // $7 (nullable)
+        .bind(project_id) // $1
+        .bind(&emb) // $2
+        .bind(candidate_limit) // $3
+        .bind(&ts_query) // $4
+        .bind(limit) // $5
+        .bind(cat_str) // $6 (nullable)
+        .bind(task_type) // $7 (nullable)
         .fetch_all(pool)
         .await?;
 

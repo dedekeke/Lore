@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<h1>Projects</h1>
+<p style="color: var(--muted); margin-bottom: 2rem; font-weight: 300; font-size: 0.82rem;">Episodic memory ledgers</p>
+{% if projects %}
+<table>
+  <thead><tr><th>Name</th><th>Root Path</th><th>Created</th></tr></thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/projects/{{ p.id }}">{{ p.name }}</a></td>
+      <td class="mono" style="color: var(--muted);">{{ p.root_path }}</td>
+      <td class="mono" style="color: var(--muted);">{{ p.created_at | dateformat }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No projects yet</div>
+{% endif %}
+{% endblock %}

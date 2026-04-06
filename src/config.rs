@@ -57,11 +57,12 @@ pub struct Config {
 
     pub default_project_name: String,
     pub disabled_tools: HashSet<String>,
-    pub context_warn_bytes: u64,
-    pub context_critical_bytes: u64,
     pub webhook_url: Option<String>,
     pub webhook_events: HashSet<String>,
     pub webhook_rejection_threshold: u32,
+    pub dashboard_enabled: bool,
+    pub dashboard_port: u16,
+    pub capture_git_ref: bool,
 }
 
 impl Config {
@@ -135,10 +136,6 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
 
-            // ~80KB = warning, ~150KB = critical (conservative defaults for 128K context models)
-            context_warn_bytes: parse_warn_or("CONTEXT_WARN_BYTES", 80_000),
-            context_critical_bytes: parse_warn_or("CONTEXT_CRITICAL_BYTES", 150_000),
-
             webhook_url: env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
             webhook_events: env::var("WEBHOOK_EVENTS")
                 .unwrap_or_else(|_| "task_completed,task_abandoned,rejection_threshold".into())
@@ -147,6 +144,16 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect(),
             webhook_rejection_threshold: parse_warn_or("WEBHOOK_REJECTION_THRESHOLD", 3),
+
+            dashboard_enabled: env::var("DASHBOARD_ENABLED")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
+            dashboard_port: parse_warn_or("DASHBOARD_PORT", 3101),
+            capture_git_ref: env::var("CAPTURE_GIT_REF")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
         }
     }
 }
@@ -197,11 +204,12 @@ mod tests {
             "DECAY_MIN_ACCEPTED",
             "DEFAULT_PROJECT_NAME",
             "DISABLED_TOOLS",
-            "CONTEXT_WARN_BYTES",
-            "CONTEXT_CRITICAL_BYTES",
             "WEBHOOK_URL",
             "WEBHOOK_EVENTS",
             "WEBHOOK_REJECTION_THRESHOLD",
+            "DASHBOARD_ENABLED",
+            "DASHBOARD_PORT",
+            "CAPTURE_GIT_REF",
         ] {
             std::env::remove_var(key);
         }
@@ -220,8 +228,7 @@ mod tests {
         assert_eq!(cfg.retention_attempts_days, 30);
         assert_eq!(cfg.default_project_name, "default");
         assert!(cfg.disabled_tools.is_empty());
-        assert_eq!(cfg.context_warn_bytes, 80_000);
-        assert_eq!(cfg.context_critical_bytes, 150_000);
+        assert!(!cfg.capture_git_ref);
     }
 
     #[test]

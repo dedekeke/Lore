@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::time::Duration;
 
 use serde::Serialize;
 
@@ -12,6 +11,7 @@ pub struct WebhookPayload {
 }
 
 pub fn fire(
+    client: &reqwest::Client,
     url: &str,
     events: &HashSet<String>,
     event: &str,
@@ -28,11 +28,8 @@ pub fn fire(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     let url = url.to_string();
+    let client = client.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
         if let Err(e) = client.post(&url).json(&payload).send().await {
             tracing::warn!(event = payload.event, error = %e, "Webhook delivery failed");
         } else {

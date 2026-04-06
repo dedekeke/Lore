@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+<h1>Analytics</h1>
+<p style="color: var(--muted); margin-bottom: 2rem; font-weight: 300; font-size: 0.82rem;">Lore effectiveness and knowledge metrics</p>
+
+<h2>Effectiveness</h2>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="value" style="color: var(--green);">{{ first_try_rate }}%</div>
+    <div class="label">First-Try Success</div>
+    <div class="sub">{{ first_try_success }} of {{ completed_tasks }} tasks</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ avg_attempts_per_task }}</div>
+    <div class="label">Avg Attempts / Task</div>
+    <div class="sub">Lower is better</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ knowledge_tokens | default(value=0) }}</div>
+    <div class="label">Knowledge Tokens</div>
+    <div class="sub">{{ total_rule_bytes }}B rules + {{ total_attempt_bytes }}B attempts</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ context_wipes }}</div>
+    <div class="label">Context Wipes</div>
+    <div class="sub">Sessions preserved via handoff</div>
+  </div>
+</div>
+
+<div class="section-note">
+  Knowledge tokens represent episodic memory persisted across sessions. Without Lore, this knowledge is lost on every context wipe, forcing re-discovery from scratch.
+</div>
+
+<h2>Overview</h2>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="value">{{ total_projects }}</div>
+    <div class="label">Projects</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_tasks }}</div>
+    <div class="label">Total Tasks</div>
+    <div class="sub">{{ completed_tasks }} completed, {{ active_tasks }} active</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_attempts }}</div>
+    <div class="label">Total Attempts</div>
+    <div class="sub">{{ total_accepted }} accepted, {{ total_rejected }} rejected</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ total_rules }}</div>
+    <div class="label">Rules</div>
+  </div>
+  <div class="stat-card">
+    <div class="value">{{ rejection_rate }}%</div>
+    <div class="label">Rejection Rate</div>
+  </div>
+</div>
+
+{% if projects %}
+<h2>Per-Project</h2>
+<table>
+  <thead><tr><th>Project</th><th>Tasks</th><th>Done</th><th>Active</th><th>Attempts</th><th>Rejected</th><th>First-Try</th><th>Rules</th><th>Knowledge</th></tr></thead>
+  <tbody>
+    {% for p in projects %}
+    <tr>
+      <td><a href="/projects/{{ p.id }}">{{ p.name }}</a></td>
+      <td>{{ p.task_count }}</td>
+      <td>{{ p.completed_count }}</td>
+      <td>{{ p.active_count }}</td>
+      <td>{{ p.attempt_count }}</td>
+      <td>{{ p.rejected_count }}</td>
+      <td>{{ p.first_try_count }}</td>
+      <td>{{ p.rule_count }}</td>
+      <td class="mono" style="color: var(--muted);">{{ p.knowledge_bytes }}B</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

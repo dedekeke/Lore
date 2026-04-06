@@ -2,7 +2,7 @@
 
 ## Current State (v1)
 
-Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Test suite: 15 unit + 33 integration tests. CI via GitHub Actions.
+Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools + 2 MCP resources. Performance pipeline: LRU cache, Gemini/ONNX local embedding, HNSW + BM25 hybrid search (RRF). Cross-project search, multi-agent support, intelligent decay, batch embedding backfill. Web dashboard (axum + htmx). Test suite: 18 unit + 34 integration tests. CI via GitHub Actions.
 
 ### Completed Phases
 
@@ -35,9 +35,13 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 | 25 | Conversation handoff: generate_handoff tool for seamless session transitions | PR #20 |
 | 26 | Local ONNX embedding: replace fastembed with ort + tokenizers, mean pooling, auto-download | PR #23 |
 | 27 | Configurable tool visibility: DISABLED_TOOLS env var to hide/reject specific tools | PR #24 |
-| 28 | Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net | PR #25 |
-| 29 | Fix context counter reset: only reset on true session boundaries | PR #26 |
-| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | In progress |
+| 28 | ~~Auto context snapshots: track cumulative response bytes, escalating nudges, auto-snapshot safety net~~ | Reverted (phase 32) — MCP server can't observe full context |
+| 29 | ~~Fix context counter reset: only reset on true session boundaries~~ | Reverted (phase 32) — part of removed auto-snapshot system |
+| 30 | Webhook notifications: fire HTTP webhooks on task_completed, task_abandoned, rejection_threshold | PR #27 |
+| 31 | Web dashboard: axum + minijinja + htmx browser UI for ledger browsing/editing | PR #28 |
+| 32 | Remove broken auto-snapshot system, delegate context preservation to AI client via CLAUDE.md protocol | PR #28 |
+| 33 | Move code_snippet to log_outcome, add resolved_attempt_id to tasks, subtask protocol | PR #28 |
+| 34 | Dashboard UX: content modals, project names, effectiveness analytics (first-try rate, knowledge tokens) | In progress |
 
 ---
 
@@ -66,7 +70,7 @@ Server runs on stdio + SSE transports with PostgreSQL + pgvector. 21 MCP tools +
 |------|-------|
 | ~~Git checkpointing~~ | ~~Tie `attempt_id` to git stash/commit for rollback~~ Done (phase 24) |
 | ~~Cross-project search~~ | ~~`find_similar_failures` across all projects~~ Done (phase 22) |
-| Web dashboard | Lightweight UI to browse/edit the ledger |
+| ~~Web dashboard~~ | ~~Lightweight UI to browse/edit the ledger~~ Done (phase 31) |
 | ~~Multi-agent support~~ | ~~Tag attempts with `agent_id` for multi-agent workflows~~ Done (phase 23) |
 
 ---
@@ -88,6 +92,32 @@ Classify attempts by relevance to active task. Schema additions: `description_em
 ### ~~Webhook Notifications~~
 
 ~~Fire HTTP webhooks on events (task completed, attempt rejected N times, blocked task). Enables Slack/Discord integration for team awareness.~~ Done (phase 30)
+
+### Token Savings / Efficiency Analytics (Needs Research)
+
+Measure the actual value Lore provides: how many tokens are saved by having episodic memory vs re-discovering solutions from scratch. Research needed on:
+- How to quantify "tokens saved" — e.g., rejected attempts that Lore surfaced via `review_ledger`/`find_similar_failures` preventing the AI from re-trying the same approach
+- Before/after comparison model: estimate retry cost without Lore vs actual cost with Lore
+- Dashboard visualization of efficiency over time (trend lines, per-project comparison)
+- Whether to track this passively (instrument existing tools) or require explicit measurement points
+
+### Follow-up Improvements
+
+| Item | Context |
+|------|---------|
+| Share `reqwest::Client` in webhooks | Currently builds a new client per `fire()` call — should store in `LoreServerInner` |
+| Resolve actual project name in webhook payload | Uses `default_project_name` config instead of current project from DB |
+| Atomic file writes for ONNX model download | Write to `.tmp` then rename for crash safety during model download |
+| Zero-norm guard in `l2_normalize` | Defensive check for zero-length vectors in local embedding normalization |
+| Track `ort` 2.0 stable release | Currently on `2.0.0-rc.12` — move to stable when available |
+
+### Research Needed for Further Improvement
+
+All major planned features are implemented. Next improvements require research into:
+- Token savings analytics (see above)
+- Side-prompt prioritization (relevance scoring for attempts)
+- Better embedding models as ecosystem matures (track `ort` 2.0, newer MiniLM variants)
+- Dashboard real-time updates (WebSocket/SSE push instead of page reload)
 
 ### Architecture Reference
 

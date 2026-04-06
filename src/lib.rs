@@ -1,6 +1,7 @@
 pub mod batch_embed;
 pub mod cache;
 pub mod config;
+pub mod dashboard;
 pub mod db;
 pub mod embeddings;
 pub mod server;

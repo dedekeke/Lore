@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, tool, RoleServer, ServerHandler};
@@ -24,12 +24,16 @@ pub struct LoreServerInner {
     pub current_project_id: RwLock<Option<Uuid>>,
     pub cache: LoreCache,
     pub tool_call_count: AtomicU64,
-    pub cumulative_response_bytes: AtomicU64,
-    pub auto_snapshot_fired: AtomicBool,
+    pub http_client: reqwest::Client,
 }
 
 impl LoreServer {
     pub fn new(pool: PgPool, embeddings: AnyEmbeddingProvider, config: Config) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+
         Self {
             inner: Arc::new(LoreServerInner {
                 pool,
@@ -38,8 +42,7 @@ impl LoreServer {
                 current_project_id: RwLock::new(None),
                 cache: LoreCache::new(1000, 500),
                 tool_call_count: AtomicU64::new(0),
-                cumulative_response_bytes: AtomicU64::new(0),
-                auto_snapshot_fired: AtomicBool::new(false),
+                http_client,
             }),
         }
     }
@@ -95,6 +98,9 @@ impl LoreServer {
 
     /// Capture current git HEAD commit hash for the project's root_path
     async fn capture_git_ref(&self) -> Option<String> {
+        if !self.config().capture_git_ref {
+            return None;
+        }
         let pid = self.inner.current_project_id.read().await;
         let project_id = (*pid)?;
         drop(pid);
@@ -177,90 +183,30 @@ impl LoreServer {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
     }
 
-    fn fire_webhook(&self, event: &str, data: serde_json::Value) {
+    async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
         if let Some(url) = &self.config().webhook_url {
-            let project = self.config().default_project_name.clone();
-            webhooks::fire(url, &self.config().webhook_events, event, &project, data);
-        }
-    }
-
-    fn reset_context_counters(&self) {
-        self.inner.tool_call_count.store(0, Ordering::Relaxed);
-        self.inner
-            .cumulative_response_bytes
-            .store(0, Ordering::Relaxed);
-        self.inner
-            .auto_snapshot_fired
-            .store(false, Ordering::Relaxed);
-    }
-
-    fn track_response(&self, result: &CallToolResult) -> u64 {
-        self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
-        let bytes: u64 = result
-            .content
-            .iter()
-            .map(|c| match &c.raw {
-                RawContent::Text(t) => t.text.len() as u64,
-                _ => 0,
-            })
-            .sum();
-        self.inner
-            .cumulative_response_bytes
-            .fetch_add(bytes, Ordering::Relaxed)
-            + bytes
-    }
-
-    fn context_pressure_nudge(&self, total_bytes: u64) -> Option<&'static str> {
-        let critical = self.config().context_critical_bytes;
-        let warn = self.config().context_warn_bytes;
-        if total_bytes >= critical {
-            Some("CRITICAL: Context exhaustion imminent. Call generate_handoff() NOW to preserve state before context is lost.")
-        } else if total_bytes >= warn {
-            Some("WARNING: High context usage detected. Consider calling generate_handoff() soon to save progress.")
-        } else {
-            None
-        }
-    }
-
-    fn fire_auto_snapshot(&self) {
-        if self
-            .inner
-            .auto_snapshot_fired
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        let pool = self.pool().clone();
-        let inner = self.inner.clone();
-        let bytes = self.inner.cumulative_response_bytes.load(Ordering::Relaxed);
-        // ~3 bytes per token
-        let estimated_tokens = (bytes / 3) as i32;
-        tokio::spawn(async move {
-            let pid = match *inner.current_project_id.read().await {
-                Some(id) => id,
-                None => return,
+            let project_name = if let Some(pid) = *self.inner.current_project_id.read().await {
+                if let Ok(Some(project)) = db::projects::get_project(self.pool(), pid).await {
+                    project.name
+                } else {
+                    self.config().default_project_name.clone()
+                }
+            } else {
+                self.config().default_project_name.clone()
             };
-            let tasks = match db::tasks::list_tasks(&pool, pid, Some(db::TaskStatus::Active)).await
-            {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            for task in &tasks {
-                let last_attempt = db::attempts::list_attempts(&pool, task.id, None)
-                    .await
-                    .ok()
-                    .and_then(|a| a.last().map(|a| a.id));
-                let _ =
-                    db::snapshots::create_snapshot(&pool, task.id, estimated_tokens, last_attempt)
-                        .await;
-            }
-            tracing::info!(
-                estimated_tokens,
-                task_count = tasks.len(),
-                "Auto-snapshot fired at critical context threshold"
+            webhooks::fire(
+                &self.inner.http_client,
+                url,
+                &self.config().webhook_events,
+                event,
+                &project_name,
+                data,
             );
-        });
+        }
+    }
+
+    fn reset_session_counter(&self) {
+        self.inner.tool_call_count.store(0, Ordering::Relaxed);
     }
 
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
@@ -290,13 +236,14 @@ impl LoreServer {
         "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
          1. FIRST CALL: switch_project(name, root_path) to set context (optional — project is auto-detected from cwd if not called).\n\
          2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
-         3. PROPOSING CODE: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.\n\
-         4. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning) BEFORE suggesting a fix.\n\
-         5. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning) when the USER explicitly confirms success. If unsure, use 'pending'.\n\
-         6. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
-         7. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
-         8. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
-         9. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         3. SUBTASKS: if a task involves 3+ distinct steps, decompose it — call start_task(description, parent_task_id) for each subtask.\n\
+         4. PROPOSING CODE: call propose_attempt(task_id, approach) BEFORE writing code to the user.\n\
+         5. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning, code_snippet) BEFORE suggesting a fix.\n\
+         6. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning, code_snippet) when the USER explicitly confirms success. If unsure, use 'pending'. Include code_snippet with the actual code written.\n\
+         7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
+         8. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
+         9. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
+         10. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -374,6 +321,7 @@ impl LoreServer {
             &query,
             limit.unwrap_or(10),
             cat,
+            None,
         )
         .await
         .map_err(Self::db_err)?;
@@ -500,23 +448,16 @@ impl LoreServer {
         #[schemars(description = "Summary of the approach being attempted")]
         approach_summary: String,
         #[tool(param)]
-        #[schemars(description = "Optional code snippet for the attempt")]
-        code_snippet: Option<String>,
-        #[tool(param)]
         #[schemars(description = "Optional agent identifier for multi-agent workflows")]
         agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
-        if let Some(ref code) = code_snippet {
-            Self::validate_len("code_snippet", code, 32768)?;
-        }
         let tid = Self::parse_uuid(&task_id)?;
         let git_ref = self.capture_git_ref().await;
         let id = db::attempts::create_attempt(
             self.pool(),
             tid,
             &approach_summary,
-            code_snippet.as_deref(),
             agent_id.as_deref(),
             git_ref.as_deref(),
         )
@@ -551,8 +492,16 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Optional git reference (commit hash, branch)")]
         git_ref: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Optional code snippet — include the actual code that was written for this attempt"
+        )]
+        code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("reasoning", &reasoning, 4096)?;
+        if let Some(ref code) = code_snippet {
+            Self::validate_len("code_snippet", code, 32768)?;
+        }
         let aid = Self::parse_uuid(&attempt_id)?;
         let out = Self::parse_attempt_outcome(&outcome)?;
         let embedding = self.embed(&reasoning).await?;
@@ -563,6 +512,7 @@ impl LoreServer {
             &reasoning,
             Some(&embedding),
             git_ref.as_deref(),
+            code_snippet.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -585,7 +535,8 @@ impl LoreServer {
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -636,12 +587,27 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
         lesson: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
+        )]
+        resolved_attempt_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         if let Some(ref l) = lesson {
             Self::validate_len("lesson", l, 4096)?;
         }
         let tid = Self::parse_uuid(&task_id)?;
-        let success = db::tasks::complete_task(self.pool(), tid)
+        // Resolve the winning attempt: explicit param or last accepted
+        let resolved = match resolved_attempt_id {
+            Some(ref id) => Some(Self::parse_uuid(id)?),
+            None => {
+                db::attempts::list_attempts(self.pool(), tid, Some(db::AttemptOutcome::Accepted))
+                    .await
+                    .ok()
+                    .and_then(|a| a.last().map(|a| a.id))
+            }
+        };
+        let success = db::tasks::complete_task(self.pool(), tid, resolved)
             .await
             .map_err(Self::db_err)?;
 
@@ -665,7 +631,8 @@ impl LoreServer {
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({ "task_id": task_id, "lesson": lesson }),
-            );
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(
@@ -711,7 +678,8 @@ impl LoreServer {
             self.fire_webhook(
                 "task_abandoned",
                 serde_json::json!({ "task_id": task_id, "reason": reason }),
-            );
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(
@@ -840,7 +808,7 @@ impl LoreServer {
                 .map_err(Self::db_err)?;
         }
 
-        let active_rules = db::semantic::list_rules(self.pool(), project_id, None)
+        let active_rules_count = db::semantic::count_rules(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?;
 
@@ -858,21 +826,13 @@ impl LoreServer {
             "Use the active task and attempts above to continue. Call propose_attempt for your next approach."
         };
 
-        let session_calls = self.inner.tool_call_count.load(Ordering::Relaxed);
-        let session_bytes = self.inner.cumulative_response_bytes.load(Ordering::Relaxed);
-
         Self::json_content_with_nudge(
             &serde_json::json!({
                 "project": project,
                 "active_tasks": active_tasks,
                 "recent_attempts": recent_attempts,
-                "active_rules_count": active_rules.len(),
+                "active_rules_count": active_rules_count,
                 "context_wipes": context_wipes,
-                "session_metrics": {
-                    "tool_calls": session_calls,
-                    "response_bytes": session_bytes,
-                    "estimated_response_tokens": session_bytes / 3,
-                },
             }),
             nudge,
         )
@@ -1367,31 +1327,14 @@ impl ServerHandler for LoreServer {
             ));
         }
 
-        // Reset counters on session-boundary tools
-        let is_session_boundary =
-            matches!(request.name.as_ref(), "get_next_steps" | "switch_project");
-        if is_session_boundary {
-            self.reset_context_counters();
+        if matches!(request.name.as_ref(), "get_next_steps" | "switch_project") {
+            self.reset_session_counter();
         }
 
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let mut result = Self::tool_box().call(ctx).await?;
+        let result = Self::tool_box().call(ctx).await?;
 
-        let total_bytes = self.track_response(&result);
-
-        // Inject context pressure warning into response
-        if let Some(nudge) = self.context_pressure_nudge(total_bytes) {
-            result.content.push(Content::text(format!(
-                "\n\n⚠️ {nudge}\n(Session: {} calls, ~{}KB response data)",
-                self.inner.tool_call_count.load(Ordering::Relaxed),
-                total_bytes / 1024
-            )));
-        }
-
-        // Auto-snapshot safety net at critical threshold
-        if total_bytes >= self.config().context_critical_bytes {
-            self.fire_auto_snapshot();
-        }
+        self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(result)
     }

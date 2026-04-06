@@ -33,7 +33,7 @@ impl LoreServer {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-
+            
         Self {
             inner: Arc::new(LoreServerInner {
                 pool,
@@ -60,13 +60,9 @@ impl LoreServer {
     }
 
     pub async fn project_id(&self) -> Result<Uuid, rmcp::Error> {
-        if let Some(id) = {
-            let pid = self.inner.current_project_id.read().await;
-            *pid
-        } {
+        if let Some(id) = *self.inner.current_project_id.read().await {
             return Ok(id);
         }
-
         // Auto-detect from cwd
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -102,9 +98,7 @@ impl LoreServer {
 
     /// Capture current git HEAD commit hash for the project's root_path
     async fn capture_git_ref(&self) -> Option<String> {
-        if !self.config().capture_git_ref {
-            return None;
-        }
+        if !self.config().capture_git_ref { return None; }
         let pid = self.inner.current_project_id.read().await;
         let project_id = (*pid)?;
         drop(pid);
@@ -325,6 +319,7 @@ impl LoreServer {
             &query,
             limit.unwrap_or(10),
             cat,
+            None,
         )
         .await
         .map_err(Self::db_err)?;
@@ -507,15 +502,13 @@ impl LoreServer {
         }
         let aid = Self::parse_uuid(&attempt_id)?;
         let out = Self::parse_attempt_outcome(&outcome)?;
-
-        // Note: Reasoning embeddings are backfilled by a periodic background task
-        // to minimize tool latency for the user.
+        let embedding = self.embed(&reasoning).await?;
         let success = db::attempts::log_outcome(
             self.pool(),
             aid,
             out.clone(),
             &reasoning,
-            None,
+            Some(&embedding),
             git_ref.as_deref(),
             code_snippet.as_deref(),
         )
@@ -540,8 +533,7 @@ impl LoreServer {
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
-                    )
-                    .await;
+                    ).await;
                 }
             }
         }
@@ -619,13 +611,13 @@ impl LoreServer {
         if success {
             if let Some(lesson_text) = &lesson {
                 let project_id = self.project_id().await?;
-                // Lesson embeddings are backfilled by background task
+                let embedding = self.embed(lesson_text).await?;
                 db::semantic::create_rule(
                     self.pool(),
                     project_id,
                     db::RuleCategory::Lesson,
                     lesson_text,
-                    None,
+                    Some(&embedding),
                 )
                 .await
                 .map_err(Self::db_err)?;
@@ -636,8 +628,7 @@ impl LoreServer {
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({ "task_id": task_id, "lesson": lesson }),
-            )
-            .await;
+            ).await;
         }
 
         Self::json_content_with_nudge(
@@ -667,13 +658,13 @@ impl LoreServer {
 
         if success && save_lesson.unwrap_or(false) {
             let project_id = self.project_id().await?;
-            // Lesson embeddings are backfilled by background task
+            let embedding = self.embed(&reason).await?;
             db::semantic::create_rule(
                 self.pool(),
                 project_id,
                 db::RuleCategory::Lesson,
                 &reason,
-                None,
+                Some(&embedding),
             )
             .await
             .map_err(Self::db_err)?;
@@ -683,8 +674,7 @@ impl LoreServer {
             self.fire_webhook(
                 "task_abandoned",
                 serde_json::json!({ "task_id": task_id, "reason": reason }),
-            )
-            .await;
+            ).await;
         }
 
         Self::json_content_with_nudge(
@@ -808,14 +798,12 @@ impl LoreServer {
 
         let mut recent_attempts = Vec::new();
         if let Some(task) = active_tasks.first() {
-            recent_attempts = db::attempts::list_recent_attempts(self.pool(), task.id, 5)
+            recent_attempts = db::attempts::list_attempts(self.pool(), task.id, None)
                 .await
                 .map_err(Self::db_err)?;
-            // Reverse back to chronological for display
-            recent_attempts.reverse();
         }
 
-        let rules_count = db::semantic::count_rules(self.pool(), project_id, None)
+        let active_rules = db::semantic::list_rules(self.pool(), project_id, None)
             .await
             .map_err(Self::db_err)?;
 
@@ -838,7 +826,7 @@ impl LoreServer {
                 "project": project,
                 "active_tasks": active_tasks,
                 "recent_attempts": recent_attempts,
-                "active_rules_count": rules_count,
+                "active_rules_count": active_rules.len(),
                 "context_wipes": context_wipes,
             }),
             nudge,

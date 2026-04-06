@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
-use std::io::BufRead;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {

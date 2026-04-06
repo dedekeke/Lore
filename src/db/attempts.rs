@@ -119,12 +119,12 @@ pub async fn log_outcome(
     Ok(result.rows_affected() > 0)
 }
 
-/// When a task is completed: accept the latest pending attempt, reject all others
+/// Auto-accept the latest pending attempt and reject all others when a task completes.
 pub async fn resolve_attempts_on_complete(
     pool: &PgPool,
     task_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    // Find the latest pending attempt
+    // Find latest pending attempt
     let latest: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM ai_memory.attempts \
          WHERE task_id = $1 AND outcome = 'pending' \
@@ -134,49 +134,34 @@ pub async fn resolve_attempts_on_complete(
     .fetch_optional(pool)
     .await?;
 
-    let accepted_id = if let Some((id,)) = latest {
-        // Accept the latest
-        sqlx::query(
-            "UPDATE ai_memory.attempts SET outcome = 'accepted', \
-             reasoning = CASE WHEN reasoning = '' THEN 'Auto-accepted on task completion' ELSE reasoning END, \
-             resolved_at = NOW() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(pool)
-        .await?;
-        Some(id)
-    } else {
-        None
+    let Some((accepted_id,)) = latest else {
+        return Ok(None);
     };
 
-    // Reject all remaining pending attempts
+    // Accept the latest (preserve existing reasoning if non-empty)
+    sqlx::query(
+        "UPDATE ai_memory.attempts SET outcome = 'accepted', \
+         reasoning = CASE WHEN reasoning = '' THEN 'Auto-accepted on task completion' ELSE reasoning END, \
+         resolved_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(accepted_id)
+    .execute(pool)
+    .await?;
+
+    // Reject all other pending attempts for this task
     sqlx::query(
         "UPDATE ai_memory.attempts SET outcome = 'rejected', \
          reasoning = CASE WHEN reasoning = '' THEN 'Auto-rejected: task completed with different attempt' ELSE reasoning END, \
          resolved_at = NOW() \
-         WHERE task_id = $1 AND outcome = 'pending'",
+         WHERE task_id = $1 AND outcome = 'pending' AND id != $2",
     )
     .bind(task_id)
+    .bind(accepted_id)
     .execute(pool)
     .await?;
 
-    Ok(accepted_id)
-}
-
-pub async fn list_recent_attempts(
-    pool: &PgPool,
-    task_id: Uuid,
-    limit: i64,
-) -> Result<Vec<Attempt>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \
-         reasoning_embedding, git_ref, token_cost, agent_id, created_at, resolved_at \
-         FROM ai_memory.attempts WHERE task_id = $1 ORDER BY created_at DESC LIMIT $2",
-    )
-    .bind(task_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
+    Ok(Some(accepted_id))
 }
 
 pub async fn search_similar_failures(

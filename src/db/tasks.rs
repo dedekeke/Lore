@@ -32,30 +32,16 @@ pub async fn create_task(
     description: &str,
     parent_task_id: Option<Uuid>,
 ) -> Result<Uuid, sqlx::Error> {
-    // Auto-generate summary from first sentence or first 120 chars
-    let summary = generate_summary(description);
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary) \
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id) \
+         VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
     .bind(parent_task_id)
-    .bind(&summary)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
-}
-
-fn generate_summary(description: &str) -> String {
-    let first_line = description.lines().next().unwrap_or(description);
-    if first_line.len() <= 120 {
-        first_line.to_string()
-    } else {
-        let mut s: String = first_line.chars().take(117).collect();
-        s.push_str("...");
-        s
-    }
 }
 
 #[allow(dead_code)]
@@ -236,24 +222,14 @@ pub async fn get_task_stats(
     }
 }
 
-pub async fn complete_task(
-    pool: &PgPool,
-    id: Uuid,
-    resolved_attempt_id: Option<Uuid>,
-) -> Result<bool, sqlx::Error> {
-    // Auto-resolve attempts: accept latest pending, reject the rest
-    let auto_resolved = super::attempts::resolve_attempts_on_complete(pool, id).await?;
-    let final_resolved = resolved_attempt_id.or(auto_resolved);
-
-    let result = sqlx::query(
-        "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
-         resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(final_resolved)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+pub fn generate_summary(description: &str) -> String {
+    if description.chars().count() <= 120 {
+        description.to_string()
+    } else {
+        let mut s: String = description.chars().take(117).collect();
+        s.push_str("...");
+        s
+    }
 }
 
 pub async fn count_tasks(
@@ -281,7 +257,6 @@ pub async fn count_tasks(
     Ok(row.0)
 }
 
-/// Paginated + sorted task list for dashboard
 pub async fn list_tasks_paginated(
     pool: &PgPool,
     project_id: Uuid,
@@ -291,45 +266,42 @@ pub async fn list_tasks_paginated(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Task>, sqlx::Error> {
-    // Whitelist sort columns to prevent SQL injection
     let col = match sort_col {
-        "status" => "status",
-        "priority" => "priority",
-        "task_type" => "task_type",
-        "summary" => "summary",
+        "summary" | "priority" | "task_type" | "status" | "created_at" => sort_col,
         _ => "created_at",
     };
-    let dir = if sort_dir == "asc" { "ASC" } else { "DESC" };
-    // NULLS LAST for ascending, NULLS FIRST for descending (default pg behavior is fine)
-    let nulls = if dir == "ASC" {
-        "NULLS LAST"
+    let dir = if sort_dir.eq_ignore_ascii_case("asc") {
+        "ASC"
     } else {
-        "NULLS FIRST"
+        "DESC"
     };
 
-    let q = match status {
-        Some(ref s) => {
-            let sql = format!(
-                "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-                 created_at, completed_at, priority, task_type, summary \
-                 FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
-                 ORDER BY {col} {dir} {nulls} LIMIT $3 OFFSET $4"
-            );
+    let sql = match status {
+        Some(_) => format!(
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+             created_at, completed_at, priority, task_type, summary \
+             FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
+             ORDER BY {col} {dir} NULLS LAST LIMIT $3 OFFSET $4"
+        ),
+        None => format!(
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+             created_at, completed_at, priority, task_type, summary \
+             FROM ai_memory.tasks WHERE project_id = $1 \
+             ORDER BY {col} {dir} NULLS LAST LIMIT $2 OFFSET $3"
+        ),
+    };
+
+    match status {
+        Some(s) => {
             sqlx::query_as(&sql)
                 .bind(project_id)
-                .bind(s)
+                .bind(&s)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(pool)
                 .await
         }
         None => {
-            let sql = format!(
-                "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-                 created_at, completed_at, priority, task_type, summary \
-                 FROM ai_memory.tasks WHERE project_id = $1 \
-                 ORDER BY {col} {dir} {nulls} LIMIT $2 OFFSET $3"
-            );
             sqlx::query_as(&sql)
                 .bind(project_id)
                 .bind(limit)
@@ -337,8 +309,7 @@ pub async fn list_tasks_paginated(
                 .fetch_all(pool)
                 .await
         }
-    };
-    q
+    }
 }
 
 pub async fn batch_delete_tasks(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
@@ -356,9 +327,7 @@ pub async fn batch_update_task_status(
 ) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = $2, \
-         completed_at = CASE WHEN $2 = 'completed' THEN NOW() \
-                             WHEN $2 = 'abandoned' THEN NOW() \
-                             ELSE NULL END \
+         completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE NULL END \
          WHERE id = ANY($1)",
     )
     .bind(ids)
@@ -366,4 +335,24 @@ pub async fn batch_update_task_status(
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+pub async fn complete_task(
+    pool: &PgPool,
+    id: Uuid,
+    resolved_attempt_id: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    // Auto-resolve attempts: accept latest pending, reject others
+    let auto_accepted = super::attempts::resolve_attempts_on_complete(pool, id).await?;
+    let final_attempt_id = resolved_attempt_id.or(auto_accepted);
+
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
+         resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(final_attempt_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }

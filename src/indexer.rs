@@ -277,21 +277,23 @@ pub async fn index_codebase(
         }
     }
 
-    // Only delete old chunks for files that were successfully embedded
-    for file_path in &changed_files {
-        let has_embedded = all_chunks
-            .iter()
-            .any(|c| &c.file_path == file_path && c.embedding.is_some());
-        if has_embedded {
-            let _ = db::codebase::delete_file_chunks(pool, project_id, file_path)
-                .await
-                .map_err(IndexError::Db)?;
-        }
-    }
-
+    // Upsert first (COALESCE preserves existing embeddings on embed failure),
+    // then delete stale start_lines — this ordering prevents data loss on crash
     let chunks_inserted = db::codebase::insert_chunks(pool, project_id, &all_chunks)
         .await
         .map_err(IndexError::Db)?;
+
+    // Delete stale chunks whose start_lines no longer exist after re-chunking
+    for file_path in &changed_files {
+        let valid_starts: Vec<i32> = all_chunks
+            .iter()
+            .filter(|c| c.file_path == *file_path)
+            .map(|c| c.start_line)
+            .collect();
+        let _ = db::codebase::delete_stale_start_lines(pool, project_id, file_path, &valid_starts)
+            .await
+            .map_err(IndexError::Db)?;
+    }
 
     Ok(IndexResult {
         files_scanned,

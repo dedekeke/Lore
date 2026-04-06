@@ -66,6 +66,28 @@ pub async fn delete_stale_files(
     Ok(result.rows_affected())
 }
 
+/// Delete stale chunks for a file (start_lines that no longer exist after re-chunking)
+pub async fn delete_stale_start_lines(
+    pool: &PgPool,
+    project_id: Uuid,
+    file_path: &str,
+    valid_start_lines: &[i32],
+) -> Result<u64, sqlx::Error> {
+    if valid_start_lines.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "DELETE FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND file_path = $2 AND start_line != ALL($3)",
+    )
+    .bind(project_id)
+    .bind(file_path)
+    .bind(valid_start_lines)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Batch insert code chunks
 pub async fn insert_chunks(
     pool: &PgPool,
@@ -104,7 +126,8 @@ pub async fn insert_chunks(
              (project_id, file_path, start_line, end_line, language, content, embedding, file_hash) \
              SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::vector[], $8::text[]) \
              ON CONFLICT (project_id, file_path, start_line) DO UPDATE \
-             SET content = EXCLUDED.content, embedding = EXCLUDED.embedding, \
+             SET content = EXCLUDED.content, \
+                 embedding = COALESCE(EXCLUDED.embedding, ai_memory.code_chunks.embedding), \
                  file_hash = EXCLUDED.file_hash, end_line = EXCLUDED.end_line, \
                  language = EXCLUDED.language, indexed_at = NOW()",
         )

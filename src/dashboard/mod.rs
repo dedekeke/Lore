@@ -272,6 +272,7 @@ async fn complete_task(
     db::tasks::complete_task(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db::tasks::try_rollup_parents(&state.pool, id).await;
     Ok(Html(
         r#"<span class="badge badge-completed">Completed</span>"#.to_string(),
     ))
@@ -284,6 +285,7 @@ async fn abandon_task(
     db::tasks::abandon_task(&state.pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db::tasks::try_rollup_parents(&state.pool, id).await;
     Ok(Html(
         r#"<span class="badge badge-abandoned">Abandoned</span>"#.to_string(),
     ))

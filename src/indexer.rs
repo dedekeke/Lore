@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -158,6 +158,33 @@ pub fn sha256_hex(content: &str) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Use git2 to get files changed in working tree (unstaged + staged) relative to HEAD.
+/// Returns None if not a git repo or on any error (caller falls back to full scan).
+fn git_changed_files(root: &Path) -> Option<HashSet<String>> {
+    let repo = git2::Repository::discover(root).ok()?;
+    let mut changed = HashSet::new();
+
+    // Diff HEAD vs index (staged changes)
+    let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let diff_staged = repo.diff_tree_to_index(Some(&head_tree), None, None).ok()?;
+    for delta in diff_staged.deltas() {
+        if let Some(p) = delta.new_file().path().and_then(|p| p.to_str()) {
+            changed.insert(p.to_string());
+        }
+    }
+
+    // Diff index vs workdir (unstaged changes)
+    if let Ok(diff_workdir) = repo.diff_index_to_workdir(None, None) {
+        for delta in diff_workdir.deltas() {
+            if let Some(p) = delta.new_file().path().and_then(|p| p.to_str()) {
+                changed.insert(p.to_string());
+            }
+        }
+    }
+
+    Some(changed)
+}
+
 /// Scan project directory, chunk files, embed, and store in DB
 pub async fn index_codebase(
     pool: &PgPool,
@@ -165,10 +192,22 @@ pub async fn index_codebase(
     project_id: Uuid,
     root_path: &str,
     patterns: Option<&[String]>,
+    behavior_version: i32,
 ) -> Result<IndexResult, IndexError> {
     let root = Path::new(root_path);
     if !root.is_dir() {
         return Err(IndexError::InvalidPath(root_path.to_string()));
+    }
+
+    // Mark stale embeddings from older behavior_version
+    let stale_reembedded = db::codebase::mark_stale_embeddings(pool, project_id, behavior_version)
+        .await
+        .map_err(IndexError::Db)?;
+    if stale_reembedded > 0 {
+        tracing::info!(
+            stale_reembedded,
+            "Marked chunks for re-embedding due to behavior_version bump"
+        );
     }
 
     let mut builder = ignore::WalkBuilder::new(root);
@@ -179,11 +218,20 @@ pub async fn index_codebase(
         }
     }
 
-    let existing_hashes: HashMap<String, String> = db::codebase::get_file_hashes(pool, project_id)
-        .await
-        .map_err(IndexError::Db)?
-        .into_iter()
-        .collect();
+    let existing: HashMap<String, (String, i32)> =
+        db::codebase::get_file_hashes_versioned(pool, project_id)
+            .await
+            .map_err(IndexError::Db)?
+            .into_iter()
+            .map(|(path, hash, ver)| (path, (hash, ver)))
+            .collect();
+
+    // Git fast-path: only consider files that git reports as changed
+    let git_changed = if existing.is_empty() {
+        None // first index — scan everything
+    } else {
+        git_changed_files(root)
+    };
 
     // Collect changed files and their chunks (no DB writes yet)
     let mut all_chunks: Vec<db::codebase::NewCodeChunk> = Vec::new();
@@ -217,6 +265,18 @@ pub async fn index_codebase(
         files_scanned += 1;
         current_files.push(rel_path.clone());
 
+        // Git fast-path: skip files git says are unchanged AND already indexed at current version
+        if let Some(ref gc) = git_changed {
+            if !gc.contains(&rel_path) {
+                if let Some((_, ver)) = existing.get(&rel_path) {
+                    if *ver >= behavior_version {
+                        files_skipped += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -227,9 +287,12 @@ pub async fn index_codebase(
 
         let hash = sha256_hex(&content);
 
-        if existing_hashes.get(&rel_path).map(|h| h.as_str()) == Some(&hash) {
-            files_skipped += 1;
-            continue;
+        // SHA-256 fallback check (still needed for files git reports as changed but content is same)
+        if let Some((existing_hash, ver)) = existing.get(&rel_path) {
+            if existing_hash == &hash && *ver >= behavior_version {
+                files_skipped += 1;
+                continue;
+            }
         }
         files_changed += 1;
         changed_files.push(rel_path.clone());
@@ -252,6 +315,7 @@ pub async fn index_codebase(
                 content: chunk_content,
                 embedding: None,
                 file_hash: hash.clone(),
+                behavior_version,
             });
         }
     }
@@ -309,6 +373,7 @@ pub async fn index_codebase(
         chunks_indexed: chunks_inserted,
         stale_files_removed: stale_deleted,
         embed_errors,
+        stale_reembedded,
     })
 }
 
@@ -403,6 +468,7 @@ pub struct IndexResult {
     pub chunks_indexed: u64,
     pub stale_files_removed: u64,
     pub embed_errors: u64,
+    pub stale_reembedded: u64,
 }
 
 #[derive(Debug)]

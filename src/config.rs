@@ -63,6 +63,7 @@ pub struct Config {
     pub dashboard_enabled: bool,
     pub dashboard_port: u16,
     pub capture_git_ref: bool,
+    pub codebase_behavior_version: i32,
 }
 
 impl Config {
@@ -154,6 +155,7 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
                 == "true",
+            codebase_behavior_version: parse_warn_or("CODEBASE_BEHAVIOR_VERSION", 1),
         }
     }
 }
@@ -210,6 +212,7 @@ mod tests {
             "DASHBOARD_ENABLED",
             "DASHBOARD_PORT",
             "CAPTURE_GIT_REF",
+            "CODEBASE_BEHAVIOR_VERSION",
         ] {
             std::env::remove_var(key);
         }

@@ -1277,10 +1277,16 @@ impl LoreServer {
             project.root_path
         };
 
-        let result =
-            crate::indexer::index_codebase(self.pool(), self.embeddings(), project_id, &path, None)
-                .await
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        let result = crate::indexer::index_codebase(
+            self.pool(),
+            self.embeddings(),
+            project_id,
+            &path,
+            None,
+            self.config().codebase_behavior_version,
+        )
+        .await
+        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
         Self::json_content_with_nudge(
             &result,
@@ -1328,12 +1334,16 @@ impl LoreServer {
         let results: Vec<serde_json::Value> = chunks
             .iter()
             .map(|c| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "file": c.file_path,
                     "lines": format!("{}:{}", c.start_line, c.end_line),
                     "language": c.language,
                     "content": c.content,
-                })
+                });
+                if let Some(ref s) = c.summary {
+                    obj["summary"] = serde_json::Value::String(s.clone());
+                }
+                obj
             })
             .collect();
 
@@ -1344,7 +1354,7 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Get statistics about the indexed codebase: file count, chunk count, last indexed time."
+        description = "Get statistics about the indexed codebase: file count, chunk count, last indexed time, summary coverage."
     )]
     pub async fn get_index_status(&self) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
@@ -1353,6 +1363,148 @@ impl LoreServer {
             .map_err(Self::db_err)?;
         Self::json_content_with_nudge(&stats, "Call index_codebase to update the index if stale.")
     }
+
+    #[tool(
+        description = "Generate LLM summaries for indexed code chunks that lack them. Calls Gemini to produce 1-sentence descriptions per function/class. Run after index_codebase to improve high-level search queries."
+    )]
+    pub async fn generate_summaries(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Max chunks to summarize per call (default 50, max 100)")]
+        limit: Option<i64>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let limit = limit.unwrap_or(50).min(100);
+
+        let chunks = db::codebase::get_chunks_needing_summary(self.pool(), project_id, limit)
+            .await
+            .map_err(Self::db_err)?;
+
+        if chunks.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "All chunks already have summaries.",
+            )]));
+        }
+
+        let api_key = self
+            .config()
+            .gemini_api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| {
+                rmcp::Error::internal_error("GEMINI_API_KEY required for generate_summaries", None)
+            })?;
+
+        let mut updates: Vec<(Uuid, String)> = Vec::new();
+        let mut errors = 0u64;
+
+        // Batch chunks into groups of 10 for efficient LLM calls
+        for batch in chunks.chunks(10) {
+            let prompt = build_summary_prompt(batch);
+            match call_gemini_for_summaries(&self.inner.http_client, api_key, &prompt).await {
+                Ok(summaries) => {
+                    for (chunk, summary) in batch.iter().zip(summaries) {
+                        if !summary.is_empty() {
+                            updates.push((chunk.id, summary));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "LLM summary batch failed");
+                    errors += batch.len() as u64;
+                }
+            }
+        }
+
+        let updated = db::codebase::update_summaries(self.pool(), &updates)
+            .await
+            .map_err(Self::db_err)?;
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "summaries_generated": updated,
+                "errors": errors,
+                "remaining": chunks.len() as u64 - updated - errors,
+            }),
+            "Summaries improve search quality for high-level queries.",
+        )
+    }
+}
+
+fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
+    let mut prompt = String::from(
+        "For each numbered code snippet below, write exactly ONE short sentence (max 15 words) \
+         describing what the code does. Return one summary per line, numbered to match.\n\n",
+    );
+    for (i, chunk) in chunks.iter().enumerate() {
+        let lang = chunk.language.as_deref().unwrap_or("unknown");
+        prompt.push_str(&format!(
+            "--- Snippet {} ({}, {}:{}-{}) ---\n{}\n\n",
+            i + 1,
+            lang,
+            chunk.file_path,
+            chunk.start_line,
+            chunk.end_line,
+            chunk.content
+        ));
+    }
+    prompt
+}
+
+async fn call_gemini_for_summaries(
+    client: &reqwest::Client,
+    api_key: &str,
+    prompt: &str,
+) -> Result<Vec<String>, String> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+
+    let body = serde_json::json!({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini API {status}: {text}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
+
+    let text = json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+
+    let summaries: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            // Strip leading "1. " or "1) " numbering
+            let trimmed = l.trim();
+            if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
+                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+                rest.trim_start_matches(['.', ')', ':', '-', ' '])
+                    .to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect();
+
+    Ok(summaries)
 }
 
 impl ServerHandler for LoreServer {

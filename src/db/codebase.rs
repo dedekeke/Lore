@@ -177,7 +177,7 @@ pub async fn search_chunks(
     let candidates = if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-             embedding, file_hash, indexed_at \
+             embedding, file_hash, indexed_at, summary, behavior_version \
              FROM ai_memory.code_chunks \
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
@@ -211,7 +211,7 @@ pub async fn search_chunks(
                 FULL OUTER JOIN fts_ranked f ON v.id = f.id
             )
             SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
-                   s.content, s.embedding, s.file_hash, s.indexed_at
+                   s.content, s.embedding, s.file_hash, s.indexed_at, s.summary, s.behavior_version
             FROM fused
             JOIN ai_memory.code_chunks s ON s.id = fused.id
             ORDER BY fused.rrf_score DESC

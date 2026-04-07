@@ -24,8 +24,12 @@ async fn test_list_tasks_with_status_filter() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "task1", None, None, None).await.unwrap();
-    tasks::create_task(&pool, pid, "task2", None, None, None).await.unwrap();
+    let t1 = tasks::create_task(&pool, pid, "task1", None, None, None)
+        .await
+        .unwrap();
+    tasks::create_task(&pool, pid, "task2", None, None, None)
+        .await
+        .unwrap();
     tasks::complete_task(&pool, t1, None).await.unwrap();
 
     let active = tasks::list_tasks(&pool, pid, Some(TaskStatus::Active))
@@ -151,7 +155,9 @@ async fn test_get_task_stats_filtered_by_status() {
     let t1 = tasks::create_task(&pool, pid, "active", None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "done", None, None, None).await.unwrap();
+    let t2 = tasks::create_task(&pool, pid, "done", None, None, None)
+        .await
+        .unwrap();
     tasks::complete_task(&pool, t2, None).await.unwrap();
 
     let active = tasks::get_task_stats(&pool, pid, Some(TaskStatus::Active))

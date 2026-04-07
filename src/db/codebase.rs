@@ -146,8 +146,8 @@ pub async fn insert_chunks(
     Ok(total)
 }
 
-/// Hybrid search: vector + BM25 RRF on code chunks
-/// Uses nullable param pattern: always bind file_pattern, filter with `$N::text IS NULL OR ...`
+/// Hybrid search: vector + BM25 RRF on code chunks, with optional MMR re-ranking.
+/// `diversity` controls MMR: 0.0 = pure relevance, 1.0 = max diversity. None skips MMR.
 pub async fn search_chunks(
     pool: &PgPool,
     project_id: Uuid,
@@ -155,16 +155,20 @@ pub async fn search_chunks(
     query: &str,
     limit: i64,
     file_pattern: Option<&str>,
+    diversity: Option<f32>,
 ) -> Result<Vec<CodeChunk>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
     let file_filter = "AND ($4::text IS NULL OR file_path LIKE $4)";
 
-    // If no usable text query, fall back to vector-only
+    let use_mmr = diversity.is_some_and(|d| d > 0.0);
+    let fetch_limit = if use_mmr { limit * 4 } else { limit };
+
     let has_words = query.split_whitespace().any(|w| {
         !w.chars()
             .all(|c| matches!(c, '\'' | '\\' | ':' | '&' | '|' | '!' | '(' | ')' | '*'))
     });
-    if !has_words {
+
+    let candidates = if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
              embedding, file_hash, indexed_at \
@@ -172,53 +176,161 @@ pub async fn search_chunks(
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
         );
-        return sqlx::query_as(&sql)
+        sqlx::query_as(&sql)
             .bind(project_id)
             .bind(&emb)
-            .bind(limit)
+            .bind(fetch_limit)
             .bind(file_pattern)
             .fetch_all(pool)
-            .await;
+            .await?
+    } else {
+        let candidate_limit = fetch_limit * 3;
+        let sql = format!(
+            "WITH vector_ranked AS (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
+                FROM ai_memory.code_chunks
+                WHERE project_id = $1 AND embedding IS NOT NULL {file_filter}
+                LIMIT $5
+            ),
+            fts_ranked AS (
+                SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, plainto_tsquery('english', $6)) DESC) AS f_rank
+                FROM ai_memory.code_chunks
+                WHERE project_id = $1 AND content_tsv @@ plainto_tsquery('english', $6) {file_filter}
+                LIMIT $5
+            ),
+            fused AS (
+                SELECT COALESCE(v.id, f.id) AS id,
+                       COALESCE(1.0 / (60 + v.v_rank), 0) + COALESCE(1.0 / (60 + f.f_rank), 0) AS rrf_score
+                FROM vector_ranked v
+                FULL OUTER JOIN fts_ranked f ON v.id = f.id
+            )
+            SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
+                   s.content, s.embedding, s.file_hash, s.indexed_at
+            FROM fused
+            JOIN ai_memory.code_chunks s ON s.id = fused.id
+            ORDER BY fused.rrf_score DESC
+            LIMIT $3"
+        );
+        sqlx::query_as(&sql)
+            .bind(project_id)
+            .bind(&emb)
+            .bind(fetch_limit)
+            .bind(file_pattern)
+            .bind(candidate_limit)
+            .bind(query)
+            .fetch_all(pool)
+            .await?
+    };
+
+    if use_mmr {
+        Ok(mmr_rerank(
+            candidates,
+            embedding,
+            limit as usize,
+            diversity.unwrap(),
+        ))
+    } else {
+        Ok(candidates)
+    }
+}
+
+/// Maximal Marginal Relevance: greedily select results balancing relevance vs diversity.
+/// lambda=0.0 pure diversity, lambda=1.0 pure relevance (diversity param is inverted: 0.3 -> lambda=0.7)
+fn mmr_rerank(
+    candidates: Vec<CodeChunk>,
+    query_emb: &[f32],
+    k: usize,
+    diversity: f32,
+) -> Vec<CodeChunk> {
+    if candidates.len() <= k {
+        return candidates;
     }
 
-    let candidate_limit = limit * 3;
+    let lambda = 1.0 - diversity.clamp(0.0, 1.0);
 
-    let sql = format!(
-        "WITH vector_ranked AS (
-            SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
-            FROM ai_memory.code_chunks
-            WHERE project_id = $1 AND embedding IS NOT NULL {file_filter}
-            LIMIT $5
-        ),
-        fts_ranked AS (
-            SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, plainto_tsquery('english', $6)) DESC) AS f_rank
-            FROM ai_memory.code_chunks
-            WHERE project_id = $1 AND content_tsv @@ plainto_tsquery('english', $6) {file_filter}
-            LIMIT $5
-        ),
-        fused AS (
-            SELECT COALESCE(v.id, f.id) AS id,
-                   COALESCE(1.0 / (60 + v.v_rank), 0) + COALESCE(1.0 / (60 + f.f_rank), 0) AS rrf_score
-            FROM vector_ranked v
-            FULL OUTER JOIN fts_ranked f ON v.id = f.id
-        )
-        SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
-               s.content, s.embedding, s.file_hash, s.indexed_at
-        FROM fused
-        JOIN ai_memory.code_chunks s ON s.id = fused.id
-        ORDER BY fused.rrf_score DESC
-        LIMIT $3"
-    );
+    // Pre-compute cosine similarities to query
+    let query_sims: Vec<f32> = candidates
+        .iter()
+        .map(|c| {
+            c.embedding
+                .as_ref()
+                .map(|e| cosine_sim(e.as_slice(), query_emb))
+                .unwrap_or(0.0)
+        })
+        .collect();
 
-    sqlx::query_as(&sql)
-        .bind(project_id) // $1
-        .bind(&emb) // $2
-        .bind(limit) // $3
-        .bind(file_pattern) // $4
-        .bind(candidate_limit) // $5
-        .bind(query) // $6 — plainto_tsquery handles raw input safely
-        .fetch_all(pool)
-        .await
+    let mut selected: Vec<usize> = Vec::with_capacity(k);
+    let mut remaining: Vec<usize> = (0..candidates.len()).collect();
+
+    // First pick: highest query similarity
+    let first = remaining
+        .iter()
+        .copied()
+        .max_by(|&a, &b| {
+            query_sims[a]
+                .partial_cmp(&query_sims[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap();
+    selected.push(first);
+    remaining.retain(|&i| i != first);
+
+    while selected.len() < k && !remaining.is_empty() {
+        let best = remaining
+            .iter()
+            .copied()
+            .max_by(|&a, &b| {
+                let score_a = mmr_score(a, &selected, &candidates, &query_sims, lambda);
+                let score_b = mmr_score(b, &selected, &candidates, &query_sims, lambda);
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        selected.push(best);
+        remaining.retain(|&i| i != best);
+    }
+
+    selected
+        .into_iter()
+        .map(|i| candidates[i].clone())
+        .collect()
+}
+
+fn mmr_score(
+    candidate_idx: usize,
+    selected: &[usize],
+    candidates: &[CodeChunk],
+    query_sims: &[f32],
+    lambda: f32,
+) -> f32 {
+    let relevance = query_sims[candidate_idx];
+    let max_sim_to_selected = selected
+        .iter()
+        .map(|&s| {
+            match (
+                &candidates[candidate_idx].embedding,
+                &candidates[s].embedding,
+            ) {
+                (Some(a), Some(b)) => cosine_sim(a.as_slice(), b.as_slice()),
+                _ => 0.0,
+            }
+        })
+        .fold(0.0f32, f32::max);
+    lambda * relevance - (1.0 - lambda) * max_sim_to_selected
+}
+
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 /// Count indexed chunks for a project
@@ -262,4 +374,81 @@ pub struct NewCodeChunk {
     pub content: String,
     pub embedding: Option<Vec<f32>>,
     pub file_hash: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_chunk(id_byte: u8, emb: Vec<f32>) -> CodeChunk {
+        CodeChunk {
+            id: Uuid::from_bytes([id_byte; 16]),
+            project_id: Uuid::nil(),
+            file_path: format!("file_{id_byte}.rs"),
+            start_line: 1,
+            end_line: 10,
+            language: Some("rust".into()),
+            content: format!("chunk {id_byte}"),
+            embedding: Some(Vector::from(emb)),
+            file_hash: "abc".into(),
+            indexed_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_cosine_sim_identical() {
+        let a = vec![1.0, 0.0, 0.0];
+        assert!((cosine_sim(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_sim_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        assert!(cosine_sim(&a, &b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_sim_zero_vector() {
+        let a = vec![0.0, 0.0];
+        let b = vec![1.0, 0.0];
+        assert_eq!(cosine_sim(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_mmr_returns_k_results() {
+        let candidates = vec![
+            make_chunk(1, vec![1.0, 0.0, 0.0]),
+            make_chunk(2, vec![0.9, 0.1, 0.0]),
+            make_chunk(3, vec![0.0, 1.0, 0.0]),
+            make_chunk(4, vec![0.0, 0.0, 1.0]),
+        ];
+        let query = vec![1.0, 0.0, 0.0];
+        let result = mmr_rerank(candidates, &query, 3, 0.3);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_mmr_diversity_promotes_dissimilar() {
+        // 4 candidates, select top-2: MMR should prefer the diverse chunk over the near-duplicate
+        let candidates = vec![
+            make_chunk(1, vec![1.0, 0.0, 0.0]),
+            make_chunk(2, vec![0.99, 0.01, 0.0]), // near-duplicate of 1
+            make_chunk(3, vec![0.0, 1.0, 0.0]),   // very different
+            make_chunk(4, vec![0.98, 0.02, 0.0]), // another near-duplicate
+        ];
+        let query = vec![1.0, 0.0, 0.0];
+
+        let result = mmr_rerank(candidates, &query, 2, 0.8);
+        assert_eq!(result[0].id, Uuid::from_bytes([1; 16])); // most relevant
+        assert_eq!(result[1].id, Uuid::from_bytes([3; 16])); // diverse pick over near-duplicates
+    }
+
+    #[test]
+    fn test_mmr_fewer_candidates_than_k() {
+        let candidates = vec![make_chunk(1, vec![1.0, 0.0])];
+        let result = mmr_rerank(candidates.clone(), &[1.0, 0.0], 5, 0.3);
+        assert_eq!(result.len(), 1);
+    }
 }

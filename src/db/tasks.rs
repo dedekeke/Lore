@@ -319,10 +319,7 @@ pub async fn list_tasks_paginated(
 }
 
 /// Direct children only (depth=1), not recursive.
-pub async fn list_subtasks(
-    pool: &PgPool,
-    parent_task_id: Uuid,
-) -> Result<Vec<Task>, sqlx::Error> {
+pub async fn list_subtasks(pool: &PgPool, parent_task_id: Uuid) -> Result<Vec<Task>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
          created_at, completed_at, priority, task_type, summary \

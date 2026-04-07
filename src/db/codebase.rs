@@ -223,7 +223,12 @@ pub async fn search_chunks(
     };
 
     if use_mmr {
-        Ok(mmr_rerank(candidates, embedding, limit as usize, diversity.unwrap()))
+        Ok(mmr_rerank(
+            candidates,
+            embedding,
+            limit as usize,
+            diversity.unwrap(),
+        ))
     } else {
         Ok(candidates)
     }
@@ -231,7 +236,12 @@ pub async fn search_chunks(
 
 /// Maximal Marginal Relevance: greedily select results balancing relevance vs diversity.
 /// lambda=0.0 pure diversity, lambda=1.0 pure relevance (diversity param is inverted: 0.3 -> lambda=0.7)
-fn mmr_rerank(candidates: Vec<CodeChunk>, query_emb: &[f32], k: usize, diversity: f32) -> Vec<CodeChunk> {
+fn mmr_rerank(
+    candidates: Vec<CodeChunk>,
+    query_emb: &[f32],
+    k: usize,
+    diversity: f32,
+) -> Vec<CodeChunk> {
     if candidates.len() <= k {
         return candidates;
     }
@@ -256,7 +266,11 @@ fn mmr_rerank(candidates: Vec<CodeChunk>, query_emb: &[f32], k: usize, diversity
     let first = remaining
         .iter()
         .copied()
-        .max_by(|&a, &b| query_sims[a].partial_cmp(&query_sims[b]).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|&a, &b| {
+            query_sims[a]
+                .partial_cmp(&query_sims[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .unwrap();
     selected.push(first);
     remaining.retain(|&i| i != first);
@@ -268,14 +282,19 @@ fn mmr_rerank(candidates: Vec<CodeChunk>, query_emb: &[f32], k: usize, diversity
             .max_by(|&a, &b| {
                 let score_a = mmr_score(a, &selected, &candidates, &query_sims, lambda);
                 let score_b = mmr_score(b, &selected, &candidates, &query_sims, lambda);
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap();
         selected.push(best);
         remaining.retain(|&i| i != best);
     }
 
-    selected.into_iter().map(|i| candidates[i].clone()).collect()
+    selected
+        .into_iter()
+        .map(|i| candidates[i].clone())
+        .collect()
 }
 
 fn mmr_score(
@@ -289,7 +308,10 @@ fn mmr_score(
     let max_sim_to_selected = selected
         .iter()
         .map(|&s| {
-            match (&candidates[candidate_idx].embedding, &candidates[s].embedding) {
+            match (
+                &candidates[candidate_idx].embedding,
+                &candidates[s].embedding,
+            ) {
                 (Some(a), Some(b)) => cosine_sim(a.as_slice(), b.as_slice()),
                 _ => 0.0,
             }
@@ -414,7 +436,7 @@ mod tests {
             make_chunk(1, vec![1.0, 0.0, 0.0]),
             make_chunk(2, vec![0.99, 0.01, 0.0]), // near-duplicate of 1
             make_chunk(3, vec![0.0, 1.0, 0.0]),   // very different
-            make_chunk(4, vec![0.98, 0.02, 0.0]),  // another near-duplicate
+            make_chunk(4, vec![0.98, 0.02, 0.0]), // another near-duplicate
         ];
         let query = vec![1.0, 0.0, 0.0];
 

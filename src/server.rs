@@ -1303,7 +1303,9 @@ impl LoreServer {
         #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
         file_pattern: Option<String>,
         #[tool(param)]
-        #[schemars(description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)")]
+        #[schemars(
+            description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)"
+        )]
         diversity: Option<f32>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;

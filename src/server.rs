@@ -423,7 +423,7 @@ impl LoreServer {
         #[schemars(description = "UUID of parent task, if this is a subtask")]
         parent_task_id: Option<String>,
         #[tool(param)]
-        #[schemars(description = "Priority level, e.g. P0, P1, P2, P3")]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4")]
         priority: Option<String>,
         #[tool(param)]
         #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
@@ -588,6 +588,62 @@ impl LoreServer {
         Self::json_content_with_nudge(
             &attempts,
             "Use the above failures to avoid repeating mistakes. Call propose_attempt with a new approach.",
+        )
+    }
+
+    #[tool(description = "Update an existing task's priority, task_type, or description")]
+    pub async fn update_task(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the task to update")]
+        task_id: String,
+        #[tool(param)]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4. Empty string clears it.")]
+        priority: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New task type (e.g. Bug, Feature). Empty string clears it.")]
+        task_type: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New description text")]
+        description: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        if let Some(ref d) = description {
+            Self::validate_len("description", d, 4096)?;
+        }
+        let tid = Self::parse_uuid(&task_id)?;
+        let p = priority.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let tt = task_type.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let desc = description
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let updated = db::tasks::update_task(
+            self.pool(),
+            tid,
+            p.as_ref().map(|o| o.as_deref()),
+            tt.as_ref().map(|o| o.as_deref()),
+            desc.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "updated": updated, "task_id": task_id }),
+            "Task updated. Continue with your current work.",
         )
     }
 

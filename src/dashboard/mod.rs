@@ -69,7 +69,12 @@ pub fn router(pool: PgPool) -> Router {
     Router::new()
         .route("/", get(projects_page))
         .route("/projects/{id}", get(project_detail))
-        .route("/tasks/{id}", get(task_detail).delete(delete_task_handler))
+        .route(
+            "/tasks/{id}",
+            get(task_detail)
+                .delete(delete_task_handler)
+                .patch(update_task_handler),
+        )
         .route("/tasks/{id}/complete", post(complete_task))
         .route("/tasks/{id}/abandon", post(abandon_task))
         .route("/batch/tasks/delete", post(batch_delete_tasks))
@@ -299,6 +304,53 @@ async fn delete_task_handler(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Html(String::new()))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateTaskPayload {
+    priority: Option<String>,
+    task_type: Option<String>,
+    description: Option<String>,
+}
+
+async fn update_task_handler(
+    State(state): State<DashboardState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateTaskPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Treat empty string as "clear the field"
+    let priority = payload.priority.map(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let task_type = payload.task_type.map(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let description = payload
+        .description
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let updated = db::tasks::update_task(
+        &state.pool,
+        id,
+        priority.as_ref().map(|o| o.as_deref()),
+        task_type.as_ref().map(|o| o.as_deref()),
+        description.as_deref(),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
 // --- Batch operations ---

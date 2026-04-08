@@ -61,6 +61,57 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Err
     .await
 }
 
+pub async fn update_task(
+    pool: &PgPool,
+    id: Uuid,
+    priority: Option<Option<&str>>,
+    task_type: Option<Option<&str>>,
+    description: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    // Each Option<Option<&str>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
+    let mut set_clauses = Vec::new();
+    let mut param_idx = 2u32;
+
+    if priority.is_some() {
+        set_clauses.push(format!("priority = ${param_idx}"));
+        param_idx += 1;
+    }
+    if task_type.is_some() {
+        set_clauses.push(format!("task_type = ${param_idx}"));
+        param_idx += 1;
+    }
+    if description.is_some() {
+        set_clauses.push(format!(
+            "description = ${param_idx}, summary = ${}",
+            param_idx + 1
+        ));
+    }
+    if set_clauses.is_empty() {
+        return Ok(false);
+    }
+
+    let sql = format!(
+        "UPDATE ai_memory.tasks SET {} WHERE id = $1",
+        set_clauses.join(", ")
+    );
+
+    let mut query = sqlx::query(&sql).bind(id);
+    if let Some(p) = &priority {
+        query = query.bind(p.as_deref());
+    }
+    if let Some(tt) = &task_type {
+        query = query.bind(tt.as_deref());
+    }
+    if let Some(desc) = description {
+        let summary = generate_summary(desc);
+        query = query.bind(desc);
+        query = query.bind(summary);
+    }
+
+    let result = query.execute(pool).await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn delete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = $1")
         .bind(id)

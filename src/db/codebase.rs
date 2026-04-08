@@ -17,6 +17,8 @@ pub struct CodeChunk {
     pub embedding: Option<Vector>,
     pub file_hash: String,
     pub indexed_at: DateTime<Utc>,
+    pub summary: Option<String>,
+    pub behavior_version: i32,
 }
 
 /// Get existing file hashes for a project (for incremental indexing)
@@ -109,6 +111,7 @@ pub async fn insert_chunks(
         let mut contents = Vec::with_capacity(batch.len());
         let mut embeddings: Vec<Option<Vector>> = Vec::with_capacity(batch.len());
         let mut hashes = Vec::with_capacity(batch.len());
+        let mut versions = Vec::with_capacity(batch.len());
 
         for c in batch {
             project_ids.push(project_id);
@@ -119,17 +122,19 @@ pub async fn insert_chunks(
             contents.push(c.content.as_str());
             embeddings.push(c.embedding.as_ref().map(|e| Vector::from(e.to_vec())));
             hashes.push(c.file_hash.as_str());
+            versions.push(c.behavior_version);
         }
 
         let result = sqlx::query(
             "INSERT INTO ai_memory.code_chunks \
-             (project_id, file_path, start_line, end_line, language, content, embedding, file_hash) \
-             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::vector[], $8::text[]) \
+             (project_id, file_path, start_line, end_line, language, content, embedding, file_hash, behavior_version) \
+             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::vector[], $8::text[], $9::int[]) \
              ON CONFLICT (project_id, file_path, start_line) DO UPDATE \
              SET content = EXCLUDED.content, \
                  embedding = COALESCE(EXCLUDED.embedding, ai_memory.code_chunks.embedding), \
                  file_hash = EXCLUDED.file_hash, end_line = EXCLUDED.end_line, \
-                 language = EXCLUDED.language, indexed_at = NOW()",
+                 language = EXCLUDED.language, behavior_version = EXCLUDED.behavior_version, \
+                 indexed_at = NOW()",
         )
         .bind(&project_ids)
         .bind(&paths)
@@ -139,6 +144,7 @@ pub async fn insert_chunks(
         .bind(&contents)
         .bind(&embeddings)
         .bind(&hashes)
+        .bind(&versions)
         .execute(pool)
         .await?;
         total += result.rows_affected();
@@ -171,7 +177,7 @@ pub async fn search_chunks(
     let candidates = if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-             embedding, file_hash, indexed_at \
+             embedding, file_hash, indexed_at, summary, behavior_version \
              FROM ai_memory.code_chunks \
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
@@ -205,7 +211,7 @@ pub async fn search_chunks(
                 FULL OUTER JOIN fts_ranked f ON v.id = f.id
             )
             SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
-                   s.content, s.embedding, s.file_hash, s.indexed_at
+                   s.content, s.embedding, s.file_hash, s.indexed_at, s.summary, s.behavior_version
             FROM fused
             JOIN ai_memory.code_chunks s ON s.id = fused.id
             ORDER BY fused.rrf_score DESC
@@ -343,10 +349,11 @@ pub async fn count_chunks(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::
     Ok(row.0)
 }
 
-/// Get index stats: file count, chunk count, last indexed time
+/// Get index stats: file count, chunk count, last indexed time, behavior version info
 pub async fn get_index_stats(pool: &PgPool, project_id: Uuid) -> Result<IndexStats, sqlx::Error> {
-    let row: (i64, i64, Option<DateTime<Utc>>) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT file_path), COUNT(*), MAX(indexed_at) \
+    let row: (i64, i64, Option<DateTime<Utc>>, i64) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT file_path), COUNT(*), MAX(indexed_at), \
+         COUNT(*) FILTER (WHERE summary IS NOT NULL) \
          FROM ai_memory.code_chunks WHERE project_id = $1",
     )
     .bind(project_id)
@@ -356,6 +363,7 @@ pub async fn get_index_stats(pool: &PgPool, project_id: Uuid) -> Result<IndexSta
         file_count: row.0,
         chunk_count: row.1,
         last_indexed_at: row.2,
+        summarized_chunks: row.3,
     })
 }
 
@@ -364,6 +372,74 @@ pub struct IndexStats {
     pub file_count: i64,
     pub chunk_count: i64,
     pub last_indexed_at: Option<DateTime<Utc>>,
+    pub summarized_chunks: i64,
+}
+
+/// Get chunks that need LLM-generated summaries
+pub async fn get_chunks_needing_summary(
+    pool: &PgPool,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<CodeChunk>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, file_path, start_line, end_line, language, content, \
+         embedding, file_hash, indexed_at, summary, behavior_version \
+         FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND summary IS NULL \
+         ORDER BY indexed_at DESC LIMIT $2",
+    )
+    .bind(project_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Batch update summaries for code chunks
+pub async fn update_summaries(
+    pool: &PgPool,
+    updates: &[(Uuid, String)],
+) -> Result<u64, sqlx::Error> {
+    let mut total = 0u64;
+    for (id, summary) in updates {
+        let result = sqlx::query("UPDATE ai_memory.code_chunks SET summary = $1 WHERE id = $2")
+            .bind(summary)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        total += result.rows_affected();
+    }
+    Ok(total)
+}
+
+/// Nullify embeddings for chunks with old behavior_version (triggers re-embedding on next index)
+pub async fn mark_stale_embeddings(
+    pool: &PgPool,
+    project_id: Uuid,
+    current_version: i32,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.code_chunks SET embedding = NULL, summary = NULL \
+         WHERE project_id = $1 AND behavior_version < $2",
+    )
+    .bind(project_id)
+    .bind(current_version)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Get file hashes with behavior_version for incremental indexing
+pub async fn get_file_hashes_versioned(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<(String, String, i32)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT DISTINCT ON (file_path) file_path, file_hash, behavior_version \
+         FROM ai_memory.code_chunks WHERE project_id = $1 ORDER BY file_path, indexed_at DESC",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
 }
 
 pub struct NewCodeChunk {
@@ -374,6 +450,7 @@ pub struct NewCodeChunk {
     pub content: String,
     pub embedding: Option<Vec<f32>>,
     pub file_hash: String,
+    pub behavior_version: i32,
 }
 
 #[cfg(test)]
@@ -393,6 +470,8 @@ mod tests {
             embedding: Some(Vector::from(emb)),
             file_hash: "abc".into(),
             indexed_at: Utc::now(),
+            summary: None,
+            behavior_version: 1,
         }
     }
 

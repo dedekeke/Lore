@@ -12,15 +12,14 @@
 <div style="display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 1.5rem; flex-wrap: wrap;">
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
 
-  {# Editable priority #}
-  <span id="priority-display" class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="startEdit('priority')" title="Click to edit">
-    {{ task.priority | default(value="+ Priority") }}
-  </span>
-  <span id="priority-edit" style="display: none;">
-    <input type="text" id="priority-input" value="{{ task.priority | default(value='') }}" placeholder="e.g. P0, P1" style="width: 80px; padding: 0.2rem 0.4rem; font-size: 0.75rem; background: var(--surface); border: 1px solid var(--accent); color: var(--fg); border-radius: 4px;" onkeydown="if(event.key==='Enter')saveField('priority');if(event.key==='Escape')cancelEdit('priority');">
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveField('priority')">Save</button>
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="cancelEdit('priority')">Cancel</button>
-  </span>
+  {# Editable priority — select dropdown #}
+  <select id="priority-select" class="filter-select" style="font-size: 0.75rem; padding: 0.2rem 0.3rem; width: auto; min-width: 70px;" onchange="savePriority(this, '{{ task.id }}')">
+    <option value="" {% if not task.priority %}selected{% endif %}>—</option>
+    <option value="P1" {% if task.priority == "P1" %}selected{% endif %}>P1</option>
+    <option value="P2" {% if task.priority == "P2" %}selected{% endif %}>P2</option>
+    <option value="P3" {% if task.priority == "P3" %}selected{% endif %}>P3</option>
+    <option value="P4" {% if task.priority == "P4" %}selected{% endif %}>P4</option>
+  </select>
 
   {# Editable task_type #}
   <span id="task_type-display" class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="startEdit('task_type')" title="Click to edit">
@@ -89,6 +88,14 @@
 {% endif %}
 
 <script>
+async function savePriority(select, taskId) {
+  await fetch('/tasks/' + taskId, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({priority: select.value})
+  });
+  window.location.reload();
+}
 function startEdit(field) {
   document.getElementById(field + '-display').style.display = 'none';
   document.getElementById(field + '-edit').style.display = '';
@@ -102,9 +109,8 @@ function cancelEdit(field) {
 }
 async function saveField(field) {
   const input = document.getElementById(field + '-input');
-  const value = input.value;
   const body = {};
-  body[field] = value;
+  body[field] = input.value;
   const res = await fetch('/tasks/{{ task.id }}', {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},

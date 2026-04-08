@@ -423,7 +423,7 @@ impl LoreServer {
         #[schemars(description = "UUID of parent task, if this is a subtask")]
         parent_task_id: Option<String>,
         #[tool(param)]
-        #[schemars(description = "Priority level, e.g. P0, P1, P2, P3")]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4")]
         priority: Option<String>,
         #[tool(param)]
         #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
@@ -598,7 +598,7 @@ impl LoreServer {
         #[schemars(description = "UUID of the task to update")]
         task_id: String,
         #[tool(param)]
-        #[schemars(description = "New priority (e.g. P0, P1). Empty string clears it.")]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4. Empty string clears it.")]
         priority: Option<String>,
         #[tool(param)]
         #[schemars(description = "New task type (e.g. Bug, Feature). Empty string clears it.")]

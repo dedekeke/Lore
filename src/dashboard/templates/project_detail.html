@@ -74,13 +74,7 @@
       <td><input type="checkbox" class="task-cb" value="{{ t.id }}" onchange="updateBatchBar()"></td>
       <td>{% if t.parent_task_id %}<span style="color: var(--muted); margin-right: 0.3rem;">↳</span>{% endif %}<a href="/tasks/{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=80) }}</a></td>
       <td>
-        <select class="filter-select priority-inline" style="font-size: 0.7rem; padding: 0.15rem 0.2rem; width: auto; min-width: 55px;" onchange="savePriority(this, '{{ t.id }}')">
-          <option value="" {% if not t.priority %}selected{% endif %}>—</option>
-          <option value="P1" {% if t.priority == "P1" %}selected{% endif %}>P1</option>
-          <option value="P2" {% if t.priority == "P2" %}selected{% endif %}>P2</option>
-          <option value="P3" {% if t.priority == "P3" %}selected{% endif %}>P3</option>
-          <option value="P4" {% if t.priority == "P4" %}selected{% endif %}>P4</option>
-        </select>
+        <span class="badge badge-priority" style="cursor: pointer;{% if not t.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="showPrioritySelect(this)" data-task-id="{{ t.id }}" data-priority="{{ t.priority | default(value='') }}">{{ t.priority | default(value="—") }}</span>
       </td>
       <td>{% if t.task_type %}<span class="badge badge-type">{{ t.task_type }}</span>{% else %}<span style="color: var(--border);">—</span>{% endif %}</td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
@@ -118,12 +112,41 @@
 {% endif %}
 
 <script>
-async function savePriority(select, taskId) {
-  await fetch('/tasks/' + taskId, {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({priority: select.value})
+function showPrioritySelect(badge) {
+  const taskId = badge.dataset.taskId;
+  const current = badge.dataset.priority;
+  const select = document.createElement('select');
+  select.className = 'filter-select';
+  select.style.cssText = 'font-size: 0.7rem; padding: 0.15rem 0.2rem; width: auto; min-width: 55px;';
+  ['', 'P1', 'P2', 'P3', 'P4'].forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v || '—';
+    if (v === current) opt.selected = true;
+    select.appendChild(opt);
   });
+  const revert = (newVal) => {
+    badge.dataset.priority = newVal;
+    badge.textContent = newVal || '—';
+    badge.style.cssText = newVal
+      ? 'cursor: pointer;'
+      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
+    select.replaceWith(badge);
+  };
+  select.addEventListener('change', () => {
+    const val = select.value;
+    if (val !== current) {
+      fetch('/tasks/' + taskId, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({priority: val})
+      });
+    }
+    revert(val);
+  });
+  select.addEventListener('blur', () => revert(current));
+  badge.replaceWith(select);
+  select.focus();
 }
 function buildParams(overrides) {
   const params = new URLSearchParams();

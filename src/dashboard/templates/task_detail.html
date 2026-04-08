@@ -12,14 +12,8 @@
 <div style="display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 1.5rem; flex-wrap: wrap;">
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
 
-  {# Editable priority — select dropdown #}
-  <select id="priority-select" class="filter-select" style="font-size: 0.75rem; padding: 0.2rem 0.3rem; width: auto; min-width: 70px;" onchange="savePriority(this, '{{ task.id }}')">
-    <option value="" {% if not task.priority %}selected{% endif %}>—</option>
-    <option value="P1" {% if task.priority == "P1" %}selected{% endif %}>P1</option>
-    <option value="P2" {% if task.priority == "P2" %}selected{% endif %}>P2</option>
-    <option value="P3" {% if task.priority == "P3" %}selected{% endif %}>P3</option>
-    <option value="P4" {% if task.priority == "P4" %}selected{% endif %}>P4</option>
-  </select>
+  {# Editable priority — badge that opens dropdown on click #}
+  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="showPrioritySelect(this)" data-task-id="{{ task.id }}" data-priority="{{ task.priority | default(value='') }}">{{ task.priority | default(value="—") }}</span>
 
   {# Editable task_type #}
   <span id="task_type-display" class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="startEdit('task_type')" title="Click to edit">
@@ -88,13 +82,41 @@
 {% endif %}
 
 <script>
-async function savePriority(select, taskId) {
-  await fetch('/tasks/' + taskId, {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({priority: select.value})
+function showPrioritySelect(badge) {
+  const taskId = badge.dataset.taskId;
+  const current = badge.dataset.priority;
+  const select = document.createElement('select');
+  select.className = 'filter-select';
+  select.style.cssText = 'font-size: 0.75rem; padding: 0.2rem 0.3rem; width: auto; min-width: 70px;';
+  ['', 'P1', 'P2', 'P3', 'P4'].forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v || '—';
+    if (v === current) opt.selected = true;
+    select.appendChild(opt);
   });
-  window.location.reload();
+  const revert = (newVal) => {
+    badge.dataset.priority = newVal;
+    badge.textContent = newVal || '—';
+    badge.style.cssText = newVal
+      ? 'cursor: pointer;'
+      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
+    select.replaceWith(badge);
+  };
+  select.addEventListener('change', () => {
+    const val = select.value;
+    if (val !== current) {
+      fetch('/tasks/' + taskId, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({priority: val})
+      });
+    }
+    revert(val);
+  });
+  select.addEventListener('blur', () => revert(current));
+  badge.replaceWith(select);
+  select.focus();
 }
 function startEdit(field) {
   document.getElementById(field + '-display').style.display = 'none';

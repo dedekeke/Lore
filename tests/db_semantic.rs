@@ -46,6 +46,50 @@ async fn test_list_rules_by_category() {
 }
 
 #[tokio::test]
+async fn test_count_rules_by_category() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l1", None)
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l2", None)
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "f1", None)
+        .await
+        .unwrap();
+
+    let lessons = semantic::count_rules_by_category(&pool, pid, RuleCategory::Lesson)
+        .await
+        .unwrap();
+    let prefs = semantic::count_rules_by_category(&pool, pid, RuleCategory::Preference)
+        .await
+        .unwrap();
+    assert_eq!(lessons, 2);
+    assert_eq!(prefs, 0);
+}
+
+#[tokio::test]
+async fn test_count_rules_by_category_scopes_to_project() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    semantic::create_rule(&pool, pa, RuleCategory::Lesson, "la", None)
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pb, RuleCategory::Lesson, "lb", None)
+        .await
+        .unwrap();
+
+    let a = semantic::count_rules_by_category(&pool, pa, RuleCategory::Lesson)
+        .await
+        .unwrap();
+    assert_eq!(a, 1);
+}
+
+#[tokio::test]
 async fn test_delete_rule() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();

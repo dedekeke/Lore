@@ -1100,11 +1100,44 @@ impl LoreServer {
     #[tool(
         description = "Get a cold-start briefing: active/blocked tasks with attempt stats, stale pending attempts, and recent lessons. Call this at the start of a new session to know what to work on without resuming prior context."
     )]
-    pub async fn get_next_steps(&self) -> Result<CallToolResult, rmcp::Error> {
+    pub async fn get_next_steps(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Context tier: L0 (minimal ~100 tokens), L1 (full, default)")]
+        tier: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?;
+
+        // L0: minimal orientation
+        if tier.as_deref().map(|t| t.to_uppercase()).as_deref() == Some("L0") {
+            let active_count =
+                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                    .await
+                    .map_err(Self::db_err)?;
+            let blocked_count =
+                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                    .await
+                    .map_err(Self::db_err)?;
+            let lesson_count = db::semantic::count_rules_by_category(
+                self.pool(),
+                project_id,
+                db::RuleCategory::Lesson,
+            )
+            .await
+            .map_err(Self::db_err)?;
+            return Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "project": project,
+                    "active_task_count": active_count,
+                    "blocked_task_count": blocked_count,
+                    "recent_lesson_count": lesson_count,
+                }),
+                "L0 brief loaded. Call get_next_steps(tier='L1') for full details, or start_task() for a new goal.",
+            );
+        }
 
         let summaries = db::tasks::get_task_summaries(
             self.pool(),

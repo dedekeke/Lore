@@ -421,13 +421,13 @@ async fn rules_page(
     let pnames = project_name_map(&state.pool).await;
 
     let rules = if let Some(pid) = q.project_id {
-        db::semantic::list_rules(&state.pool, pid, None)
+        db::semantic::list_rules(&state.pool, pid, None, None)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         let mut all = Vec::new();
         for p in &projects {
-            let mut r = db::semantic::list_rules(&state.pool, p.id, None)
+            let mut r = db::semantic::list_rules(&state.pool, p.id, None, None)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             all.append(&mut r);
@@ -516,7 +516,7 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
             .iter()
             .filter(|t| t.status == db::TaskStatus::Completed)
             .count();
-        let rules = db::semantic::list_rules(&state.pool, p.id, None)
+        let rules = db::semantic::list_rules(&state.pool, p.id, None, None)
             .await
             .unwrap_or_default();
 

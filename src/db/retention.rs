@@ -4,11 +4,18 @@ use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
-struct DecayCandidate {
+struct EligibleTask {
     task_id: Uuid,
     project_id: Uuid,
     task_description: String,
-    accepted_summaries: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AttemptRow {
+    task_id: Uuid,
+    outcome: String,
+    approach_summary: String,
+    reasoning: Option<String>,
 }
 
 pub async fn run_retention_loop(pool: PgPool, config: Config) {
@@ -121,18 +128,15 @@ pub async fn prune_old_snapshots(pool: &PgPool, days: u32) -> Result<u64, sqlx::
     Ok(result.rows_affected())
 }
 
-/// Consolidate old accepted attempts into a single Lesson rule per task, then delete them.
+/// Consolidate old attempts into a structured lesson per task, preserving failure narrative.
 /// Only targets completed tasks with >= min_accepted accepted attempts older than N days.
 pub async fn consolidate_old_attempts(
     pool: &PgPool,
     days: u32,
     min_accepted: i64,
 ) -> Result<u64, sqlx::Error> {
-    // Find tasks eligible for consolidation
-    let candidates: Vec<DecayCandidate> = sqlx::query_as(
-        "SELECT t.id AS task_id, t.project_id, t.description AS task_description, \
-         STRING_AGG(a.approach_summary || CASE WHEN a.reasoning != '' THEN ': ' || a.reasoning ELSE '' END, '; ' \
-         ORDER BY a.created_at) AS accepted_summaries \
+    let eligible: Vec<EligibleTask> = sqlx::query_as(
+        "SELECT t.id AS task_id, t.project_id, t.description AS task_description \
          FROM ai_memory.tasks t \
          JOIN ai_memory.attempts a ON a.task_id = t.id \
          WHERE t.status = 'completed' \
@@ -145,35 +149,81 @@ pub async fn consolidate_old_attempts(
     .fetch_all(pool)
     .await?;
 
+    if eligible.is_empty() {
+        return Ok(0);
+    }
+
+    let task_ids: Vec<Uuid> = eligible.iter().map(|t| t.task_id).collect();
+
+    let attempts: Vec<AttemptRow> = sqlx::query_as(
+        "SELECT task_id, outcome, approach_summary, reasoning \
+         FROM ai_memory.attempts \
+         WHERE task_id = ANY($1) AND outcome IN ('accepted', 'rejected') \
+         ORDER BY created_at",
+    )
+    .bind(&task_ids)
+    .fetch_all(pool)
+    .await?;
+
     let mut created = 0u64;
-    for c in &candidates {
-        // Truncate to 4KB to stay within rule content limits
-        let lesson: String = format!(
-            "Consolidated from task '{}': {}",
-            c.task_description, c.accepted_summaries
-        )
-        .chars()
-        .take(4096)
-        .collect();
+    for task in &eligible {
+        let task_attempts: Vec<&AttemptRow> = attempts
+            .iter()
+            .filter(|a| a.task_id == task.task_id)
+            .collect();
+        let rejected: Vec<&&AttemptRow> = task_attempts
+            .iter()
+            .filter(|a| a.outcome == "rejected")
+            .collect();
+        let accepted: Vec<&&AttemptRow> = task_attempts
+            .iter()
+            .filter(|a| a.outcome == "accepted")
+            .collect();
+
+        let mut lesson = format!("## Task: {}\n", task.task_description);
+
+        if !rejected.is_empty() {
+            lesson.push_str("### Rejected approaches:\n");
+            for a in &rejected {
+                let r = a.reasoning.as_deref().unwrap_or("");
+                if r.is_empty() {
+                    lesson.push_str(&format!("- {}\n", a.approach_summary));
+                } else {
+                    lesson.push_str(&format!("- {}: {}\n", a.approach_summary, r));
+                }
+            }
+        }
+
+        lesson.push_str("### Accepted approach:\n");
+        for a in &accepted {
+            let r = a.reasoning.as_deref().unwrap_or("");
+            if r.is_empty() {
+                lesson.push_str(&format!("- {}\n", a.approach_summary));
+            } else {
+                lesson.push_str(&format!("- {}: {}\n", a.approach_summary, r));
+            }
+        }
+
+        let lesson: String = lesson.chars().take(4096).collect();
 
         // Create lesson rule (without embedding — batch embed will pick it up)
         sqlx::query(
             "INSERT INTO ai_memory.semantic_rules (project_id, category, content, source_task_id) \
              VALUES ($1, 'lesson', $2, $3)",
         )
-        .bind(c.project_id)
+        .bind(task.project_id)
         .bind(&lesson)
-        .bind(c.task_id)
+        .bind(task.task_id)
         .execute(pool)
         .await?;
 
-        // Delete the consolidated accepted attempts
+        // Delete all consolidated attempts (both rejected and accepted)
         sqlx::query(
             "DELETE FROM ai_memory.attempts \
-             WHERE task_id = $1 AND outcome = 'accepted' \
+             WHERE task_id = $1 AND outcome IN ('accepted', 'rejected') \
              AND resolved_at < NOW() - make_interval(days => $2)",
         )
-        .bind(c.task_id)
+        .bind(task.task_id)
         .bind(days as i32)
         .execute(pool)
         .await?;

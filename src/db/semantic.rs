@@ -137,6 +137,7 @@ pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
 
 /// Weighted hybrid search: RRF (vector + BM25) + category priority + recency decay.
 /// Falls back to vector-only if no query text (scoring degraded to cosine-only).
+#[allow(clippy::too_many_arguments)]
 pub async fn search_rules_hybrid(
     pool: &PgPool,
     project_id: Uuid,

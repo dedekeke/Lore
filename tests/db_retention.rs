@@ -7,7 +7,7 @@ use lore::db::{attempts, projects, retention, semantic, tasks, AttemptOutcome};
 async fn test_prune_old_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
     let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None)
@@ -33,7 +33,7 @@ async fn test_prune_old_attempts() {
 async fn test_purge_completed_tasks() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "old task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "old task", None, None, None, None)
         .await
         .unwrap();
 
@@ -58,7 +58,7 @@ async fn test_purge_completed_tasks() {
 async fn test_prune_old_snapshots() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
 

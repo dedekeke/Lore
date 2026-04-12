@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use pgvector::Vector;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -24,6 +25,9 @@ pub struct Task {
     pub priority: Option<String>,
     pub task_type: Option<String>,
     pub summary: Option<String>,
+    #[serde(skip)]
+    #[allow(dead_code)]
+    pub description_embedding: Option<Vector>,
 }
 
 pub async fn create_task(
@@ -33,11 +37,13 @@ pub async fn create_task(
     parent_task_id: Option<Uuid>,
     priority: Option<&str>,
     task_type: Option<&str>,
+    description_embedding: Option<&[f32]>,
 ) -> Result<Uuid, sqlx::Error> {
     let summary = generate_summary(description);
+    let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type) \
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type, description_embedding) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
@@ -45,6 +51,7 @@ pub async fn create_task(
     .bind(&summary)
     .bind(priority)
     .bind(task_type)
+    .bind(emb.as_ref())
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -53,7 +60,7 @@ pub async fn create_task(
 #[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
          FROM ai_memory.tasks WHERE id = $1",
     )
     .bind(id)
@@ -127,7 +134,7 @@ pub async fn list_tasks(
 ) -> Result<Vec<Task>, sqlx::Error> {
     match status {
         Some(s) => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at",
         )
         .bind(project_id)
@@ -135,7 +142,7 @@ pub async fn list_tasks(
         .fetch_all(pool)
         .await,
         None => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -336,13 +343,13 @@ pub async fn list_tasks_paginated(
     let sql = match status {
         Some(_) => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary \
+             created_at, completed_at, priority, task_type, summary, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
              ORDER BY {col} {dir} NULLS LAST LIMIT $3 OFFSET $4"
         ),
         None => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary \
+             created_at, completed_at, priority, task_type, summary, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 \
              ORDER BY {col} {dir} NULLS LAST LIMIT $2 OFFSET $3"
         ),
@@ -373,7 +380,7 @@ pub async fn list_tasks_paginated(
 pub async fn list_subtasks(pool: &PgPool, parent_task_id: Uuid) -> Result<Vec<Task>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-         created_at, completed_at, priority, task_type, summary \
+         created_at, completed_at, priority, task_type, summary, description_embedding \
          FROM ai_memory.tasks WHERE parent_task_id = $1 ORDER BY created_at",
     )
     .bind(parent_task_id)

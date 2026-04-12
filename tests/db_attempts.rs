@@ -7,7 +7,7 @@ use lore::db::{attempts, projects, tasks};
 async fn test_create_and_get_attempt() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
 
@@ -24,7 +24,7 @@ async fn test_create_and_get_attempt() {
 async fn test_log_outcome() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
     let aid = attempts::create_attempt(&pool, tid, "try", None, None)
@@ -56,7 +56,7 @@ async fn test_log_outcome() {
 async fn test_list_attempts_with_filter() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
 
@@ -91,7 +91,7 @@ async fn test_list_attempts_with_filter() {
 async fn test_search_similar_failures() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
 

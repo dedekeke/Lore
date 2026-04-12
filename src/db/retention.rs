@@ -156,7 +156,7 @@ pub async fn consolidate_old_attempts(
     let task_ids: Vec<Uuid> = eligible.iter().map(|t| t.task_id).collect();
 
     let attempts: Vec<AttemptRow> = sqlx::query_as(
-        "SELECT task_id, outcome, approach_summary, reasoning \
+        "SELECT task_id, outcome::text AS outcome, approach_summary, reasoning \
          FROM ai_memory.attempts \
          WHERE task_id = ANY($1) AND outcome IN ('accepted', 'rejected') \
          ORDER BY created_at",

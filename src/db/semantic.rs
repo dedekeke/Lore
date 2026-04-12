@@ -29,6 +29,7 @@ pub struct SemanticRule {
     pub weight: Option<f64>,
     pub task_type_affinity: Option<Vec<String>>,
     pub tags: Vec<String>,
+    pub project_name: Option<String>,
 }
 
 pub async fn create_rule(
@@ -57,8 +58,8 @@ pub async fn create_rule(
 #[allow(dead_code)]
 pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at, hit_count, last_used_at, weight, task_type_affinity, tags \
-         FROM ai_memory.semantic_rules WHERE id = $1",
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id WHERE s.id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -96,12 +97,12 @@ pub async fn list_rules(
     tags: Option<&[String]>,
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at, hit_count, last_used_at, weight, task_type_affinity, tags \
-         FROM ai_memory.semantic_rules \
-         WHERE project_id = $1 \
-         AND ($2::ai_memory.rule_category IS NULL OR category = $2) \
-         AND ($3::text[] IS NULL OR tags @> $3) \
-         ORDER BY created_at",
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
+         WHERE s.project_id = $1 \
+         AND ($2::ai_memory.rule_category IS NULL OR s.category = $2) \
+         AND ($3::text[] IS NULL OR s.tags @> $3) \
+         ORDER BY s.created_at",
     )
     .bind(project_id)
     .bind(category.as_ref())
@@ -158,7 +159,8 @@ pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
 #[allow(clippy::too_many_arguments)]
 pub async fn search_rules_hybrid(
     pool: &PgPool,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
+    current_project_id: Uuid,
     embedding: &[f32],
     query: &str,
     limit: i64,
@@ -177,7 +179,7 @@ pub async fn search_rules_hybrid(
     let candidate_limit = limit * 3;
     let emb = Vector::from(embedding.to_vec());
 
-    // Nullable params: $6=category, $7=task_type, $8=tags — pushed into CTEs for pre-filtering
+    let project_filter = "AND ($1::uuid IS NULL OR project_id = $1)";
     let cat_filter = "AND ($6::ai_memory.rule_category IS NULL OR category = $6)";
     let affinity_filter =
         "AND (task_type_affinity IS NULL OR $7::text IS NULL OR $7 = ANY(task_type_affinity))";
@@ -187,19 +189,19 @@ pub async fn search_rules_hybrid(
         "WITH vector_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
             FROM ai_memory.semantic_rules
-            WHERE project_id = $1 AND embedding IS NOT NULL
-              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter} {affinity_filter} {tags_filter}
+            WHERE embedding IS NOT NULL
+              AND (expires_at IS NULL OR expires_at > NOW()) {project_filter} {cat_filter} {affinity_filter} {tags_filter}
             LIMIT $3
         ),
         fts_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, to_tsquery('english', $4)) DESC) AS f_rank
             FROM ai_memory.semantic_rules
-            WHERE project_id = $1 AND content_tsv @@ to_tsquery('english', $4)
-              AND (expires_at IS NULL OR expires_at > NOW()) {cat_filter} {affinity_filter} {tags_filter}
+            WHERE content_tsv @@ to_tsquery('english', $4)
+              AND (expires_at IS NULL OR expires_at > NOW()) {project_filter} {cat_filter} {affinity_filter} {tags_filter}
             LIMIT $3
         ),
         max_hits AS (
-            SELECT GREATEST(MAX(hit_count), 1) AS val FROM ai_memory.semantic_rules WHERE project_id = $1
+            SELECT GREATEST(MAX(hit_count), 1) AS val FROM ai_memory.semantic_rules WHERE ($1::uuid IS NULL OR project_id = $1)
         ),
         fused AS (
             SELECT COALESCE(v.id, f.id) AS id,
@@ -210,9 +212,11 @@ pub async fn search_rules_hybrid(
         )
         SELECT s.id, s.project_id, s.category, s.content, s.embedding,
                s.source_task_id, s.created_at, s.expires_at,
-               s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags
+               s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags,
+               p.name AS project_name
         FROM fused
         JOIN ai_memory.semantic_rules s ON s.id = fused.id
+        LEFT JOIN ai_memory.projects p ON p.id = s.project_id
         CROSS JOIN max_hits mh
         ORDER BY (
             0.35 * fused.v_score
@@ -233,12 +237,13 @@ pub async fn search_rules_hybrid(
               * EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_used_at, s.created_at))) / 86400.0
             )
           + 0.10 * LN(1 + s.hit_count) / NULLIF(LN(1 + mh.val), 0)
-        ) * COALESCE(s.weight, 1.0) DESC
+        ) * COALESCE(s.weight, 1.0)
+          * CASE WHEN s.project_id = $9 THEN 2.0 ELSE 1.0 END DESC
         LIMIT $5"
     );
 
     let results: Vec<SemanticRule> = sqlx::query_as(&sql)
-        .bind(project_id) // $1
+        .bind(project_id) // $1 (nullable)
         .bind(&emb) // $2
         .bind(candidate_limit) // $3
         .bind(&ts_query) // $4
@@ -246,6 +251,7 @@ pub async fn search_rules_hybrid(
         .bind(category.as_ref()) // $6 (nullable enum)
         .bind(task_type) // $7 (nullable)
         .bind(tags) // $8 (nullable)
+        .bind(current_project_id) // $9
         .fetch_all(pool)
         .await?;
 
@@ -282,7 +288,7 @@ fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
 /// Vector-only search (used when no text query available)
 pub async fn search_rules_by_embedding(
     pool: &PgPool,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
     embedding: &[f32],
     limit: i64,
     category: Option<RuleCategory>,
@@ -290,13 +296,13 @@ pub async fn search_rules_by_embedding(
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
     sqlx::query_as(
-        "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at, hit_count, last_used_at, weight, task_type_affinity, tags \
-         FROM ai_memory.semantic_rules \
-         WHERE project_id = $1 AND embedding IS NOT NULL \
-         AND ($4::ai_memory.rule_category IS NULL OR category = $4) \
-         AND ($5::text[] IS NULL OR tags @> $5) \
-         AND (expires_at IS NULL OR expires_at > NOW()) \
-         ORDER BY embedding <=> $2::vector LIMIT $3",
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
+         WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
+         AND ($4::ai_memory.rule_category IS NULL OR s.category = $4) \
+         AND ($5::text[] IS NULL OR s.tags @> $5) \
+         AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
+         ORDER BY s.embedding <=> $2::vector LIMIT $3",
     )
     .bind(project_id)
     .bind(&emb)
@@ -317,11 +323,11 @@ pub async fn find_duplicates(
     let emb = Vector::from(embedding.to_vec());
     // cosine distance <=> returns distance (0 = identical), so similarity = 1 - distance
     sqlx::query_as(
-        "SELECT id, project_id, category, content, embedding, source_task_id, created_at, expires_at, hit_count, last_used_at, weight, task_type_affinity, tags \
-         FROM ai_memory.semantic_rules \
-         WHERE project_id = $1 AND embedding IS NOT NULL \
-         AND (1.0 - (embedding <=> $2::vector)) >= $3 \
-         ORDER BY embedding <=> $2::vector LIMIT 5",
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
+         WHERE s.project_id = $1 AND s.embedding IS NOT NULL \
+         AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \
+         ORDER BY s.embedding <=> $2::vector LIMIT 5",
     )
     .bind(project_id)
     .bind(&emb)

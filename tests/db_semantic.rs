@@ -52,13 +52,13 @@ async fn test_count_rules_by_category() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l1", None)
+    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l1", None, &[])
         .await
         .unwrap();
-    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l2", None)
+    semantic::create_rule(&pool, pid, RuleCategory::Lesson, "l2", None, &[])
         .await
         .unwrap();
-    semantic::create_rule(&pool, pid, RuleCategory::Fact, "f1", None)
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "f1", None, &[])
         .await
         .unwrap();
 
@@ -78,10 +78,10 @@ async fn test_count_rules_by_category_scopes_to_project() {
     let pa = projects::create_project(&pool, "a", "/a").await.unwrap();
     let pb = projects::create_project(&pool, "b", "/b").await.unwrap();
 
-    semantic::create_rule(&pool, pa, RuleCategory::Lesson, "la", None)
+    semantic::create_rule(&pool, pa, RuleCategory::Lesson, "la", None, &[])
         .await
         .unwrap();
-    semantic::create_rule(&pool, pb, RuleCategory::Lesson, "lb", None)
+    semantic::create_rule(&pool, pb, RuleCategory::Lesson, "lb", None, &[])
         .await
         .unwrap();
 
@@ -133,7 +133,7 @@ async fn test_search_rules_by_embedding() {
     .unwrap();
 
     let query = vec![0.1_f32; 384];
-    let results = semantic::search_rules_by_embedding(&pool, pid, &query, 10, None, None)
+    let results = semantic::search_rules_by_embedding(&pool, Some(pid), &query, 10, None, None)
         .await
         .unwrap();
 
@@ -154,10 +154,16 @@ async fn test_search_rules_with_category_filter() {
         .await
         .unwrap();
 
-    let results =
-        semantic::search_rules_by_embedding(&pool, pid, &emb, 10, Some(RuleCategory::Lesson), None)
-            .await
-            .unwrap();
+    let results = semantic::search_rules_by_embedding(
+        &pool,
+        Some(pid),
+        &emb,
+        10,
+        Some(RuleCategory::Lesson),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].content, "lesson");
@@ -237,9 +243,10 @@ async fn test_search_by_embedding_filters_tags() {
         .unwrap();
 
     let filter = vec!["t1".to_string()];
-    let results = semantic::search_rules_by_embedding(&pool, pid, &emb, 10, None, Some(&filter))
-        .await
-        .unwrap();
+    let results =
+        semantic::search_rules_by_embedding(&pool, Some(pid), &emb, 10, None, Some(&filter))
+            .await
+            .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].content, "tagged");
 }
@@ -274,6 +281,7 @@ async fn test_search_hybrid_filters_tags() {
     let filter = vec!["keep".to_string()];
     let results = semantic::search_rules_hybrid(
         &pool,
+        Some(pid),
         pid,
         &emb,
         "shared content",

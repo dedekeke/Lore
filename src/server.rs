@@ -1133,7 +1133,7 @@ impl LoreServer {
                     "project": project,
                     "active_task_count": active_count,
                     "blocked_task_count": blocked_count,
-                    "recent_lesson_count": lesson_count,
+                    "lesson_count": lesson_count,
                 }),
                 "L0 brief loaded. Call get_next_steps(tier='L1') for full details, or start_task() for a new goal.",
             );

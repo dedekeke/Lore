@@ -386,7 +386,7 @@ async fn test_get_next_steps_l0_tier() {
     assert!(json["project"].is_object());
     assert_eq!(json["active_task_count"].as_i64().unwrap(), 1);
     assert_eq!(json["blocked_task_count"].as_i64().unwrap(), 0);
-    assert_eq!(json["recent_lesson_count"].as_i64().unwrap(), 0);
+    assert_eq!(json["lesson_count"].as_i64().unwrap(), 0);
     assert!(json.get("active_tasks").is_none());
     assert!(json.get("recent_attempts").is_none());
 }

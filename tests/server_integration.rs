@@ -120,6 +120,61 @@ async fn test_remember_and_recall_rules() {
 }
 
 #[tokio::test]
+async fn test_recall_rules_cross_project() {
+    let (server, pool, _c) = setup_server().await;
+
+    // Create second project directly
+    let other_pid = lore::db::projects::create_project(&pool, "other-proj", "/other")
+        .await
+        .unwrap();
+    // Need embedding matching server's fake provider (384 dim)
+    let emb = vec![0.5_f32; 384];
+    lore::db::semantic::create_rule(
+        &pool,
+        other_pid,
+        lore::db::RuleCategory::Fact,
+        "rust memory safety",
+        Some(&emb),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    server
+        .switch_project(Some("current-proj".into()), Some("/cur".into()))
+        .await
+        .unwrap();
+
+    // Without cross_project: other proj rule not visible
+    let local = server
+        .recall_rules(
+            "rust memory safety".into(),
+            Some(10),
+            None,
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+    let local_rules = extract_json(&local);
+    assert!(local_rules.as_array().unwrap().is_empty());
+
+    // With cross_project: visible
+    let cross = server
+        .recall_rules(
+            "rust memory safety".into(),
+            Some(10),
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    let cross_rules = extract_json(&cross);
+    assert!(!cross_rules.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_forget_rule() {
     let (server, _pool, _c) = setup_server().await;
 

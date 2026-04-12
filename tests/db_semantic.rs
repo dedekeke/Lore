@@ -202,14 +202,12 @@ async fn test_list_rules_filters_by_tags_and_semantics() {
         .await
         .unwrap();
 
-    // @> is contains: r1 and r2 both contain ["rust"]
     let rust_filter = vec!["rust".to_string()];
     let rust_matches = semantic::list_rules(&pool, pid, None, Some(&rust_filter))
         .await
         .unwrap();
     assert_eq!(rust_matches.len(), 2);
 
-    // AND semantics: only r1 contains both rust + async
     let both = vec!["rust".to_string(), "async".to_string()];
     let and_matches = semantic::list_rules(&pool, pid, None, Some(&both))
         .await
@@ -217,7 +215,6 @@ async fn test_list_rules_filters_by_tags_and_semantics() {
     assert_eq!(and_matches.len(), 1);
     assert_eq!(and_matches[0].content, "r1");
 
-    // None returns all
     let all = semantic::list_rules(&pool, pid, None, None).await.unwrap();
     assert_eq!(all.len(), 3);
 }
@@ -294,4 +291,87 @@ async fn test_search_hybrid_filters_tags() {
     .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].tags, vec!["keep".to_string()]);
+}
+
+#[tokio::test]
+async fn test_search_cross_project_none_returns_all_projects() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    let emb = vec![0.5_f32; 384];
+    semantic::create_rule(&pool, pa, RuleCategory::Fact, "from a", Some(&emb), &[])
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pb, RuleCategory::Fact, "from b", Some(&emb), &[])
+        .await
+        .unwrap();
+
+    // project_id = None -> search all projects
+    let all = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    // project_id = Some(pa) -> only pa
+    let a_only = semantic::search_rules_by_embedding(&pool, Some(pa), &emb, 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(a_only.len(), 1);
+    assert_eq!(a_only[0].content, "from a");
+}
+
+#[tokio::test]
+async fn test_search_populates_project_name() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "named-proj", "/x")
+        .await
+        .unwrap();
+    let emb = vec![0.1_f32; 384];
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "x", Some(&emb), &[])
+        .await
+        .unwrap();
+
+    let results = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].project_name.as_deref(), Some("named-proj"));
+}
+
+#[tokio::test]
+async fn test_search_hybrid_current_project_boost() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    let emb = vec![0.5_f32; 384];
+    semantic::create_rule(
+        &pool,
+        pa,
+        RuleCategory::Fact,
+        "shared fact",
+        Some(&emb),
+        &[],
+    )
+    .await
+    .unwrap();
+    semantic::create_rule(
+        &pool,
+        pb,
+        RuleCategory::Fact,
+        "shared fact",
+        Some(&emb),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // current_project_id = pb -> pb rule ranks first via 2x weight boost
+    let results =
+        semantic::search_rules_hybrid(&pool, None, pb, &emb, "shared fact", 10, None, None, None)
+            .await
+            .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].project_id, pb);
 }

@@ -159,9 +159,11 @@ pub async fn consolidate_old_attempts(
         "SELECT task_id, outcome::text AS outcome, approach_summary, reasoning \
          FROM ai_memory.attempts \
          WHERE task_id = ANY($1) AND outcome IN ('accepted', 'rejected') \
+         AND resolved_at < NOW() - make_interval(days => $2) \
          ORDER BY created_at",
     )
     .bind(&task_ids)
+    .bind(days as i32)
     .fetch_all(pool)
     .await?;
 
@@ -171,11 +173,11 @@ pub async fn consolidate_old_attempts(
             .iter()
             .filter(|a| a.task_id == task.task_id)
             .collect();
-        let rejected: Vec<&&AttemptRow> = task_attempts
+        let rejected: Vec<_> = task_attempts
             .iter()
             .filter(|a| a.outcome == "rejected")
             .collect();
-        let accepted: Vec<&&AttemptRow> = task_attempts
+        let accepted: Vec<_> = task_attempts
             .iter()
             .filter(|a| a.outcome == "accepted")
             .collect();
@@ -194,19 +196,22 @@ pub async fn consolidate_old_attempts(
             }
         }
 
-        lesson.push_str("### Accepted approach:\n");
-        for a in &accepted {
-            let r = a.reasoning.as_deref().unwrap_or("");
-            if r.is_empty() {
-                lesson.push_str(&format!("- {}\n", a.approach_summary));
-            } else {
-                lesson.push_str(&format!("- {}: {}\n", a.approach_summary, r));
+        if !accepted.is_empty() {
+            lesson.push_str("### Accepted approach:\n");
+            for a in &accepted {
+                let r = a.reasoning.as_deref().unwrap_or("");
+                if r.is_empty() {
+                    lesson.push_str(&format!("- {}\n", a.approach_summary));
+                } else {
+                    lesson.push_str(&format!("- {}: {}\n", a.approach_summary, r));
+                }
             }
         }
 
         let lesson: String = lesson.chars().take(4096).collect();
 
-        // Create lesson rule (without embedding — batch embed will pick it up)
+        let mut tx = pool.begin().await?;
+
         sqlx::query(
             "INSERT INTO ai_memory.semantic_rules (project_id, category, content, source_task_id) \
              VALUES ($1, 'lesson', $2, $3)",
@@ -214,10 +219,9 @@ pub async fn consolidate_old_attempts(
         .bind(task.project_id)
         .bind(&lesson)
         .bind(task.task_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-        // Delete all consolidated attempts (both rejected and accepted)
         sqlx::query(
             "DELETE FROM ai_memory.attempts \
              WHERE task_id = $1 AND outcome IN ('accepted', 'rejected') \
@@ -225,9 +229,10 @@ pub async fn consolidate_old_attempts(
         )
         .bind(task.task_id)
         .bind(days as i32)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         created += 1;
     }
     Ok(created)

@@ -186,4 +186,8 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .unwrap();
     assert_eq!(created, 0);
     assert!(attempts::get_attempt(&pool, aid).await.unwrap().is_some());
+    let lessons = semantic::list_rules(&pool, pid, Some(RuleCategory::Lesson))
+        .await
+        .unwrap();
+    assert!(lessons.is_empty());
 }

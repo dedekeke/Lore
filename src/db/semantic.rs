@@ -101,19 +101,22 @@ pub async fn update_rule(
     category: Option<RuleCategory>,
     content: Option<&str>,
     embedding: Option<&[f32]>,
+    tags: Option<&[String]>,
 ) -> Result<bool, sqlx::Error> {
     let emb = embedding.map(|e| Vector::from(e.to_vec()));
     let result = sqlx::query(
         "UPDATE ai_memory.semantic_rules SET \
          category = COALESCE($2, category), \
          content = COALESCE($3, content), \
-         embedding = COALESCE($4, embedding) \
+         embedding = COALESCE($4, embedding), \
+         tags = COALESCE($5, tags) \
          WHERE id = $1",
     )
     .bind(id)
     .bind(category.as_ref())
     .bind(content)
     .bind(emb.as_ref())
+    .bind(tags)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -160,7 +163,7 @@ pub async fn search_rules_hybrid(
     let emb = Vector::from(embedding.to_vec());
 
     // Nullable params: $6=category, $7=task_type, $8=tags — pushed into CTEs for pre-filtering
-    let cat_filter = "AND ($6::text IS NULL OR category::text = $6)";
+    let cat_filter = "AND ($6::ai_memory.rule_category IS NULL OR category = $6)";
     let affinity_filter =
         "AND (task_type_affinity IS NULL OR $7::text IS NULL OR $7 = ANY(task_type_affinity))";
     let tags_filter = "AND ($8::text[] IS NULL OR tags @> $8)";
@@ -219,20 +222,13 @@ pub async fn search_rules_hybrid(
         LIMIT $5"
     );
 
-    let cat_str = category.as_ref().map(|c| match c {
-        RuleCategory::Preference => "preference",
-        RuleCategory::Fact => "fact",
-        RuleCategory::Constraint => "constraint",
-        RuleCategory::Lesson => "lesson",
-    });
-
     let results: Vec<SemanticRule> = sqlx::query_as(&sql)
         .bind(project_id) // $1
         .bind(&emb) // $2
         .bind(candidate_limit) // $3
         .bind(&ts_query) // $4
         .bind(limit) // $5
-        .bind(cat_str) // $6 (nullable)
+        .bind(category.as_ref()) // $6 (nullable enum)
         .bind(task_type) // $7 (nullable)
         .bind(tags) // $8 (nullable)
         .fetch_all(pool)

@@ -397,10 +397,13 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "New content for the rule")]
         content: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New tags for the rule (replaces existing tags)")]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        if category.is_none() && content.is_none() {
+        if category.is_none() && content.is_none() && tags.is_none() {
             return Err(rmcp::Error::invalid_params(
-                "Provide at least one of: category, content",
+                "Provide at least one of: category, content, tags",
                 None,
             ));
         }
@@ -422,6 +425,7 @@ impl LoreServer {
             cat,
             content.as_deref(),
             embedding.as_deref(),
+            tags.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;

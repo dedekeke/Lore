@@ -295,6 +295,7 @@ async fn test_update_rule() {
             rule_id.clone(),
             Some("lesson".into()),
             Some("updated content".into()),
+            None,
         )
         .await
         .unwrap();

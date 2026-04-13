@@ -170,8 +170,16 @@ pub async fn search_rules_hybrid(
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     let ts_query = to_tsquery_safe(query);
     if ts_query.is_empty() {
-        let results =
-            search_rules_by_embedding(pool, project_id, embedding, limit, category, tags).await?;
+        let results = search_rules_by_embedding(
+            pool,
+            project_id,
+            embedding,
+            limit,
+            category,
+            tags,
+            Some(current_project_id),
+        )
+        .await?;
         increment_hit_counts(pool, &results);
         return Ok(results);
     }
@@ -285,7 +293,8 @@ fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
     });
 }
 
-/// Vector-only search (used when no text query available)
+/// Vector-only search (used when no text query available).
+/// When `current_project_id` is provided, results from that project get a 2x boost.
 pub async fn search_rules_by_embedding(
     pool: &PgPool,
     project_id: Option<Uuid>,
@@ -293,24 +302,31 @@ pub async fn search_rules_by_embedding(
     limit: i64,
     category: Option<RuleCategory>,
     tags: Option<&[String]>,
+    current_project_id: Option<Uuid>,
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
-    sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+    let order_clause = "ORDER BY (s.embedding <=> $2::vector) / \
+        CASE WHEN $6::uuid IS NOT NULL AND s.project_id = $6 THEN 2.0 ELSE 1.0 END";
+    let sql = format!(
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, \
+         s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, \
+         s.tags, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
          AND ($4::ai_memory.rule_category IS NULL OR s.category = $4) \
          AND ($5::text[] IS NULL OR s.tags @> $5) \
          AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
-         ORDER BY s.embedding <=> $2::vector LIMIT $3",
-    )
-    .bind(project_id)
-    .bind(&emb)
-    .bind(limit)
-    .bind(category.as_ref())
-    .bind(tags)
-    .fetch_all(pool)
-    .await
+         {order_clause} LIMIT $3"
+    );
+    sqlx::query_as(&sql)
+        .bind(project_id)
+        .bind(&emb)
+        .bind(limit)
+        .bind(category.as_ref())
+        .bind(tags)
+        .bind(current_project_id)
+        .fetch_all(pool)
+        .await
 }
 
 /// Find rules with cosine similarity above threshold (for dedup detection)

@@ -133,9 +133,10 @@ async fn test_search_rules_by_embedding() {
     .unwrap();
 
     let query = vec![0.1_f32; 384];
-    let results = semantic::search_rules_by_embedding(&pool, Some(pid), &query, 10, None, None)
-        .await
-        .unwrap();
+    let results =
+        semantic::search_rules_by_embedding(&pool, Some(pid), &query, 10, None, None, None)
+            .await
+            .unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].content, "lesson A");
@@ -160,6 +161,7 @@ async fn test_search_rules_with_category_filter() {
         &emb,
         10,
         Some(RuleCategory::Lesson),
+        None,
         None,
     )
     .await
@@ -241,7 +243,7 @@ async fn test_search_by_embedding_filters_tags() {
 
     let filter = vec!["t1".to_string()];
     let results =
-        semantic::search_rules_by_embedding(&pool, Some(pid), &emb, 10, None, Some(&filter))
+        semantic::search_rules_by_embedding(&pool, Some(pid), &emb, 10, None, Some(&filter), None)
             .await
             .unwrap();
     assert_eq!(results.len(), 1);
@@ -308,13 +310,13 @@ async fn test_search_cross_project_none_returns_all_projects() {
         .unwrap();
 
     // project_id = None -> search all projects
-    let all = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None)
+    let all = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None, None)
         .await
         .unwrap();
     assert_eq!(all.len(), 2);
 
     // project_id = Some(pa) -> only pa
-    let a_only = semantic::search_rules_by_embedding(&pool, Some(pa), &emb, 10, None, None)
+    let a_only = semantic::search_rules_by_embedding(&pool, Some(pa), &emb, 10, None, None, None)
         .await
         .unwrap();
     assert_eq!(a_only.len(), 1);
@@ -332,7 +334,7 @@ async fn test_search_populates_project_name() {
         .await
         .unwrap();
 
-    let results = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None)
+    let results = semantic::search_rules_by_embedding(&pool, None, &emb, 10, None, None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);

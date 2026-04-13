@@ -270,9 +270,14 @@ impl LoreServer {
         let embedding = self.embed(&content).await?;
 
         // Check for near-duplicates (cosine similarity >= 0.95)
-        let duplicates = db::semantic::find_duplicates(self.pool(), project_id, &embedding, 0.95)
-            .await
-            .map_err(Self::db_err)?;
+        let duplicates = db::semantic::find_duplicates(
+            self.pool(),
+            project_id,
+            &embedding,
+            db::semantic::SIMILARITY_DEDUP_THRESHOLD,
+        )
+        .await
+        .map_err(Self::db_err)?;
         if !duplicates.is_empty() {
             let dup_ids: Vec<String> = duplicates.iter().map(|r| r.id.to_string()).collect();
             let dup_preview: String = duplicates[0].content.chars().take(100).collect();
@@ -286,6 +291,12 @@ impl LoreServer {
             );
         }
 
+        // Check for potential contradictions (CONTRADICTION_FLOOR..DEDUP_THRESHOLD band)
+        let contradictions =
+            db::semantic::find_potential_contradictions(self.pool(), project_id, &embedding)
+                .await
+                .map_err(Self::db_err)?;
+
         let tags_vec = tags.unwrap_or_default();
         let id = db::semantic::create_rule(
             self.pool(),
@@ -298,6 +309,27 @@ impl LoreServer {
         .await
         .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
+
+        if !contradictions.is_empty() {
+            let conflict_rules: Vec<serde_json::Value> = contradictions
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id.to_string(),
+                        "content": r.content.chars().take(150).collect::<String>(),
+                    })
+                })
+                .collect();
+            return Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "rule_id": id.to_string(),
+                    "contradiction_warning": true,
+                    "potentially_conflicting_rules": conflict_rules,
+                }),
+                "Rule stored, but potentially conflicting rules found. Review them — use forget_rule or update_rule to resolve contradictions.",
+            );
+        }
+
         Self::json_content_with_nudge(
             &serde_json::json!({ "rule_id": id.to_string() }),
             "Rule stored. Continue with your current task.",

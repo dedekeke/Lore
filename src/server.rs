@@ -321,9 +321,17 @@ impl LoreServer {
             description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
         )]
         tags: Option<Vec<String>>,
+        #[tool(param)]
+        #[schemars(description = "Search across all projects (default false)")]
+        cross_project: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;
-        let project_id = self.project_id().await?;
+        let current_project_id = self.project_id().await?;
+        let project_id = if cross_project.unwrap_or(false) {
+            None
+        } else {
+            Some(current_project_id)
+        };
         let embedding = self.embed(&query).await?;
         let cat = category
             .as_deref()
@@ -332,6 +340,7 @@ impl LoreServer {
         let rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
+            current_project_id,
             &embedding,
             &query,
             limit.unwrap_or(10),

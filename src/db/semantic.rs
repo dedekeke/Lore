@@ -71,6 +71,21 @@ pub async fn count_rules(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::E
     Ok(row.0)
 }
 
+pub async fn count_rules_by_category(
+    pool: &PgPool,
+    project_id: Uuid,
+    category: RuleCategory,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1 AND category = $2",
+    )
+    .bind(project_id)
+    .bind(&category)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
 pub async fn list_rules(
     pool: &PgPool,
     project_id: Uuid,

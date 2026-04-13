@@ -360,10 +360,48 @@ async fn test_get_next_steps() {
         .await
         .unwrap();
 
-    let result = server.get_next_steps().await.unwrap();
+    let result = server.get_next_steps(None).await.unwrap();
     let json = extract_json(&result);
     assert!(json["project"].is_object());
     assert!(json["tasks"].is_array());
+}
+
+#[tokio::test]
+async fn test_get_next_steps_l0_tier() {
+    let (server, _pool, _c) = setup_server().await;
+
+    server
+        .switch_project(Some("l0-test".into()), Some("/tmp".into()))
+        .await
+        .unwrap();
+    server
+        .start_task("active one".into(), None, None, None)
+        .await
+        .unwrap();
+
+    let result = server.get_next_steps(Some("L0".into())).await.unwrap();
+    let json = extract_json(&result);
+
+    // L0 returns counts only — no per-task payload
+    assert!(json["project"].is_object());
+    assert_eq!(json["active_task_count"].as_i64().unwrap(), 1);
+    assert_eq!(json["blocked_task_count"].as_i64().unwrap(), 0);
+    assert_eq!(json["lesson_count"].as_i64().unwrap(), 0);
+    assert!(json.get("active_tasks").is_none());
+    assert!(json.get("recent_attempts").is_none());
+}
+
+#[tokio::test]
+async fn test_get_next_steps_l0_case_insensitive() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(Some("l0-ci".into()), Some("/tmp".into()))
+        .await
+        .unwrap();
+
+    let result = server.get_next_steps(Some("l0".into())).await.unwrap();
+    let json = extract_json(&result);
+    assert!(json["active_task_count"].is_number());
 }
 
 #[tokio::test]

@@ -346,6 +346,7 @@ async fn update_task_handler(
         priority.as_ref().map(|o| o.as_deref()),
         task_type.as_ref().map(|o| o.as_deref()),
         description.as_deref(),
+        None,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

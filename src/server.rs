@@ -667,12 +667,26 @@ impl LoreServer {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        // Re-embed if description changed
+        let desc_embedding = if desc.is_some() {
+            match self.embed(desc.as_deref().unwrap()).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to embed updated description");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let updated = db::tasks::update_task(
             self.pool(),
             tid,
             p.as_ref().map(|o| o.as_deref()),
             tt.as_ref().map(|o| o.as_deref()),
             desc.as_deref(),
+            desc_embedding.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -954,9 +968,8 @@ impl LoreServer {
         };
 
         // Proactive retrieval: auto-surface relevant rules and similar failures
-        // based on the active task's description embedding. Gated by env var.
-        let proactive_enabled =
-            std::env::var("LORE_PROACTIVE_CONTEXT").unwrap_or_default() == "true";
+        // based on the active task's description embedding.
+        let proactive_enabled = self.config().proactive_context;
         let mut proactive: Option<serde_json::Value> = None;
         if proactive_enabled {
             if let Some(task) = active_tasks.first() {
@@ -973,7 +986,10 @@ impl LoreServer {
                         None,
                     )
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive rule search failed");
+                        vec![]
+                    });
                     let failures = db::attempts::search_similar_failures(
                         self.pool(),
                         Some(project_id),
@@ -981,7 +997,10 @@ impl LoreServer {
                         3,
                     )
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive failure search failed");
+                        vec![]
+                    });
                     proactive = Some(serde_json::json!({
                         "relevant_rules": rules,
                         "similar_failures": failures,

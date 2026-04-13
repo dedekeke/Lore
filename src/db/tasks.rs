@@ -74,6 +74,7 @@ pub async fn update_task(
     priority: Option<Option<&str>>,
     task_type: Option<Option<&str>>,
     description: Option<&str>,
+    description_embedding: Option<&[f32]>,
 ) -> Result<bool, sqlx::Error> {
     // Each Option<Option<&str>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
     let mut set_clauses = Vec::new();
@@ -92,6 +93,10 @@ pub async fn update_task(
             "description = ${param_idx}, summary = ${}",
             param_idx + 1
         ));
+        param_idx += 2;
+    }
+    if description_embedding.is_some() {
+        set_clauses.push(format!("description_embedding = ${param_idx}"));
     }
     if set_clauses.is_empty() {
         return Ok(false);
@@ -102,6 +107,7 @@ pub async fn update_task(
         set_clauses.join(", ")
     );
 
+    let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
     let mut query = sqlx::query(&sql).bind(id);
     if let Some(p) = &priority {
         query = query.bind(p.as_deref());
@@ -113,6 +119,9 @@ pub async fn update_task(
         let summary = generate_summary(desc);
         query = query.bind(desc);
         query = query.bind(summary);
+    }
+    if emb.is_some() {
+        query = query.bind(emb.as_ref());
     }
 
     let result = query.execute(pool).await?;

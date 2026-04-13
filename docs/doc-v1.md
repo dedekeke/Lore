@@ -13,7 +13,7 @@ Standard AI memory stores final facts (semantic memory). Lore adds **episodic me
 ## Architecture
 
 ```
-┌─────────────────┐     stdio/JSON-RPC     ┌──────────────────────┐
+┌─────────────────┐     stdio/JSON-RPC      ┌──────────────────────┐
 │   MCP Client    │ ◄──────────────────────►│    Lore MCP Server   │
 │ (Claude, etc.)  │                         │        (Rust)        │
 └─────────────────┘                         └──────────┬───────────┘

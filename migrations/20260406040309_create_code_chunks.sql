@@ -1,4 +1,4 @@
-CREATE TABLE ai_memory.code_chunks (
+CREATE TABLE IF NOT EXISTS ai_memory.code_chunks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id  UUID NOT NULL REFERENCES ai_memory.projects(id) ON DELETE CASCADE,
     file_path   TEXT NOT NULL,
@@ -12,8 +12,8 @@ CREATE TABLE ai_memory.code_chunks (
     indexed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX idx_code_chunks_unique ON ai_memory.code_chunks(project_id, file_path, start_line);
-CREATE INDEX idx_code_chunks_project ON ai_memory.code_chunks(project_id);
-CREATE INDEX idx_code_chunks_file ON ai_memory.code_chunks(project_id, file_path);
-CREATE INDEX idx_code_chunks_embedding ON ai_memory.code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX idx_code_chunks_tsv ON ai_memory.code_chunks USING gin (content_tsv);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_chunks_unique ON ai_memory.code_chunks(project_id, file_path, start_line);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_project ON ai_memory.code_chunks(project_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_file ON ai_memory.code_chunks(project_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_embedding ON ai_memory.code_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_tsv ON ai_memory.code_chunks USING gin (content_tsv);

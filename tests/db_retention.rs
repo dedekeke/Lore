@@ -88,7 +88,7 @@ async fn test_prune_old_snapshots() {
 async fn test_consolidate_preserves_failure_narrative() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "build auth middleware", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "build auth middleware", None, None, None, None)
         .await
         .unwrap();
 
@@ -137,7 +137,7 @@ async fn test_consolidate_preserves_failure_narrative() {
     assert_eq!(created, 1);
 
     // Lesson has structured narrative
-    let lessons = semantic::list_rules(&pool, pid, Some(RuleCategory::Lesson))
+    let lessons = semantic::list_rules(&pool, pid, Some(RuleCategory::Lesson), None)
         .await
         .unwrap();
     assert_eq!(lessons.len(), 1);
@@ -163,7 +163,7 @@ async fn test_consolidate_preserves_failure_narrative() {
 async fn test_consolidate_skips_tasks_below_threshold() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "single-try task", None, None, None)
+    let tid = tasks::create_task(&pool, pid, "single-try task", None, None, None, None)
         .await
         .unwrap();
 
@@ -186,7 +186,7 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .unwrap();
     assert_eq!(created, 0);
     assert!(attempts::get_attempt(&pool, aid).await.unwrap().is_some());
-    let lessons = semantic::list_rules(&pool, pid, Some(RuleCategory::Lesson))
+    let lessons = semantic::list_rules(&pool, pid, Some(RuleCategory::Lesson), None)
         .await
         .unwrap();
     assert!(lessons.is_empty());

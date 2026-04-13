@@ -980,10 +980,12 @@ impl LoreServer {
                 if let Some(emb) = emb_vec {
                     let rules = db::semantic::search_rules_by_embedding(
                         self.pool(),
-                        project_id,
+                        Some(project_id),
                         &emb,
                         5,
                         None,
+                        None,
+                        Some(project_id),
                     )
                     .await
                     .unwrap_or_else(|e| {

@@ -3,6 +3,9 @@ use pgvector::Vector;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+pub const SIMILARITY_DEDUP_THRESHOLD: f64 = 0.95;
+pub const SIMILARITY_CONTRADICTION_FLOOR: f64 = 0.80;
+
 #[derive(Debug, Clone, PartialEq, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "ai_memory.rule_category", rename_all = "snake_case")]
 pub enum RuleCategory {
@@ -348,6 +351,30 @@ pub async fn find_duplicates(
     .bind(project_id)
     .bind(&emb)
     .bind(threshold)
+    .fetch_all(pool)
+    .await
+}
+
+/// Find rules in the contradiction band (SIMILARITY_CONTRADICTION_FLOOR to SIMILARITY_DEDUP_THRESHOLD)
+pub async fn find_potential_contradictions(
+    pool: &PgPool,
+    project_id: Uuid,
+    embedding: &[f32],
+) -> Result<Vec<SemanticRule>, sqlx::Error> {
+    let emb = Vector::from(embedding.to_vec());
+    // TODO: combine with find_duplicates into single scan (fetch >= CONTRADICTION_FLOOR, partition in app code)
+    sqlx::query_as(
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
+         WHERE s.project_id = $1 AND s.embedding IS NOT NULL \
+         AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \
+         AND (1.0 - (s.embedding <=> $2::vector)) < $4 \
+         ORDER BY s.embedding <=> $2::vector LIMIT 5",
+    )
+    .bind(project_id)
+    .bind(&emb)
+    .bind(SIMILARITY_CONTRADICTION_FLOOR)
+    .bind(SIMILARITY_DEDUP_THRESHOLD)
     .fetch_all(pool)
     .await
 }

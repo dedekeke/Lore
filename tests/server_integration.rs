@@ -107,12 +107,12 @@ async fn test_remember_and_recall_rules() {
         .unwrap();
 
     server
-        .remember_rule("fact".into(), "Rust is a systems language".into())
+        .remember_rule("fact".into(), "Rust is a systems language".into(), None)
         .await
         .unwrap();
 
     let recalled = server
-        .recall_rules("systems language".into(), Some(10), None)
+        .recall_rules("systems language".into(), Some(10), None, None)
         .await
         .unwrap();
     let rules = extract_json(&recalled);
@@ -129,7 +129,7 @@ async fn test_forget_rule() {
         .unwrap();
 
     let result = server
-        .remember_rule("preference".into(), "use tabs".into())
+        .remember_rule("preference".into(), "use tabs".into(), None)
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -139,7 +139,7 @@ async fn test_forget_rule() {
 
     server.forget_rule(rule_id).await.unwrap();
 
-    let list = server.list_rules(None).await.unwrap();
+    let list = server.list_rules(None, None).await.unwrap();
     assert!(extract_json(&list).as_array().unwrap().is_empty());
 }
 
@@ -152,7 +152,7 @@ async fn test_export_memory() {
         .await
         .unwrap();
     server
-        .remember_rule("fact".into(), "test fact".into())
+        .remember_rule("fact".into(), "test fact".into(), None)
         .await
         .unwrap();
 
@@ -282,7 +282,7 @@ async fn test_update_rule() {
         .unwrap();
 
     let result = server
-        .remember_rule("fact".into(), "original content".into())
+        .remember_rule("fact".into(), "original content".into(), None)
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -295,12 +295,16 @@ async fn test_update_rule() {
             rule_id.clone(),
             Some("lesson".into()),
             Some("updated content".into()),
+            None,
         )
         .await
         .unwrap();
     assert!(extract_json(&updated)["updated"].as_bool().unwrap());
 
-    let list = server.list_rules(Some("lesson".into())).await.unwrap();
+    let list = server
+        .list_rules(Some("lesson".into()), None)
+        .await
+        .unwrap();
     let rules = extract_json(&list).as_array().unwrap().clone();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0]["content"], "updated content");

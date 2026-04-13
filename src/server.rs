@@ -260,6 +260,9 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "The rule content to remember")]
         content: String,
+        #[tool(param)]
+        #[schemars(description = "Optional tags for categorizing the rule")]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
@@ -283,10 +286,17 @@ impl LoreServer {
             );
         }
 
-        let id =
-            db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
-                .await
-                .map_err(Self::db_err)?;
+        let tags_vec = tags.unwrap_or_default();
+        let id = db::semantic::create_rule(
+            self.pool(),
+            project_id,
+            cat,
+            &content,
+            Some(&embedding),
+            &tags_vec,
+        )
+        .await
+        .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
         Self::json_content_with_nudge(
             &serde_json::json!({ "rule_id": id.to_string() }),
@@ -306,6 +316,11 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+        )]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;
         let project_id = self.project_id().await?;
@@ -322,6 +337,7 @@ impl LoreServer {
             limit.unwrap_or(10),
             cat,
             None,
+            tags.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -352,13 +368,18 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+        )]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let cat = category
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::list_rules(self.pool(), project_id, cat)
+        let rules = db::semantic::list_rules(self.pool(), project_id, cat, tags.as_deref())
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&rules)
@@ -376,10 +397,13 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "New content for the rule")]
         content: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New tags for the rule (replaces existing tags)")]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        if category.is_none() && content.is_none() {
+        if category.is_none() && content.is_none() && tags.is_none() {
             return Err(rmcp::Error::invalid_params(
-                "Provide at least one of: category, content",
+                "Provide at least one of: category, content, tags",
                 None,
             ));
         }
@@ -401,6 +425,7 @@ impl LoreServer {
             cat,
             content.as_deref(),
             embedding.as_deref(),
+            tags.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -690,6 +715,7 @@ impl LoreServer {
                     db::RuleCategory::Lesson,
                     lesson_text,
                     Some(&embedding),
+                    &[],
                 )
                 .await
                 .map_err(Self::db_err)?;
@@ -744,6 +770,7 @@ impl LoreServer {
                 db::RuleCategory::Lesson,
                 &reason,
                 Some(&embedding),
+                &[],
             )
             .await
             .map_err(Self::db_err)?;
@@ -1063,7 +1090,7 @@ impl LoreServer {
         }
 
         let project_id = self.project_id().await?;
-        let rules = db::semantic::list_rules(self.pool(), project_id, None)
+        let rules = db::semantic::list_rules(self.pool(), project_id, None, None)
             .await
             .map_err(Self::db_err)?;
         let tasks = db::tasks::list_tasks(self.pool(), project_id, None)
@@ -1147,10 +1174,14 @@ impl LoreServer {
         .await
         .map_err(Self::db_err)?;
 
-        let lessons =
-            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
-                .await
-                .map_err(Self::db_err)?;
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .map_err(Self::db_err)?;
         // Only show most recent 5 lessons
         let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
 
@@ -1289,10 +1320,14 @@ impl LoreServer {
         }
 
         // Recent lessons
-        let lessons =
-            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
-                .await
-                .unwrap_or_default();
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .unwrap_or_default();
         let recent_lessons: Vec<_> = lessons.iter().rev().take(5).collect();
         if !recent_lessons.is_empty() {
             writeln!(md, "## Recent Lessons\n").unwrap();

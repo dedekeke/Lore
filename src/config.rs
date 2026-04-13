@@ -64,6 +64,7 @@ pub struct Config {
     pub dashboard_port: u16,
     pub capture_git_ref: bool,
     pub codebase_behavior_version: i32,
+    pub proactive_context: bool,
 }
 
 impl Config {
@@ -156,6 +157,10 @@ impl Config {
                 .to_lowercase()
                 == "true",
             codebase_behavior_version: parse_warn_or("CODEBASE_BEHAVIOR_VERSION", 1),
+            proactive_context: env::var("LORE_PROACTIVE_CONTEXT")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
         }
     }
 }
@@ -213,6 +218,7 @@ mod tests {
             "DASHBOARD_PORT",
             "CAPTURE_GIT_REF",
             "CODEBASE_BEHAVIOR_VERSION",
+            "LORE_PROACTIVE_CONTEXT",
         ] {
             std::env::remove_var(key);
         }

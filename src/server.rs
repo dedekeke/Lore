@@ -469,6 +469,7 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
+        let embedding = self.embed(&description).await.ok();
         let id = db::tasks::create_task(
             self.pool(),
             project_id,
@@ -476,6 +477,7 @@ impl LoreServer {
             parent,
             priority.as_deref(),
             task_type.as_deref(),
+            embedding.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -665,12 +667,26 @@ impl LoreServer {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
+        // Re-embed if description changed
+        let desc_embedding = if desc.is_some() {
+            match self.embed(desc.as_deref().unwrap()).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to embed updated description");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let updated = db::tasks::update_task(
             self.pool(),
             tid,
             p.as_ref().map(|o| o.as_deref()),
             tt.as_ref().map(|o| o.as_deref()),
             desc.as_deref(),
+            desc_embedding.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -951,22 +967,67 @@ impl LoreServer {
             0
         };
 
+        // Proactive retrieval: auto-surface relevant rules and similar failures
+        // based on the active task's description embedding.
+        let proactive_enabled = self.config().proactive_context;
+        let mut proactive: Option<serde_json::Value> = None;
+        if proactive_enabled {
+            if let Some(task) = active_tasks.first() {
+                let emb_vec: Option<Vec<f32>> = match task.description_embedding.as_ref() {
+                    Some(v) => Some(v.to_vec()),
+                    None => self.embed(&task.description).await.ok(),
+                };
+                if let Some(emb) = emb_vec {
+                    let rules = db::semantic::search_rules_by_embedding(
+                        self.pool(),
+                        Some(project_id),
+                        &emb,
+                        5,
+                        None,
+                        None,
+                        Some(project_id),
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive rule search failed");
+                        vec![]
+                    });
+                    let failures = db::attempts::search_similar_failures(
+                        self.pool(),
+                        Some(project_id),
+                        &emb,
+                        3,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive failure search failed");
+                        vec![]
+                    });
+                    proactive = Some(serde_json::json!({
+                        "relevant_rules": rules,
+                        "similar_failures": failures,
+                    }));
+                }
+            }
+        }
+
         let nudge = if active_tasks.is_empty() {
             "No active task. Call start_task(description) for your current goal."
         } else {
             "Use the active task and attempts above to continue. Call propose_attempt for your next approach."
         };
 
-        Self::json_content_with_nudge(
-            &serde_json::json!({
-                "project": project,
-                "active_tasks": active_tasks,
-                "recent_attempts": recent_attempts,
-                "active_rules_count": active_rules_count,
-                "context_wipes": context_wipes,
-            }),
-            nudge,
-        )
+        let mut body = serde_json::json!({
+            "project": project,
+            "active_tasks": active_tasks,
+            "recent_attempts": recent_attempts,
+            "active_rules_count": active_rules_count,
+            "context_wipes": context_wipes,
+        });
+        if let Some(p) = proactive {
+            body["proactively_retrieved"] = p;
+        }
+        Self::json_content_with_nudge(&body, nudge)
     }
 
     #[tool(

@@ -687,6 +687,7 @@ impl LoreServer {
             tt.as_ref().map(|o| o.as_deref()),
             desc.as_deref(),
             desc_embedding.as_deref(),
+            None,
         )
         .await
         .map_err(Self::db_err)?;

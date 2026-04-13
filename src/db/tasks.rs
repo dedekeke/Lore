@@ -75,8 +75,9 @@ pub async fn update_task(
     task_type: Option<Option<&str>>,
     description: Option<&str>,
     description_embedding: Option<&[f32]>,
+    parent_task_id: Option<Option<Uuid>>,
 ) -> Result<bool, sqlx::Error> {
-    // Each Option<Option<&str>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
+    // Each Option<Option<_>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
     let mut set_clauses = Vec::new();
     let mut param_idx = 2u32;
 
@@ -97,6 +98,10 @@ pub async fn update_task(
     }
     if description_embedding.is_some() {
         set_clauses.push(format!("description_embedding = ${param_idx}"));
+        param_idx += 1;
+    }
+    if parent_task_id.is_some() {
+        set_clauses.push(format!("parent_task_id = ${param_idx}"));
     }
     if set_clauses.is_empty() {
         return Ok(false);
@@ -122,6 +127,9 @@ pub async fn update_task(
     }
     if emb.is_some() {
         query = query.bind(emb.as_ref());
+    }
+    if let Some(pid) = &parent_task_id {
+        query = query.bind(*pid);
     }
 
     let result = query.execute(pool).await?;
@@ -349,18 +357,25 @@ pub async fn list_tasks_paginated(
         "DESC"
     };
 
+    // When sorting by created_at, priority is primary and created_at becomes secondary
+    let order = if col == "created_at" {
+        format!("priority ASC NULLS LAST, {col} {dir} NULLS LAST")
+    } else {
+        format!("{col} {dir} NULLS LAST")
+    };
+
     let sql = match status {
         Some(_) => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
              created_at, completed_at, priority, task_type, summary, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
-             ORDER BY {col} {dir} NULLS LAST LIMIT $3 OFFSET $4"
+             ORDER BY {order} LIMIT $3 OFFSET $4"
         ),
         None => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
              created_at, completed_at, priority, task_type, summary, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 \
-             ORDER BY {col} {dir} NULLS LAST LIMIT $2 OFFSET $3"
+             ORDER BY {order} LIMIT $2 OFFSET $3"
         ),
     };
 

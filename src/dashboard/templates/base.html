@@ -295,6 +295,37 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+    /* Custom dropdown */
+    .dropdown-menu {
+      position: fixed;
+      z-index: 200;
+      min-width: auto;
+      margin-top: 2px;
+      background-color: #343a40;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.2rem 0;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+      animation: dropIn 0.1s ease-out;
+    }
+    @keyframes dropIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .dropdown-item {
+      display: block;
+      width: 100%;
+      padding: 0.3rem 0.6rem;
+      font-size: 0.75rem;
+      font-family: 'DM Sans', sans-serif;
+      color: var(--text-secondary);
+      background: none;
+      border: none;
+      text-align: left;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.1s, color 0.1s;
+    }
+    .dropdown-item:hover { background-color: #3d444b; color: var(--text); }
+    .dropdown-item.active { color: var(--accent-bright); }
   </style>
 </head>
 <body>
@@ -324,6 +355,35 @@
       document.getElementById('modal').classList.remove('active');
     }
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+    function openDropdown(badge, options, current, onSelect) {
+      if (document.getElementById('active-dropdown')) return;
+      const rect = badge.getBoundingClientRect();
+      const menu = document.createElement('div');
+      menu.id = 'active-dropdown';
+      menu.className = 'dropdown-menu';
+      menu.style.top = (rect.bottom + 2) + 'px';
+      menu.style.left = rect.left + 'px';
+      options.forEach(opt => {
+        const btn = document.createElement('button');
+        btn.className = 'dropdown-item' + (opt.value === current ? ' active' : '');
+        btn.textContent = opt.label;
+        btn.addEventListener('mousedown', e => {
+          e.preventDefault();
+          cleanup();
+          onSelect(opt.value);
+        });
+        menu.appendChild(btn);
+      });
+      document.body.appendChild(menu);
+      const cleanup = () => { menu.remove(); };
+      setTimeout(() => {
+        const dismiss = (e) => {
+          if (!menu.contains(e.target)) { cleanup(); document.removeEventListener('mousedown', dismiss); }
+        };
+        document.addEventListener('mousedown', dismiss);
+      }, 0);
+    }
   </script>
 </body>
 </html>

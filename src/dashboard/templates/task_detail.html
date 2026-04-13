@@ -12,20 +12,30 @@
 <div style="display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 1.5rem; flex-wrap: wrap;">
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
 
-  {# Editable priority — badge that opens dropdown on click #}
-  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="showPrioritySelect(this)" data-task-id="{{ task.id }}" data-priority="{{ task.priority | default(value='') }}">{{ task.priority | default(value="—") }}</span>
+  {# Editable priority — custom dropdown #}
+  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ task.id }}" data-value="{{ task.priority | default(value='') }}">{{ task.priority | default(value="—") }}</span>
 
-  {# Editable task_type #}
-  <span id="task_type-display" class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="startEdit('task_type')" title="Click to edit">
-    {{ task.task_type | default(value="+ Type") }}
-  </span>
-  <span id="task_type-edit" style="display: none;">
-    <input type="text" id="task_type-input" value="{{ task.task_type | default(value='') }}" placeholder="e.g. Bug, Feature" style="width: 100px; padding: 0.2rem 0.4rem; font-size: 0.75rem; background: var(--surface); border: 1px solid var(--accent); color: var(--fg); border-radius: 4px;" onkeydown="if(event.key==='Enter')saveField('task_type');if(event.key==='Escape')cancelEdit('task_type');">
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveField('task_type')">Save</button>
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="cancelEdit('task_type')">Cancel</button>
-  </span>
+  {# Editable task_type — custom dropdown #}
+  <span class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ task.id }}" data-value="{{ task.task_type | default(value='') }}">{{ task.task_type | default(value="+ Type") }}</span>
 
-  {% if parent %}<span class="badge" style="background: var(--surface); border: 1px solid var(--border);">Subtask</span>{% endif %}
+  {# Link/unlink parent #}
+  <span id="parent-badge">
+    {% if parent %}
+    <span class="badge" style="background: var(--surface); border: 1px solid var(--border); cursor: pointer;" onclick="showParentSelect()" title="Click to change or unlink parent">Subtask of: {{ parent.summary | default(value=parent.description) | truncate(length=30) }}</span>
+    {% else %}
+    <span class="badge" style="background: var(--surface); border: 1px dashed var(--border); color: var(--muted); cursor: pointer;" onclick="showParentSelect()" title="Click to link a parent task">+ Link Parent</span>
+    {% endif %}
+  </span>
+  <span id="parent-edit" style="display: none;">
+    <select id="parent-select" class="filter-select" style="font-size: 0.75rem; width: auto; min-width: 200px;">
+      <option value="">— No parent —</option>
+      {% for t in all_tasks %}
+      <option value="{{ t.id }}" {% if parent and t.id == parent.id %}selected{% endif %}>{{ t.summary | default(value=t.description) | truncate(length=50) }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveParent()">Save</button>
+    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="cancelParent()">Cancel</button>
+  </span>
   <span class="mono" style="color: var(--muted);">{{ task.id }}</span>
   {% if task.status == "Active" %}
   <button class="btn" hx-post="/tasks/{{ task.id }}/complete" hx-target="#task-status" hx-swap="outerHTML">Complete</button>
@@ -82,41 +92,46 @@
 {% endif %}
 
 <script>
-function showPrioritySelect(badge) {
+const FIELD_OPTIONS = {
+  priority: [{value:'', label:'— None —'}, {value:'P1', label:'P1'}, {value:'P2', label:'P2'}, {value:'P3', label:'P3'}, {value:'P4', label:'P4'}],
+  task_type: [{value:'', label:'— None —'}, {value:'Feature', label:'Feature'}, {value:'Bug', label:'Bug'}, {value:'Security', label:'Security'}, {value:'Refactor', label:'Refactor'}, {value:'Research', label:'Research'}, {value:'Docs', label:'Docs'}],
+};
+function editField(badge, field) {
   const taskId = badge.dataset.taskId;
-  const current = badge.dataset.priority;
-  const select = document.createElement('select');
-  select.className = 'filter-select';
-  select.style.cssText = 'font-size: 0.75rem; padding: 0.2rem 0.3rem; width: auto; min-width: 70px;';
-  ['', 'P1', 'P2', 'P3', 'P4'].forEach(v => {
-    const opt = document.createElement('option');
-    opt.value = v;
-    opt.textContent = v || '—';
-    if (v === current) opt.selected = true;
-    select.appendChild(opt);
-  });
-  const revert = (newVal) => {
-    badge.dataset.priority = newVal;
-    badge.textContent = newVal || '—';
-    badge.style.cssText = newVal
-      ? 'cursor: pointer;'
-      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
-    select.replaceWith(badge);
-  };
-  select.addEventListener('change', () => {
-    const val = select.value;
+  const current = badge.dataset.value;
+  openDropdown(badge, FIELD_OPTIONS[field], current, (val) => {
     if (val !== current) {
+      const body = {}; body[field] = val;
       fetch('/tasks/' + taskId, {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({priority: val})
+        body: JSON.stringify(body)
       });
     }
-    revert(val);
+    badge.dataset.value = val;
+    badge.textContent = val || (field === 'task_type' ? '+ Type' : '—');
+    badge.style.cssText = val
+      ? 'cursor: pointer;'
+      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
   });
-  select.addEventListener('blur', () => revert(current));
-  badge.replaceWith(select);
-  select.focus();
+}
+function showParentSelect() {
+  document.getElementById('parent-badge').style.display = 'none';
+  document.getElementById('parent-edit').style.display = '';
+  document.getElementById('parent-select').focus();
+}
+function cancelParent() {
+  document.getElementById('parent-badge').style.display = '';
+  document.getElementById('parent-edit').style.display = 'none';
+}
+async function saveParent() {
+  const val = document.getElementById('parent-select').value;
+  const res = await fetch('/tasks/{{ task.id }}', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({parent_task_id: val})
+  });
+  if (res.ok) window.location.reload();
 }
 function startEdit(field) {
   document.getElementById(field + '-display').style.display = 'none';

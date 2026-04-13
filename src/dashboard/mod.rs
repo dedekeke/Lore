@@ -75,6 +75,7 @@ pub fn router(pool: PgPool) -> Router {
                 .delete(delete_task_handler)
                 .patch(update_task_handler),
         )
+        .route("/tasks", post(create_task_handler))
         .route("/tasks/{id}/complete", post(complete_task))
         .route("/tasks/{id}/abandon", post(abandon_task))
         .route("/batch/tasks/delete", post(batch_delete_tasks))
@@ -160,13 +161,15 @@ async fn project_detail(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let status_filter = q.status.as_deref().and_then(|s| match s {
-        "active" => Some(db::TaskStatus::Active),
-        "completed" => Some(db::TaskStatus::Completed),
-        "abandoned" => Some(db::TaskStatus::Abandoned),
-        "blocked" => Some(db::TaskStatus::Blocked),
-        _ => None,
-    });
+    // Default to active when no status param; empty string = explicit "all"
+    let (status_filter, resolved_status) = match q.status.as_deref() {
+        None => (Some(db::TaskStatus::Active), "active".to_string()),
+        Some("active") => (Some(db::TaskStatus::Active), "active".to_string()),
+        Some("completed") => (Some(db::TaskStatus::Completed), "completed".to_string()),
+        Some("abandoned") => (Some(db::TaskStatus::Abandoned), "abandoned".to_string()),
+        Some("blocked") => (Some(db::TaskStatus::Blocked), "blocked".to_string()),
+        Some(_) => (None, "".to_string()),
+    };
 
     let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
     let page = q.page.unwrap_or(1).max(1);
@@ -230,7 +233,7 @@ async fn project_detail(
             tasks => tasks,
             priorities => priorities,
             task_types => task_types,
-            current_status => q.status,
+            current_status => resolved_status,
             current_priority => q.priority,
             current_task_type => q.task_type,
             page => page,
@@ -263,10 +266,17 @@ async fn task_detail(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         None => None,
     };
+    // All tasks in same project for parent-linking dropdown (exclude self and own subtasks)
+    let all_tasks = db::tasks::list_tasks(&state.pool, task.project_id, None)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.id != task.id && t.parent_task_id != Some(task.id))
+        .collect::<Vec<_>>();
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts, subtasks => subtasks, parent => parent },
+        context! { task => task, attempts => attempts, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
     )
 }
 
@@ -311,6 +321,8 @@ struct UpdateTaskPayload {
     priority: Option<String>,
     task_type: Option<String>,
     description: Option<String>,
+    // "" = clear parent, valid UUID = set parent, absent = don't touch
+    parent_task_id: Option<String>,
 }
 
 async fn update_task_handler(
@@ -340,6 +352,15 @@ async fn update_task_handler(
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
 
+    let parent_task_id: Option<Option<uuid::Uuid>> = payload.parent_task_id.map(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            uuid::Uuid::parse_str(&trimmed).ok()
+        }
+    });
+
     let updated = db::tasks::update_task(
         &state.pool,
         id,
@@ -347,11 +368,61 @@ async fn update_task_handler(
         task_type.as_ref().map(|o| o.as_deref()),
         description.as_deref(),
         None,
+        parent_task_id,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
+#[derive(serde::Deserialize)]
+struct CreateTaskPayload {
+    project_id: uuid::Uuid,
+    description: String,
+    priority: Option<String>,
+    task_type: Option<String>,
+    parent_task_id: Option<String>,
+}
+
+async fn create_task_handler(
+    State(state): State<DashboardState>,
+    Json(payload): Json<CreateTaskPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let desc = payload.description.trim();
+    if desc.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let priority = payload
+        .priority
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let task_type = payload
+        .task_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let parent_id = payload
+        .parent_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| uuid::Uuid::parse_str(v).ok());
+
+    let id = db::tasks::create_task(
+        &state.pool,
+        payload.project_id,
+        desc,
+        parent_id,
+        priority,
+        task_type,
+        None,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "id": id })))
 }
 
 // --- Batch operations ---

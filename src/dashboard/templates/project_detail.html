@@ -9,12 +9,43 @@
 
 <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem;">
   <h2 style="margin-bottom: 0;">Tasks ({{ total }})</h2>
+  <button class="btn" onclick="document.getElementById('create-modal').style.display='flex'">+ New Task</button>
+</div>
+
+{# Create task modal #}
+<div id="create-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center;" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:1.5rem; width:90%; max-width:500px;">
+    <h3 style="margin-top:0;">New Task</h3>
+    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+      <textarea id="new-desc" placeholder="Description (required)" rows="3" style="width:100%; padding:0.5rem; font-size:0.8rem; background:var(--surface); border:1px solid var(--border); color:var(--fg); border-radius:4px; font-family:inherit; resize:vertical;"></textarea>
+      <div style="display:flex; gap:0.5rem;">
+        <select id="new-priority" class="filter-select" style="flex:1;">
+          <option value="">Priority</option>
+          <option value="P1">P1</option><option value="P2">P2</option><option value="P3">P3</option><option value="P4">P4</option>
+        </select>
+        <select id="new-type" class="filter-select" style="flex:1;">
+          <option value="">Type</option>
+          <option value="Feature">Feature</option><option value="Bug">Bug</option><option value="Security">Security</option><option value="Refactor">Refactor</option><option value="Research">Research</option><option value="Docs">Docs</option>
+        </select>
+      </div>
+      <select id="new-parent" class="filter-select">
+        <option value="">No parent (top-level)</option>
+        {% for t in tasks %}
+        <option value="{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=60) }}</option>
+        {% endfor %}
+      </select>
+      <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+        <button class="btn" onclick="document.getElementById('create-modal').style.display='none'">Cancel</button>
+        <button class="btn" style="border-color:var(--accent); color:var(--accent-bright);" onclick="createTask()">Create</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 {# Filter bar #}
 <div style="display: flex; gap: 0.5rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center;">
   <select id="filter-status" class="filter-select" onchange="applyFilters()">
-    <option value="">All Statuses</option>
+    <option value="all" {% if current_status == "" %}selected{% endif %}>All Statuses</option>
     <option value="active" {% if current_status == "active" %}selected{% endif %}>Active</option>
     <option value="completed" {% if current_status == "completed" %}selected{% endif %}>Completed</option>
     <option value="abandoned" {% if current_status == "abandoned" %}selected{% endif %}>Abandoned</option>
@@ -36,7 +67,7 @@
     {% endfor %}
   </select>
   {% endif %}
-  {% if current_status or current_priority or current_task_type %}
+  {% if current_status != "active" or current_priority or current_task_type %}
   <a href="/projects/{{ project.id }}" class="btn btn-danger" style="font-size: 0.72rem;">Clear</a>
   {% endif %}
 </div>
@@ -74,9 +105,11 @@
       <td><input type="checkbox" class="task-cb" value="{{ t.id }}" onchange="updateBatchBar()"></td>
       <td>{% if t.parent_task_id %}<span style="color: var(--muted); margin-right: 0.3rem;">↳</span>{% endif %}<a href="/tasks/{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=80) }}</a></td>
       <td>
-        <span class="badge badge-priority" style="cursor: pointer;{% if not t.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="showPrioritySelect(this)" data-task-id="{{ t.id }}" data-priority="{{ t.priority | default(value='') }}">{{ t.priority | default(value="—") }}</span>
+        <span class="badge badge-priority" style="cursor: pointer;{% if not t.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ t.id }}" data-value="{{ t.priority | default(value='') }}">{{ t.priority | default(value="—") }}</span>
       </td>
-      <td>{% if t.task_type %}<span class="badge badge-type">{{ t.task_type }}</span>{% else %}<span style="color: var(--border);">—</span>{% endif %}</td>
+      <td>
+        <span class="badge badge-type" style="cursor: pointer;{% if not t.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ t.id }}" data-value="{{ t.task_type | default(value='') }}">{{ t.task_type | default(value="—") }}</span>
+      </td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
       <td class="mono text-nowrap" style="color: var(--muted);">{{ t.created_at | dateformat }}</td>
       <td>
@@ -112,51 +145,42 @@
 {% endif %}
 
 <script>
-function showPrioritySelect(badge) {
+const FIELD_OPTIONS = {
+  priority: [{value:'', label:'— None —'}, {value:'P1', label:'P1'}, {value:'P2', label:'P2'}, {value:'P3', label:'P3'}, {value:'P4', label:'P4'}],
+  task_type: [{value:'', label:'— None —'}, {value:'Feature', label:'Feature'}, {value:'Bug', label:'Bug'}, {value:'Security', label:'Security'}, {value:'Refactor', label:'Refactor'}, {value:'Research', label:'Research'}, {value:'Docs', label:'Docs'}],
+};
+function editField(badge, field) {
   const taskId = badge.dataset.taskId;
-  const current = badge.dataset.priority;
-  const select = document.createElement('select');
-  select.className = 'filter-select';
-  select.style.cssText = 'font-size: 0.7rem; padding: 0.15rem 0.2rem; width: auto; min-width: 55px;';
-  ['', 'P1', 'P2', 'P3', 'P4'].forEach(v => {
-    const opt = document.createElement('option');
-    opt.value = v;
-    opt.textContent = v || '—';
-    if (v === current) opt.selected = true;
-    select.appendChild(opt);
-  });
-  const revert = (newVal) => {
-    badge.dataset.priority = newVal;
-    badge.textContent = newVal || '—';
-    badge.style.cssText = newVal
-      ? 'cursor: pointer;'
-      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
-    select.replaceWith(badge);
-  };
-  select.addEventListener('change', () => {
-    const val = select.value;
+  const current = badge.dataset.value;
+  openDropdown(badge, FIELD_OPTIONS[field], current, (val) => {
     if (val !== current) {
+      const body = {}; body[field] = val;
       fetch('/tasks/' + taskId, {
         method: 'PATCH',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({priority: val})
+        body: JSON.stringify(body)
       });
     }
-    revert(val);
+    badge.dataset.value = val;
+    badge.textContent = val || '—';
+    badge.style.cssText = val
+      ? 'cursor: pointer;'
+      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
   });
-  select.addEventListener('blur', () => revert(current));
-  badge.replaceWith(select);
-  select.focus();
 }
 function buildParams(overrides) {
   const params = new URLSearchParams();
-  const status = overrides.status !== undefined ? overrides.status : (document.getElementById('filter-status')?.value || '');
+  const rawStatus = overrides.status !== undefined ? overrides.status : (document.getElementById('filter-status')?.value || 'active');
+  // 'all' means explicit show-all; anything else is a real filter value
+  const status = rawStatus === 'all' ? '' : rawStatus;
   const priority = overrides.priority !== undefined ? overrides.priority : (document.getElementById('filter-priority')?.value || '');
   const type_ = overrides.task_type !== undefined ? overrides.task_type : (document.getElementById('filter-type')?.value || '');
   const sort = overrides.sort || '{{ sort }}';
   const dir = overrides.dir || '{{ dir }}';
   const page = overrides.page || {{ page }};
-  if (status) params.set('status', status);
+  // 'active' is the default — omit from URL; empty string = explicit all → include
+  if (status === '') params.set('status', status);
+  else if (status && status !== 'active') params.set('status', status);
   if (priority) params.set('priority', priority);
   if (type_) params.set('task_type', type_);
   if (sort !== 'created_at') params.set('sort', sort);
@@ -211,6 +235,22 @@ async function batchSetStatus() {
   const res = await fetch('/batch/tasks/status', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ids, status})
+  });
+  if (res.ok) window.location.reload();
+}
+async function createTask() {
+  const desc = document.getElementById('new-desc').value.trim();
+  if (!desc) { document.getElementById('new-desc').focus(); return; }
+  const body = {
+    project_id: '{{ project.id }}',
+    description: desc,
+    priority: document.getElementById('new-priority').value || undefined,
+    task_type: document.getElementById('new-type').value || undefined,
+    parent_task_id: document.getElementById('new-parent').value || undefined,
+  };
+  const res = await fetch('/tasks', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
   });
   if (res.ok) window.location.reload();
 }

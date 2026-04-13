@@ -28,6 +28,9 @@ pgvector = { version = "0.4", features = ["sqlx"] }
 moka = { version = "0.12", features = ["future"] }
 axum = "0.8"
 minijinja = "2"
+ignore = { version = "0.4.25", default-features = false }
+sha2 = { version = "0.11.0", default-features = false }
+git2 = { version = "0.20", default-features = false }
 
 [dev-dependencies]
 testcontainers = "0.23"

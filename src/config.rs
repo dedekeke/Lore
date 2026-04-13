@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::env;
 use std::fmt;
-use std::io::BufRead;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpTransport {
@@ -64,6 +63,8 @@ pub struct Config {
     pub dashboard_enabled: bool,
     pub dashboard_port: u16,
     pub capture_git_ref: bool,
+    pub codebase_behavior_version: i32,
+    pub proactive_context: bool,
 }
 
 impl Config {
@@ -155,6 +156,11 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
                 == "true",
+            codebase_behavior_version: parse_warn_or("CODEBASE_BEHAVIOR_VERSION", 1),
+            proactive_context: env::var("LORE_PROACTIVE_CONTEXT")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
         }
     }
 }
@@ -211,6 +217,8 @@ mod tests {
             "DASHBOARD_ENABLED",
             "DASHBOARD_PORT",
             "CAPTURE_GIT_REF",
+            "CODEBASE_BEHAVIOR_VERSION",
+            "LORE_PROACTIVE_CONTEXT",
         ] {
             std::env::remove_var(key);
         }

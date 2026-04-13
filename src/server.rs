@@ -33,7 +33,7 @@ impl LoreServer {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-            
+
         Self {
             inner: Arc::new(LoreServerInner {
                 pool,
@@ -98,7 +98,9 @@ impl LoreServer {
 
     /// Capture current git HEAD commit hash for the project's root_path
     async fn capture_git_ref(&self) -> Option<String> {
-        if !self.config().capture_git_ref { return None; }
+        if !self.config().capture_git_ref {
+            return None;
+        }
         let pid = self.inner.current_project_id.read().await;
         let project_id = (*pid)?;
         drop(pid);
@@ -258,6 +260,9 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "The rule content to remember")]
         content: String,
+        #[tool(param)]
+        #[schemars(description = "Optional tags for categorizing the rule")]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
@@ -281,10 +286,17 @@ impl LoreServer {
             );
         }
 
-        let id =
-            db::semantic::create_rule(self.pool(), project_id, cat, &content, Some(&embedding))
-                .await
-                .map_err(Self::db_err)?;
+        let tags_vec = tags.unwrap_or_default();
+        let id = db::semantic::create_rule(
+            self.pool(),
+            project_id,
+            cat,
+            &content,
+            Some(&embedding),
+            &tags_vec,
+        )
+        .await
+        .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
         Self::json_content_with_nudge(
             &serde_json::json!({ "rule_id": id.to_string() }),
@@ -304,9 +316,22 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+        )]
+        tags: Option<Vec<String>>,
+        #[tool(param)]
+        #[schemars(description = "Search across all projects (default false)")]
+        cross_project: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;
-        let project_id = self.project_id().await?;
+        let current_project_id = self.project_id().await?;
+        let project_id = if cross_project.unwrap_or(false) {
+            None
+        } else {
+            Some(current_project_id)
+        };
         let embedding = self.embed(&query).await?;
         let cat = category
             .as_deref()
@@ -315,10 +340,13 @@ impl LoreServer {
         let rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
+            current_project_id,
             &embedding,
             &query,
             limit.unwrap_or(10),
             cat,
+            None,
+            tags.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -349,13 +377,18 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
         category: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+        )]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let cat = category
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::list_rules(self.pool(), project_id, cat)
+        let rules = db::semantic::list_rules(self.pool(), project_id, cat, tags.as_deref())
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&rules)
@@ -373,10 +406,13 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "New content for the rule")]
         content: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New tags for the rule (replaces existing tags)")]
+        tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        if category.is_none() && content.is_none() {
+        if category.is_none() && content.is_none() && tags.is_none() {
             return Err(rmcp::Error::invalid_params(
-                "Provide at least one of: category, content",
+                "Provide at least one of: category, content, tags",
                 None,
             ));
         }
@@ -398,6 +434,7 @@ impl LoreServer {
             cat,
             content.as_deref(),
             embedding.as_deref(),
+            tags.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -419,6 +456,12 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "UUID of parent task, if this is a subtask")]
         parent_task_id: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4")]
+        priority: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
+        task_type: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
@@ -426,9 +469,18 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
-        let id = db::tasks::create_task(self.pool(), project_id, &description, parent)
-            .await
-            .map_err(Self::db_err)?;
+        let embedding = self.embed(&description).await.ok();
+        let id = db::tasks::create_task(
+            self.pool(),
+            project_id,
+            &description,
+            parent,
+            priority.as_deref(),
+            task_type.as_deref(),
+            embedding.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
             &serde_json::json!({ "task_id": id.to_string() }),
             "Task created. Next: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.",
@@ -532,7 +584,8 @@ impl LoreServer {
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
-                    ).await;
+                    )
+                    .await;
                 }
             }
         }
@@ -571,6 +624,76 @@ impl LoreServer {
         Self::json_content_with_nudge(
             &attempts,
             "Use the above failures to avoid repeating mistakes. Call propose_attempt with a new approach.",
+        )
+    }
+
+    #[tool(description = "Update an existing task's priority, task_type, or description")]
+    pub async fn update_task(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the task to update")]
+        task_id: String,
+        #[tool(param)]
+        #[schemars(description = "Priority level: P1, P2, P3, or P4. Empty string clears it.")]
+        priority: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New task type (e.g. Bug, Feature). Empty string clears it.")]
+        task_type: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "New description text")]
+        description: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        if let Some(ref d) = description {
+            Self::validate_len("description", d, 4096)?;
+        }
+        let tid = Self::parse_uuid(&task_id)?;
+        let p = priority.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let tt = task_type.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let desc = description
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        // Re-embed if description changed
+        let desc_embedding = if desc.is_some() {
+            match self.embed(desc.as_deref().unwrap()).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to embed updated description");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let updated = db::tasks::update_task(
+            self.pool(),
+            tid,
+            p.as_ref().map(|o| o.as_deref()),
+            tt.as_ref().map(|o| o.as_deref()),
+            desc.as_deref(),
+            desc_embedding.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "updated": updated, "task_id": task_id }),
+            "Task updated. Continue with your current work.",
         )
     }
 
@@ -617,21 +740,29 @@ impl LoreServer {
                     db::RuleCategory::Lesson,
                     lesson_text,
                     Some(&embedding),
+                    &[],
                 )
                 .await
                 .map_err(Self::db_err)?;
             }
         }
 
+        let rolled_up = if success {
+            db::tasks::try_rollup_parents(self.pool(), tid).await
+        } else {
+            0
+        };
+
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson }),
-            ).await;
+                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parents_rolled_up": rolled_up }),
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task closed. For your next goal, call start_task(description).",
         )
     }
@@ -664,20 +795,28 @@ impl LoreServer {
                 db::RuleCategory::Lesson,
                 &reason,
                 Some(&embedding),
+                &[],
             )
             .await
             .map_err(Self::db_err)?;
         }
 
+        let rolled_up = if success {
+            db::tasks::try_rollup_parents(self.pool(), tid).await
+        } else {
+            0
+        };
+
         if success {
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason }),
-            ).await;
+                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
+            )
+            .await;
         }
 
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success }),
+            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
             "Task abandoned. For your next goal, call start_task(description).",
         )
     }
@@ -695,6 +834,20 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&tasks)
+    }
+
+    #[tool(description = "List subtasks of a parent task")]
+    pub async fn list_subtasks(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the parent task")]
+        parent_task_id: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let pid = Self::parse_uuid(&parent_task_id)?;
+        let subtasks = db::tasks::list_subtasks(self.pool(), pid)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&subtasks)
     }
 
     #[tool(
@@ -802,7 +955,7 @@ impl LoreServer {
                 .map_err(Self::db_err)?;
         }
 
-        let active_rules = db::semantic::list_rules(self.pool(), project_id, None)
+        let active_rules_count = db::semantic::count_rules(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?;
 
@@ -814,22 +967,67 @@ impl LoreServer {
             0
         };
 
+        // Proactive retrieval: auto-surface relevant rules and similar failures
+        // based on the active task's description embedding.
+        let proactive_enabled = self.config().proactive_context;
+        let mut proactive: Option<serde_json::Value> = None;
+        if proactive_enabled {
+            if let Some(task) = active_tasks.first() {
+                let emb_vec: Option<Vec<f32>> = match task.description_embedding.as_ref() {
+                    Some(v) => Some(v.to_vec()),
+                    None => self.embed(&task.description).await.ok(),
+                };
+                if let Some(emb) = emb_vec {
+                    let rules = db::semantic::search_rules_by_embedding(
+                        self.pool(),
+                        Some(project_id),
+                        &emb,
+                        5,
+                        None,
+                        None,
+                        Some(project_id),
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive rule search failed");
+                        vec![]
+                    });
+                    let failures = db::attempts::search_similar_failures(
+                        self.pool(),
+                        Some(project_id),
+                        &emb,
+                        3,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "Proactive failure search failed");
+                        vec![]
+                    });
+                    proactive = Some(serde_json::json!({
+                        "relevant_rules": rules,
+                        "similar_failures": failures,
+                    }));
+                }
+            }
+        }
+
         let nudge = if active_tasks.is_empty() {
             "No active task. Call start_task(description) for your current goal."
         } else {
             "Use the active task and attempts above to continue. Call propose_attempt for your next approach."
         };
 
-        Self::json_content_with_nudge(
-            &serde_json::json!({
-                "project": project,
-                "active_tasks": active_tasks,
-                "recent_attempts": recent_attempts,
-                "active_rules_count": active_rules.len(),
-                "context_wipes": context_wipes,
-            }),
-            nudge,
-        )
+        let mut body = serde_json::json!({
+            "project": project,
+            "active_tasks": active_tasks,
+            "recent_attempts": recent_attempts,
+            "active_rules_count": active_rules_count,
+            "context_wipes": context_wipes,
+        });
+        if let Some(p) = proactive {
+            body["proactively_retrieved"] = p;
+        }
+        Self::json_content_with_nudge(&body, nudge)
     }
 
     #[tool(
@@ -962,7 +1160,7 @@ impl LoreServer {
         }
 
         let project_id = self.project_id().await?;
-        let rules = db::semantic::list_rules(self.pool(), project_id, None)
+        let rules = db::semantic::list_rules(self.pool(), project_id, None, None)
             .await
             .map_err(Self::db_err)?;
         let tasks = db::tasks::list_tasks(self.pool(), project_id, None)
@@ -999,11 +1197,44 @@ impl LoreServer {
     #[tool(
         description = "Get a cold-start briefing: active/blocked tasks with attempt stats, stale pending attempts, and recent lessons. Call this at the start of a new session to know what to work on without resuming prior context."
     )]
-    pub async fn get_next_steps(&self) -> Result<CallToolResult, rmcp::Error> {
+    pub async fn get_next_steps(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Context tier: L0 (minimal ~100 tokens), L1 (full, default)")]
+        tier: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?;
+
+        // L0: minimal orientation
+        if tier.as_deref().map(|t| t.to_uppercase()).as_deref() == Some("L0") {
+            let active_count =
+                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                    .await
+                    .map_err(Self::db_err)?;
+            let blocked_count =
+                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                    .await
+                    .map_err(Self::db_err)?;
+            let lesson_count = db::semantic::count_rules_by_category(
+                self.pool(),
+                project_id,
+                db::RuleCategory::Lesson,
+            )
+            .await
+            .map_err(Self::db_err)?;
+            return Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "project": project,
+                    "active_task_count": active_count,
+                    "blocked_task_count": blocked_count,
+                    "lesson_count": lesson_count,
+                }),
+                "L0 brief loaded. Call get_next_steps(tier='L1') for full details, or start_task() for a new goal.",
+            );
+        }
 
         let summaries = db::tasks::get_task_summaries(
             self.pool(),
@@ -1013,10 +1244,14 @@ impl LoreServer {
         .await
         .map_err(Self::db_err)?;
 
-        let lessons =
-            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
-                .await
-                .map_err(Self::db_err)?;
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .map_err(Self::db_err)?;
         // Only show most recent 5 lessons
         let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
 
@@ -1155,10 +1390,14 @@ impl LoreServer {
         }
 
         // Recent lessons
-        let lessons =
-            db::semantic::list_rules(self.pool(), project_id, Some(db::RuleCategory::Lesson))
-                .await
-                .unwrap_or_default();
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .unwrap_or_default();
         let recent_lessons: Vec<_> = lessons.iter().rev().take(5).collect();
         if !recent_lessons.is_empty() {
             writeln!(md, "## Recent Lessons\n").unwrap();
@@ -1192,6 +1431,274 @@ impl LoreServer {
 
         Ok(CallToolResult::success(vec![Content::text(md)]))
     }
+
+    #[tool(
+        description = "Index a project's codebase into vector storage for semantic code search. Scans files respecting .gitignore, chunks by language-aware boundaries, embeds via ONNX, stores in pgvector. Incremental: only re-indexes changed files (SHA-256 fingerprinting). Call at session start for fast code retrieval."
+    )]
+    pub async fn index_codebase(
+        &self,
+        #[tool(param)]
+        #[schemars(
+            description = "Root path of the project to index (defaults to project root_path)"
+        )]
+        root_path: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+
+        let project = db::projects::get_project(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?
+            .ok_or_else(|| rmcp::Error::internal_error("Project not found", None))?;
+
+        let path = if let Some(ref p) = root_path {
+            // Restrict to subdirectories of the project's registered root
+            let canonical = std::path::Path::new(p)
+                .canonicalize()
+                .map_err(|e| rmcp::Error::internal_error(format!("Invalid path: {e}"), None))?;
+            let project_root = std::path::Path::new(&project.root_path)
+                .canonicalize()
+                .map_err(|e| {
+                    rmcp::Error::internal_error(format!("Invalid project root: {e}"), None)
+                })?;
+            if !canonical.starts_with(&project_root) {
+                return Err(rmcp::Error::internal_error(
+                    "root_path must be within the project directory",
+                    None,
+                ));
+            }
+            canonical.to_string_lossy().to_string()
+        } else {
+            project.root_path
+        };
+
+        let result = crate::indexer::index_codebase(
+            self.pool(),
+            self.embeddings(),
+            project_id,
+            &path,
+            None,
+            self.config().codebase_behavior_version,
+        )
+        .await
+        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+        Self::json_content_with_nudge(
+            &result,
+            "Codebase indexed. Use search_codebase to find relevant code.",
+        )
+    }
+
+    #[tool(
+        description = "Search the indexed codebase for relevant code chunks. Returns the most relevant code snippets matching your query using hybrid vector + keyword search with MMR diversity re-ranking. Much faster and cheaper than reading entire files."
+    )]
+    pub async fn search_codebase(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Natural language query describing what code you're looking for")]
+        query: String,
+        #[tool(param)]
+        #[schemars(description = "Max results to return (default 5)")]
+        limit: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
+        file_pattern: Option<String>,
+        #[tool(param)]
+        #[schemars(
+            description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)"
+        )]
+        diversity: Option<f32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("query", &query, 2048)?;
+        let project_id = self.project_id().await?;
+        let embedding = self.embed(&query).await?;
+
+        let chunks = db::codebase::search_chunks(
+            self.pool(),
+            project_id,
+            &embedding,
+            &query,
+            limit.unwrap_or(5),
+            file_pattern.as_deref(),
+            Some(diversity.unwrap_or(0.3)),
+        )
+        .await
+        .map_err(Self::db_err)?;
+
+        // Format results with file path and line numbers for easy navigation
+        let results: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                let mut obj = serde_json::json!({
+                    "file": c.file_path,
+                    "lines": format!("{}:{}", c.start_line, c.end_line),
+                    "language": c.language,
+                    "content": c.content,
+                });
+                if let Some(ref s) = c.summary {
+                    obj["summary"] = serde_json::Value::String(s.clone());
+                }
+                obj
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &results,
+            "Use these code snippets as context for your current task.",
+        )
+    }
+
+    #[tool(
+        description = "Get statistics about the indexed codebase: file count, chunk count, last indexed time, summary coverage."
+    )]
+    pub async fn get_index_status(&self) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let stats = db::codebase::get_index_stats(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(&stats, "Call index_codebase to update the index if stale.")
+    }
+
+    #[tool(
+        description = "Generate LLM summaries for indexed code chunks that lack them. Calls Gemini to produce 1-sentence descriptions per function/class. Run after index_codebase to improve high-level search queries."
+    )]
+    pub async fn generate_summaries(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Max chunks to summarize per call (default 50, max 100)")]
+        limit: Option<i64>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let limit = limit.unwrap_or(50).min(100);
+
+        let chunks = db::codebase::get_chunks_needing_summary(self.pool(), project_id, limit)
+            .await
+            .map_err(Self::db_err)?;
+
+        if chunks.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "All chunks already have summaries.",
+            )]));
+        }
+
+        let api_key = self
+            .config()
+            .gemini_api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| {
+                rmcp::Error::internal_error("GEMINI_API_KEY required for generate_summaries", None)
+            })?;
+
+        let mut updates: Vec<(Uuid, String)> = Vec::new();
+        let mut errors = 0u64;
+
+        // Batch chunks into groups of 10 for efficient LLM calls
+        for batch in chunks.chunks(10) {
+            let prompt = build_summary_prompt(batch);
+            match call_gemini_for_summaries(&self.inner.http_client, api_key, &prompt).await {
+                Ok(summaries) => {
+                    for (chunk, summary) in batch.iter().zip(summaries) {
+                        if !summary.is_empty() {
+                            updates.push((chunk.id, summary));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "LLM summary batch failed");
+                    errors += batch.len() as u64;
+                }
+            }
+        }
+
+        let updated = db::codebase::update_summaries(self.pool(), &updates)
+            .await
+            .map_err(Self::db_err)?;
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "summaries_generated": updated,
+                "errors": errors,
+                "remaining": chunks.len() as u64 - updated - errors,
+            }),
+            "Summaries improve search quality for high-level queries.",
+        )
+    }
+}
+
+fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
+    let mut prompt = String::from(
+        "For each numbered code snippet below, write exactly ONE short sentence (max 15 words) \
+         describing what the code does. Return one summary per line, numbered to match.\n\n",
+    );
+    for (i, chunk) in chunks.iter().enumerate() {
+        let lang = chunk.language.as_deref().unwrap_or("unknown");
+        prompt.push_str(&format!(
+            "--- Snippet {} ({}, {}:{}-{}) ---\n{}\n\n",
+            i + 1,
+            lang,
+            chunk.file_path,
+            chunk.start_line,
+            chunk.end_line,
+            chunk.content
+        ));
+    }
+    prompt
+}
+
+async fn call_gemini_for_summaries(
+    client: &reqwest::Client,
+    api_key: &str,
+    prompt: &str,
+) -> Result<Vec<String>, String> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+
+    let body = serde_json::json!({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini API {status}: {text}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
+
+    let text = json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+
+    let summaries: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            // Strip leading "1. " or "1) " numbering
+            let trimmed = l.trim();
+            if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
+                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+                rest.trim_start_matches(['.', ')', ':', '-', ' '])
+                    .to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect();
+
+    Ok(summaries)
 }
 
 impl ServerHandler for LoreServer {

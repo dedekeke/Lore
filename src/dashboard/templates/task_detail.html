@@ -1,9 +1,31 @@
 {% extends "base.html" %}
-{% block title %}Task — {{ task.description | truncate(length=40) }}{% endblock %}
+{% block title %}Task — {{ task.summary | default(value=task.description) | truncate(length=40) }}{% endblock %}
 {% block content %}
-<h1>{{ task.description }}</h1>
-<div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem;">
+<div style="margin-bottom: 2rem;">
+  <a href="/projects/{{ task.project_id }}" class="btn">&larr; Tasks</a>
+  {% if parent %}
+  <a href="/tasks/{{ parent.id }}" class="btn">&larr; Parent: {{ parent.summary | default(value=parent.description) | truncate(length=40) }}</a>
+  {% endif %}
+</div>
+
+<h1>{{ task.summary | default(value=task.description | truncate(length=80)) }}</h1>
+<div style="display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 1.5rem; flex-wrap: wrap;">
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
+
+  {# Editable priority — badge that opens dropdown on click #}
+  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="showPrioritySelect(this)" data-task-id="{{ task.id }}" data-priority="{{ task.priority | default(value='') }}">{{ task.priority | default(value="—") }}</span>
+
+  {# Editable task_type #}
+  <span id="task_type-display" class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="startEdit('task_type')" title="Click to edit">
+    {{ task.task_type | default(value="+ Type") }}
+  </span>
+  <span id="task_type-edit" style="display: none;">
+    <input type="text" id="task_type-input" value="{{ task.task_type | default(value='') }}" placeholder="e.g. Bug, Feature" style="width: 100px; padding: 0.2rem 0.4rem; font-size: 0.75rem; background: var(--surface); border: 1px solid var(--accent); color: var(--fg); border-radius: 4px;" onkeydown="if(event.key==='Enter')saveField('task_type');if(event.key==='Escape')cancelEdit('task_type');">
+    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveField('task_type')">Save</button>
+    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="cancelEdit('task_type')">Cancel</button>
+  </span>
+
+  {% if parent %}<span class="badge" style="background: var(--surface); border: 1px solid var(--border);">Subtask</span>{% endif %}
   <span class="mono" style="color: var(--muted);">{{ task.id }}</span>
   {% if task.status == "Active" %}
   <button class="btn" hx-post="/tasks/{{ task.id }}/complete" hx-target="#task-status" hx-swap="outerHTML">Complete</button>
@@ -12,17 +34,45 @@
 </div>
 <div id="task-status"></div>
 
+{% if task.summary %}
+<h2 style="display: flex; align-items: center; gap: 0.5rem;">Description <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="startEdit('description')">Edit</button></h2>
+<div id="description-display" class="section-note" style="white-space: pre-wrap;">{{ task.description }}</div>
+<div id="description-edit" style="display: none;">
+  <textarea id="description-input" style="width: 100%; min-height: 100px; padding: 0.5rem; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--accent); color: var(--fg); border-radius: 4px; font-family: inherit; resize: vertical;">{{ task.description }}</textarea>
+  <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+    <button class="btn" onclick="saveField('description')">Save</button>
+    <button class="btn" onclick="cancelEdit('description')">Cancel</button>
+  </div>
+</div>
+{% endif %}
+
+{% if subtasks %}
+<h2>Subtasks ({{ subtasks | length }})</h2>
+<table>
+  <thead><tr><th>Summary</th><th style="width: 90px;">Status</th><th style="width: 100px;">Created</th></tr></thead>
+  <tbody>
+    {% for s in subtasks %}
+    <tr>
+      <td><a href="/tasks/{{ s.id }}">{{ s.summary | default(value=s.description) | truncate(length=80) }}</a></td>
+      <td><span class="badge badge-{{ s.status | lower }}">{{ s.status }}</span></td>
+      <td class="mono" style="color: var(--muted);">{{ s.created_at | dateformat }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h2>Attempts ({{ attempts | length }})</h2>
 {% if attempts %}
 <table>
-  <thead><tr><th>Approach</th><th>Outcome</th><th>Reasoning</th><th>Created</th></tr></thead>
+  <thead><tr><th>Approach</th><th style="width: 90px;">Outcome</th><th>Reasoning</th><th style="width: 100px;">Created</th></tr></thead>
   <tbody>
     {% for a in attempts %}
     <tr>
       <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
       <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
-      <td class="mono">{{ a.created_at | truncate(length=10) }}</td>
+      <td class="mono" style="color: var(--muted);">{{ a.created_at | dateformat }}</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -30,4 +80,65 @@
 {% else %}
 <div class="empty">No attempts</div>
 {% endif %}
+
+<script>
+function showPrioritySelect(badge) {
+  const taskId = badge.dataset.taskId;
+  const current = badge.dataset.priority;
+  const select = document.createElement('select');
+  select.className = 'filter-select';
+  select.style.cssText = 'font-size: 0.75rem; padding: 0.2rem 0.3rem; width: auto; min-width: 70px;';
+  ['', 'P1', 'P2', 'P3', 'P4'].forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v || '—';
+    if (v === current) opt.selected = true;
+    select.appendChild(opt);
+  });
+  const revert = (newVal) => {
+    badge.dataset.priority = newVal;
+    badge.textContent = newVal || '—';
+    badge.style.cssText = newVal
+      ? 'cursor: pointer;'
+      : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
+    select.replaceWith(badge);
+  };
+  select.addEventListener('change', () => {
+    const val = select.value;
+    if (val !== current) {
+      fetch('/tasks/' + taskId, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({priority: val})
+      });
+    }
+    revert(val);
+  });
+  select.addEventListener('blur', () => revert(current));
+  badge.replaceWith(select);
+  select.focus();
+}
+function startEdit(field) {
+  document.getElementById(field + '-display').style.display = 'none';
+  document.getElementById(field + '-edit').style.display = '';
+  const input = document.getElementById(field + '-input');
+  input.focus();
+  if (input.tagName === 'INPUT') input.select();
+}
+function cancelEdit(field) {
+  document.getElementById(field + '-display').style.display = '';
+  document.getElementById(field + '-edit').style.display = 'none';
+}
+async function saveField(field) {
+  const input = document.getElementById(field + '-input');
+  const body = {};
+  body[field] = input.value;
+  const res = await fetch('/tasks/{{ task.id }}', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (res.ok) window.location.reload();
+}
+</script>
 {% endblock %}

@@ -220,14 +220,18 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<(), EmbeddingError> {
 
     // Atomic write by creating a temporary file first
     let tmp_dest = dest.with_extension("tmp");
-    std::fs::write(&tmp_dest, &bytes)
-        .map_err(|e| EmbeddingError::Model(format!("Failed to write {}: {e}", tmp_dest.display())))?;
-        
-    std::fs::rename(&tmp_dest, dest)
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_dest);
-            EmbeddingError::Model(format!("Failed to rename {} to {}: {e}", tmp_dest.display(), dest.display()))
-        })?;
+    std::fs::write(&tmp_dest, &bytes).map_err(|e| {
+        EmbeddingError::Model(format!("Failed to write {}: {e}", tmp_dest.display()))
+    })?;
+
+    std::fs::rename(&tmp_dest, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_dest);
+        EmbeddingError::Model(format!(
+            "Failed to rename {} to {}: {e}",
+            tmp_dest.display(),
+            dest.display()
+        ))
+    })?;
 
     Ok(())
 }

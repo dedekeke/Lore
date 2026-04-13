@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use pgvector::Vector;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -21,6 +22,12 @@ pub struct Task {
     pub resolved_attempt_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub priority: Option<String>,
+    pub task_type: Option<String>,
+    pub summary: Option<String>,
+    #[serde(skip)]
+    #[allow(dead_code)]
+    pub description_embedding: Option<Vector>,
 }
 
 pub async fn create_task(
@@ -28,14 +35,23 @@ pub async fn create_task(
     project_id: Uuid,
     description: &str,
     parent_task_id: Option<Uuid>,
+    priority: Option<&str>,
+    task_type: Option<&str>,
+    description_embedding: Option<&[f32]>,
 ) -> Result<Uuid, sqlx::Error> {
+    let summary = generate_summary(description);
+    let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type, description_embedding) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
     .bind(parent_task_id)
+    .bind(&summary)
+    .bind(priority)
+    .bind(task_type)
+    .bind(emb.as_ref())
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -44,12 +60,72 @@ pub async fn create_task(
 #[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
          FROM ai_memory.tasks WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
+}
+
+pub async fn update_task(
+    pool: &PgPool,
+    id: Uuid,
+    priority: Option<Option<&str>>,
+    task_type: Option<Option<&str>>,
+    description: Option<&str>,
+    description_embedding: Option<&[f32]>,
+) -> Result<bool, sqlx::Error> {
+    // Each Option<Option<&str>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
+    let mut set_clauses = Vec::new();
+    let mut param_idx = 2u32;
+
+    if priority.is_some() {
+        set_clauses.push(format!("priority = ${param_idx}"));
+        param_idx += 1;
+    }
+    if task_type.is_some() {
+        set_clauses.push(format!("task_type = ${param_idx}"));
+        param_idx += 1;
+    }
+    if description.is_some() {
+        set_clauses.push(format!(
+            "description = ${param_idx}, summary = ${}",
+            param_idx + 1
+        ));
+        param_idx += 2;
+    }
+    if description_embedding.is_some() {
+        set_clauses.push(format!("description_embedding = ${param_idx}"));
+    }
+    if set_clauses.is_empty() {
+        return Ok(false);
+    }
+
+    let sql = format!(
+        "UPDATE ai_memory.tasks SET {} WHERE id = $1",
+        set_clauses.join(", ")
+    );
+
+    let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
+    let mut query = sqlx::query(&sql).bind(id);
+    if let Some(p) = &priority {
+        query = query.bind(p.as_deref());
+    }
+    if let Some(tt) = &task_type {
+        query = query.bind(tt.as_deref());
+    }
+    if let Some(desc) = description {
+        let summary = generate_summary(desc);
+        query = query.bind(desc);
+        query = query.bind(summary);
+    }
+    if emb.is_some() {
+        query = query.bind(emb.as_ref());
+    }
+
+    let result = query.execute(pool).await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
@@ -67,7 +143,7 @@ pub async fn list_tasks(
 ) -> Result<Vec<Task>, sqlx::Error> {
     match status {
         Some(s) => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at",
         )
         .bind(project_id)
@@ -75,7 +151,7 @@ pub async fn list_tasks(
         .fetch_all(pool)
         .await,
         None => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -219,18 +295,212 @@ pub async fn get_task_stats(
     }
 }
 
+pub fn generate_summary(description: &str) -> String {
+    if description.chars().count() <= 120 {
+        description.to_string()
+    } else {
+        let mut s: String = description.chars().take(117).collect();
+        s.push_str("...");
+        s
+    }
+}
+
+pub async fn count_tasks(
+    pool: &PgPool,
+    project_id: Uuid,
+    status: Option<TaskStatus>,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = match status {
+        Some(s) => {
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1 AND status = $2",
+            )
+            .bind(project_id)
+            .bind(&s)
+            .fetch_one(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1")
+                .bind(project_id)
+                .fetch_one(pool)
+                .await?
+        }
+    };
+    Ok(row.0)
+}
+
+pub async fn list_tasks_paginated(
+    pool: &PgPool,
+    project_id: Uuid,
+    status: Option<TaskStatus>,
+    sort_col: &str,
+    sort_dir: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Task>, sqlx::Error> {
+    let col = match sort_col {
+        "summary" | "priority" | "task_type" | "status" | "created_at" => sort_col,
+        _ => "created_at",
+    };
+    let dir = if sort_dir.eq_ignore_ascii_case("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    };
+
+    let sql = match status {
+        Some(_) => format!(
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+             created_at, completed_at, priority, task_type, summary, description_embedding \
+             FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
+             ORDER BY {col} {dir} NULLS LAST LIMIT $3 OFFSET $4"
+        ),
+        None => format!(
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+             created_at, completed_at, priority, task_type, summary, description_embedding \
+             FROM ai_memory.tasks WHERE project_id = $1 \
+             ORDER BY {col} {dir} NULLS LAST LIMIT $2 OFFSET $3"
+        ),
+    };
+
+    match status {
+        Some(s) => {
+            sqlx::query_as(&sql)
+                .bind(project_id)
+                .bind(&s)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+        None => {
+            sqlx::query_as(&sql)
+                .bind(project_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+    }
+}
+
+/// Direct children only (depth=1), not recursive.
+pub async fn list_subtasks(pool: &PgPool, parent_task_id: Uuid) -> Result<Vec<Task>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+         created_at, completed_at, priority, task_type, summary, description_embedding \
+         FROM ai_memory.tasks WHERE parent_task_id = $1 ORDER BY created_at",
+    )
+    .bind(parent_task_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Returns true if parent has subtasks AND all are completed/abandoned
+pub async fn all_subtasks_done(pool: &PgPool, parent_task_id: Uuid) -> Result<bool, sqlx::Error> {
+    let row: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), \
+         COUNT(*) FILTER (WHERE status IN ('completed', 'abandoned')) \
+         FROM ai_memory.tasks WHERE parent_task_id = $1",
+    )
+    .bind(parent_task_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0 > 0 && row.0 == row.1)
+}
+
+pub async fn batch_delete_tasks(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM ai_memory.tasks WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn batch_update_task_status(
+    pool: &PgPool,
+    ids: &[Uuid],
+    status: TaskStatus,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.tasks SET status = $2, \
+         completed_at = CASE WHEN $2 IN ('completed', 'abandoned') THEN NOW() ELSE NULL END \
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(&status)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn complete_task(
     pool: &PgPool,
     id: Uuid,
     resolved_attempt_id: Option<Uuid>,
 ) -> Result<bool, sqlx::Error> {
+    // Guard: only transition non-completed tasks (prevents TOCTOU race on concurrent rollup)
     let result = sqlx::query(
         "UPDATE ai_memory.tasks SET status = 'completed', completed_at = NOW(), \
-         resolved_attempt_id = COALESCE($2, resolved_attempt_id) WHERE id = $1",
+         resolved_attempt_id = COALESCE($2, resolved_attempt_id) \
+         WHERE id = $1 AND status != 'completed'",
     )
     .bind(id)
     .bind(resolved_attempt_id)
     .execute(pool)
     .await?;
-    Ok(result.rows_affected() > 0)
+
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    // Auto-resolve attempts only after successful status transition
+    let auto_accepted = super::attempts::resolve_attempts_on_complete(pool, id).await?;
+    if resolved_attempt_id.is_none() {
+        if let Some(attempt_id) = auto_accepted {
+            sqlx::query(
+                "UPDATE ai_memory.tasks SET resolved_attempt_id = $2 \
+                 WHERE id = $1 AND resolved_attempt_id IS NULL",
+            )
+            .bind(id)
+            .bind(attempt_id)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    Ok(true)
+}
+
+/// Walk up the parent chain, auto-completing each ancestor whose subtasks are all done.
+/// Returns the number of parents rolled up. Caps at 10 levels.
+pub async fn try_rollup_parents(pool: &PgPool, task_id: Uuid) -> u32 {
+    let mut current_id = task_id;
+    let mut rolled = 0u32;
+    for _ in 0..10 {
+        let task = match get_task(pool, current_id).await {
+            Ok(Some(t)) => t,
+            _ => break,
+        };
+        let parent_id = match task.parent_task_id {
+            Some(pid) => pid,
+            None => break,
+        };
+        match all_subtasks_done(pool, parent_id).await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, parent_id = %parent_id, "rollup check failed");
+                break;
+            }
+        }
+        if let Err(e) = complete_task(pool, parent_id, None).await {
+            tracing::warn!(error = %e, parent_id = %parent_id, "rollup complete failed");
+            break;
+        }
+        rolled += 1;
+        current_id = parent_id;
+    }
+    rolled
 }

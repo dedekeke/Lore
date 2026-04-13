@@ -58,7 +58,7 @@ async fn test_full_task_lifecycle() {
         .unwrap();
 
     let task_result = server
-        .start_task("implement feature X".into(), None)
+        .start_task("implement feature X".into(), None, None, None)
         .await
         .unwrap();
     let task_id = extract_json(&task_result)["task_id"]
@@ -107,16 +107,71 @@ async fn test_remember_and_recall_rules() {
         .unwrap();
 
     server
-        .remember_rule("fact".into(), "Rust is a systems language".into())
+        .remember_rule("fact".into(), "Rust is a systems language".into(), None)
         .await
         .unwrap();
 
     let recalled = server
-        .recall_rules("systems language".into(), Some(10), None)
+        .recall_rules("systems language".into(), Some(10), None, None, None)
         .await
         .unwrap();
     let rules = extract_json(&recalled);
     assert!(!rules.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_recall_rules_cross_project() {
+    let (server, pool, _c) = setup_server().await;
+
+    // Create second project directly
+    let other_pid = lore::db::projects::create_project(&pool, "other-proj", "/other")
+        .await
+        .unwrap();
+    // Need embedding matching server's fake provider (384 dim)
+    let emb = vec![0.5_f32; 384];
+    lore::db::semantic::create_rule(
+        &pool,
+        other_pid,
+        lore::db::RuleCategory::Fact,
+        "rust memory safety",
+        Some(&emb),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    server
+        .switch_project(Some("current-proj".into()), Some("/cur".into()))
+        .await
+        .unwrap();
+
+    // Without cross_project: other proj rule not visible
+    let local = server
+        .recall_rules(
+            "rust memory safety".into(),
+            Some(10),
+            None,
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+    let local_rules = extract_json(&local);
+    assert!(local_rules.as_array().unwrap().is_empty());
+
+    // With cross_project: visible
+    let cross = server
+        .recall_rules(
+            "rust memory safety".into(),
+            Some(10),
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+    let cross_rules = extract_json(&cross);
+    assert!(!cross_rules.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -129,7 +184,7 @@ async fn test_forget_rule() {
         .unwrap();
 
     let result = server
-        .remember_rule("preference".into(), "use tabs".into())
+        .remember_rule("preference".into(), "use tabs".into(), None)
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -139,7 +194,7 @@ async fn test_forget_rule() {
 
     server.forget_rule(rule_id).await.unwrap();
 
-    let list = server.list_rules(None).await.unwrap();
+    let list = server.list_rules(None, None).await.unwrap();
     assert!(extract_json(&list).as_array().unwrap().is_empty());
 }
 
@@ -152,7 +207,7 @@ async fn test_export_memory() {
         .await
         .unwrap();
     server
-        .remember_rule("fact".into(), "test fact".into())
+        .remember_rule("fact".into(), "test fact".into(), None)
         .await
         .unwrap();
 
@@ -179,7 +234,10 @@ async fn test_get_task_stats() {
     assert_eq!(json["summary"]["total_tasks"], 0);
 
     // Create task with attempts
-    let task = server.start_task("stats task".into(), None).await.unwrap();
+    let task = server
+        .start_task("stats task".into(), None, None, None)
+        .await
+        .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let attempt = server
@@ -225,7 +283,10 @@ async fn test_abandon_task() {
         .await
         .unwrap();
 
-    let task = server.start_task("abandon me".into(), None).await.unwrap();
+    let task = server
+        .start_task("abandon me".into(), None, None, None)
+        .await
+        .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let result = server
@@ -249,8 +310,14 @@ async fn test_list_tasks() {
         .await
         .unwrap();
 
-    server.start_task("task A".into(), None).await.unwrap();
-    server.start_task("task B".into(), None).await.unwrap();
+    server
+        .start_task("task A".into(), None, None, None)
+        .await
+        .unwrap();
+    server
+        .start_task("task B".into(), None, None, None)
+        .await
+        .unwrap();
 
     let list = server.list_tasks(None).await.unwrap();
     let tasks = extract_json(&list);
@@ -270,7 +337,7 @@ async fn test_update_rule() {
         .unwrap();
 
     let result = server
-        .remember_rule("fact".into(), "original content".into())
+        .remember_rule("fact".into(), "original content".into(), None)
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -283,12 +350,16 @@ async fn test_update_rule() {
             rule_id.clone(),
             Some("lesson".into()),
             Some("updated content".into()),
+            None,
         )
         .await
         .unwrap();
     assert!(extract_json(&updated)["updated"].as_bool().unwrap());
 
-    let list = server.list_rules(Some("lesson".into())).await.unwrap();
+    let list = server
+        .list_rules(Some("lesson".into()), None)
+        .await
+        .unwrap();
     let rules = extract_json(&list).as_array().unwrap().clone();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0]["content"], "updated content");
@@ -321,7 +392,10 @@ async fn test_generate_handoff() {
         .await
         .unwrap();
 
-    server.start_task("active task".into(), None).await.unwrap();
+    server
+        .start_task("active task".into(), None, None, None)
+        .await
+        .unwrap();
 
     let result = server.generate_handoff(Some(5000)).await.unwrap();
     let text = result
@@ -345,10 +419,48 @@ async fn test_get_next_steps() {
         .await
         .unwrap();
 
-    let result = server.get_next_steps().await.unwrap();
+    let result = server.get_next_steps(None).await.unwrap();
     let json = extract_json(&result);
     assert!(json["project"].is_object());
     assert!(json["tasks"].is_array());
+}
+
+#[tokio::test]
+async fn test_get_next_steps_l0_tier() {
+    let (server, _pool, _c) = setup_server().await;
+
+    server
+        .switch_project(Some("l0-test".into()), Some("/tmp".into()))
+        .await
+        .unwrap();
+    server
+        .start_task("active one".into(), None, None, None)
+        .await
+        .unwrap();
+
+    let result = server.get_next_steps(Some("L0".into())).await.unwrap();
+    let json = extract_json(&result);
+
+    // L0 returns counts only — no per-task payload
+    assert!(json["project"].is_object());
+    assert_eq!(json["active_task_count"].as_i64().unwrap(), 1);
+    assert_eq!(json["blocked_task_count"].as_i64().unwrap(), 0);
+    assert_eq!(json["lesson_count"].as_i64().unwrap(), 0);
+    assert!(json.get("active_tasks").is_none());
+    assert!(json.get("recent_attempts").is_none());
+}
+
+#[tokio::test]
+async fn test_get_next_steps_l0_case_insensitive() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(Some("l0-ci".into()), Some("/tmp".into()))
+        .await
+        .unwrap();
+
+    let result = server.get_next_steps(Some("l0".into())).await.unwrap();
+    let json = extract_json(&result);
+    assert!(json["active_task_count"].is_number());
 }
 
 #[tokio::test]
@@ -360,7 +472,10 @@ async fn test_log_context_wipe() {
         .await
         .unwrap();
 
-    let task = server.start_task("wipe task".into(), None).await.unwrap();
+    let task = server
+        .start_task("wipe task".into(), None, None, None)
+        .await
+        .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let result = server.log_context_wipe(task_id, 10000, None).await.unwrap();

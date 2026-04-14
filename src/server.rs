@@ -481,6 +481,32 @@ impl LoreServer {
         Self::json_content(&rules)
     }
 
+    #[tool(
+        description = "Find near-duplicate rules (cosine >= 0.88). Review the pairs and use forget_rule or update_rule to resolve."
+    )]
+    pub async fn get_duplicate_rules(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Max pairs to return (default 20)")]
+        limit: Option<i64>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let pairs =
+            db::semantic::find_duplicate_clusters(self.pool(), project_id, limit.unwrap_or(20))
+                .await
+                .map_err(Self::db_err)?;
+        if pairs.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "duplicate_pairs": [] }),
+                "No near-duplicate rules found.",
+            );
+        }
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "duplicate_pairs": pairs }),
+            "Review these pairs. Use forget_rule(supersede=true) to retire duplicates, or update_rule to merge content.",
+        )
+    }
+
     #[tool(description = "Update an existing semantic rule's category and/or content")]
     pub async fn update_rule(
         &self,

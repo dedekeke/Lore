@@ -204,7 +204,7 @@ pub async fn index_codebase(
         .await
         .map_err(IndexError::Db)?;
     if stale_reembedded > 0 {
-        tracing::info!(
+        tracing::debug!(
             stale_reembedded,
             "Marked chunks for re-embedding due to behavior_version bump"
         );

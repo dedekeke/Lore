@@ -115,7 +115,7 @@ impl Config {
 
             mcp_transport,
             mcp_sse_port: parse_warn_or("MCP_SSE_PORT", 3100),
-            log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into()),
+            log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into()),
 
             retention_attempts_days: parse_warn_or("RETENTION_ATTEMPTS_DAYS", 30),
             retention_snapshots_days: parse_warn_or("RETENTION_SNAPSHOTS_DAYS", 7),

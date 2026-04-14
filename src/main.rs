@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let _ = dotenvy::dotenv();
 
-    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
+    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into());
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level)),
@@ -22,7 +22,7 @@ async fn main() {
 
     let pool = match db::create_pool(&config).await {
         Ok(pool) => {
-            tracing::info!("Database pool initialized");
+            tracing::debug!("Database pool initialized");
             pool
         }
         Err(e) => {
@@ -33,7 +33,7 @@ async fn main() {
 
     let embeddings = match embeddings::create_provider(&config) {
         Ok(provider) => {
-            tracing::info!("Embedding provider initialized");
+            tracing::debug!("Embedding provider initialized");
             provider
         }
         Err(e) => {
@@ -66,7 +66,7 @@ async fn main() {
     match config.mcp_transport {
         McpTransport::Stdio => {
             let transport = rmcp::transport::io::stdio();
-            tracing::info!("Lore MCP server listening on stdio");
+            tracing::debug!("Lore MCP server listening on stdio");
             let handle = match server.serve(transport).await {
                 Ok(h) => h,
                 Err(e) => {
@@ -80,7 +80,7 @@ async fn main() {
         }
         McpTransport::Sse => {
             let addr: SocketAddr = ([0, 0, 0, 0], config.mcp_sse_port).into();
-            tracing::info!(%addr, "Lore MCP server listening on SSE");
+            tracing::debug!(%addr, "Lore MCP server listening on SSE");
             let sse_server = match rmcp::transport::sse_server::SseServer::serve(addr).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -91,9 +91,9 @@ async fn main() {
             let ct = sse_server.with_service(move || server.clone());
             // Block until ctrl-c
             tokio::signal::ctrl_c().await.ok();
-            tracing::info!("Shutting down SSE server");
+            tracing::debug!("Shutting down SSE server");
             ct.cancel();
         }
     }
-    tracing::info!("Lore MCP server shut down");
+    tracing::debug!("Lore MCP server shut down");
 }

@@ -32,6 +32,8 @@ pub struct SemanticRule {
     pub weight: Option<f64>,
     pub task_type_affinity: Option<Vec<String>>,
     pub tags: Vec<String>,
+    pub valid_from: DateTime<Utc>,
+    pub valid_until: Option<DateTime<Utc>>,
     pub project_name: Option<String>,
 }
 
@@ -61,7 +63,7 @@ pub async fn create_rule(
 #[allow(dead_code)]
 pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id WHERE s.id = $1",
     )
     .bind(id)
@@ -70,11 +72,12 @@ pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, s
 }
 
 pub async fn count_rules(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::Error> {
-    let row: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1")
-            .bind(project_id)
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1 AND valid_until IS NULL",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
     Ok(row.0)
 }
 
@@ -84,7 +87,7 @@ pub async fn count_rules_by_category(
     category: RuleCategory,
 ) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1 AND category = $2",
+        "SELECT COUNT(*) FROM ai_memory.semantic_rules WHERE project_id = $1 AND category = $2 AND valid_until IS NULL",
     )
     .bind(project_id)
     .bind(&category)
@@ -100,9 +103,9 @@ pub async fn list_rules(
     tags: Option<&[String]>,
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
-         WHERE s.project_id = $1 \
+         WHERE s.project_id = $1 AND s.valid_until IS NULL \
          AND ($2::ai_memory.rule_category IS NULL OR s.category = $2) \
          AND ($3::text[] IS NULL OR s.tags @> $3) \
          ORDER BY s.created_at",
@@ -157,6 +160,17 @@ pub async fn delete_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Mark a rule as superseded instead of deleting it
+pub async fn supersede_rule(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET valid_until = NOW() WHERE id = $1 AND valid_until IS NULL",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Weighted hybrid search: RRF (vector + BM25) + category priority + recency decay.
 /// Falls back to vector-only if no query text (scoring degraded to cosine-only).
 #[allow(clippy::too_many_arguments)]
@@ -200,14 +214,14 @@ pub async fn search_rules_hybrid(
         "WITH vector_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
             FROM ai_memory.semantic_rules
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL AND valid_until IS NULL
               AND (expires_at IS NULL OR expires_at > NOW()) {project_filter} {cat_filter} {affinity_filter} {tags_filter}
             LIMIT $3
         ),
         fts_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, to_tsquery('english', $4)) DESC) AS f_rank
             FROM ai_memory.semantic_rules
-            WHERE content_tsv @@ to_tsquery('english', $4)
+            WHERE content_tsv @@ to_tsquery('english', $4) AND valid_until IS NULL
               AND (expires_at IS NULL OR expires_at > NOW()) {project_filter} {cat_filter} {affinity_filter} {tags_filter}
             LIMIT $3
         ),
@@ -224,7 +238,7 @@ pub async fn search_rules_hybrid(
         SELECT s.id, s.project_id, s.category, s.content, s.embedding,
                s.source_task_id, s.created_at, s.expires_at,
                s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags,
-               p.name AS project_name
+               s.valid_from, s.valid_until, p.name AS project_name
         FROM fused
         JOIN ai_memory.semantic_rules s ON s.id = fused.id
         LEFT JOIN ai_memory.projects p ON p.id = s.project_id
@@ -313,9 +327,10 @@ pub async fn search_rules_by_embedding(
     let sql = format!(
         "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, \
          s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, \
-         s.tags, p.name AS project_name \
+         s.tags, s.valid_from, s.valid_until, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
+         AND s.valid_until IS NULL \
          AND ($4::ai_memory.rule_category IS NULL OR s.category = $4) \
          AND ($5::text[] IS NULL OR s.tags @> $5) \
          AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
@@ -342,9 +357,9 @@ pub async fn find_duplicates(
     let emb = Vector::from(embedding.to_vec());
     // cosine distance <=> returns distance (0 = identical), so similarity = 1 - distance
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
-         WHERE s.project_id = $1 AND s.embedding IS NOT NULL \
+         WHERE s.project_id = $1 AND s.embedding IS NOT NULL AND s.valid_until IS NULL \
          AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \
          ORDER BY s.embedding <=> $2::vector LIMIT 5",
     )
@@ -364,9 +379,9 @@ pub async fn find_potential_contradictions(
     let emb = Vector::from(embedding.to_vec());
     // TODO: combine with find_duplicates into single scan (fetch >= CONTRADICTION_FLOOR, partition in app code)
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
-         WHERE s.project_id = $1 AND s.embedding IS NOT NULL \
+         WHERE s.project_id = $1 AND s.embedding IS NOT NULL AND s.valid_until IS NULL \
          AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \
          AND (1.0 - (s.embedding <=> $2::vector)) < $4 \
          ORDER BY s.embedding <=> $2::vector LIMIT 5",

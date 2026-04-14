@@ -203,6 +203,7 @@ pub struct TaskSummary {
     pub description: String,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
+    pub priority: Option<String>,
     pub total_attempts: i64,
     pub pending_attempts: i64,
     pub rejected_attempts: i64,
@@ -225,7 +226,7 @@ pub async fn get_task_summaries(
         .collect();
 
     sqlx::query_as(
-        "SELECT t.id, t.description, t.status, t.created_at, \
+        "SELECT t.id, t.description, t.status, t.created_at, t.priority, \
          COUNT(a.id) AS total_attempts, \
          COUNT(a.id) FILTER (WHERE a.outcome = 'pending') AS pending_attempts, \
          COUNT(a.id) FILTER (WHERE a.outcome = 'rejected') AS rejected_attempts, \

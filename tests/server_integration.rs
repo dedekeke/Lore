@@ -88,7 +88,9 @@ async fn test_full_task_lifecycle() {
     assert!(extract_json(&outcome)["success"].as_bool().unwrap());
 
     let ledger = server.review_ledger(task_id.clone(), None).await.unwrap();
-    assert_eq!(extract_json(&ledger).as_array().unwrap().len(), 1);
+    let ledger_json = extract_json(&ledger);
+    assert_eq!(ledger_json["attempts"].as_array().unwrap().len(), 1);
+    assert!(ledger_json["task_links"].as_array().unwrap().is_empty());
 
     let complete = server
         .complete_task(task_id, Some("always check compilation first".into()), None)

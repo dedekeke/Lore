@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod db;
 pub mod embeddings;
 pub mod indexer;
+pub mod scrubber;
 pub mod server;
 pub mod tools;
 pub mod tree_sitter_chunker;

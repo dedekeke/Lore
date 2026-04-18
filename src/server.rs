@@ -301,6 +301,11 @@ impl LoreServer {
         #[schemars(description = "Optional tags for categorizing the rule")]
         tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let content = if self.config().scrub_secrets {
+            crate::scrubber::scrub(&content)
+        } else {
+            content
+        };
         Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
@@ -576,6 +581,11 @@ impl LoreServer {
         #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
         task_type: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let description = if self.config().scrub_secrets {
+            crate::scrubber::scrub(&description)
+        } else {
+            description
+        };
         Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
         let parent = parent_task_id
@@ -613,6 +623,11 @@ impl LoreServer {
         #[schemars(description = "Optional agent identifier for multi-agent workflows")]
         agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let approach_summary = if self.config().scrub_secrets {
+            crate::scrubber::scrub(&approach_summary)
+        } else {
+            approach_summary
+        };
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
         let git_ref = self.capture_git_ref().await;
@@ -660,6 +675,18 @@ impl LoreServer {
         )]
         code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let reasoning = if self.config().scrub_secrets {
+            crate::scrubber::scrub(&reasoning)
+        } else {
+            reasoning
+        };
+        let code_snippet = code_snippet.map(|cs| {
+            if self.config().scrub_secrets {
+                crate::scrubber::scrub(&cs)
+            } else {
+                cs
+            }
+        });
         Self::validate_len("reasoning", &reasoning, 4096)?;
         if let Some(ref code) = code_snippet {
             Self::validate_len("code_snippet", code, 32768)?;

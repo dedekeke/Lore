@@ -65,6 +65,7 @@ pub struct Config {
     pub capture_git_ref: bool,
     pub codebase_behavior_version: i32,
     pub proactive_context: bool,
+    pub scrub_secrets: bool,
 }
 
 impl Config {
@@ -161,6 +162,10 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
                 == "true",
+            scrub_secrets: env::var("LORE_SCRUB_SECRETS")
+                .unwrap_or_else(|_| "true".into())
+                .to_lowercase()
+                != "false",
         }
     }
 }
@@ -219,6 +224,7 @@ mod tests {
             "CAPTURE_GIT_REF",
             "CODEBASE_BEHAVIOR_VERSION",
             "LORE_PROACTIVE_CONTEXT",
+            "LORE_SCRUB_SECRETS",
         ] {
             std::env::remove_var(key);
         }
@@ -238,6 +244,7 @@ mod tests {
         assert_eq!(cfg.default_project_name, "default");
         assert!(cfg.disabled_tools.is_empty());
         assert!(!cfg.capture_git_ref);
+        assert!(cfg.scrub_secrets);
     }
 
     #[test]

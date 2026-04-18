@@ -2103,6 +2103,73 @@ impl LoreServer {
             )
         }
     }
+
+    #[tool(
+        description = "Run Louvain community detection on codebase edges to identify module clusters. Assigns community_id to code_chunks based on call/import graph structure. Run after index_codebase to detect module boundaries."
+    )]
+    pub async fn detect_communities(&self) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let result = crate::community::detect_communities(self.pool(), project_id)
+            .await
+            .map_err(|e| rmcp::Error::internal_error(e, None))?;
+        Self::json_content_with_nudge(
+            &result,
+            "Run after index_codebase to detect module boundaries. Use get_community_members to inspect a community.",
+        )
+    }
+
+    #[tool(
+        description = "Get all code chunks belonging to a specific community. Returns chunk names, file paths, and line ranges."
+    )]
+    pub async fn get_community_members(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Community ID to inspect")]
+        community_id: i32,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let members = db::communities::get_community_members(self.pool(), project_id, community_id)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "community_id": community_id,
+                "members": members,
+                "count": members.len(),
+            }),
+            "Use detect_cross_community_changes to find impact across modules.",
+        )
+    }
+
+    #[tool(
+        description = "Detect which communities are affected by changes to given files. Returns affected community IDs with member counts. Changes spanning multiple communities may need cross-module review."
+    )]
+    pub async fn detect_cross_community_changes(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "File paths that were changed (relative to project root)")]
+        file_paths: Vec<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let affected =
+            db::communities::get_affected_communities(self.pool(), project_id, &file_paths)
+                .await
+                .map_err(Self::db_err)?;
+        let cross_module = affected.len() > 1;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "file_paths": file_paths,
+                "affected_communities": affected,
+                "community_count": affected.len(),
+                "cross_module_impact": cross_module,
+            }),
+            if cross_module {
+                "Changes span multiple communities — consider cross-module review."
+            } else {
+                "Changes are contained within a single community."
+            },
+        )
+    }
 }
 
 fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
@@ -2406,6 +2473,9 @@ mod tests {
         assert!(names.contains(&"find_callers"));
         assert!(names.contains(&"find_callees"));
         assert!(names.contains(&"shortest_code_path"));
+        assert!(names.contains(&"detect_communities"));
+        assert!(names.contains(&"get_community_members"));
+        assert!(names.contains(&"detect_cross_community_changes"));
     }
 
     #[test]

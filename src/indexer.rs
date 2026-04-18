@@ -414,6 +414,21 @@ pub async fn index_codebase(
         tracing::debug!(edges_inserted, "Inserted codebase edges");
     }
 
+    // Best-effort community detection after edges change
+    if edges_inserted > 0 || !changed_files.is_empty() {
+        match crate::community::detect_communities(pool, project_id).await {
+            Ok(cr) => {
+                tracing::debug!(
+                    communities = cr.num_communities,
+                    assigned = cr.num_assigned,
+                    modularity = format!("{:.4}", cr.modularity),
+                    "Community detection complete"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "Community detection failed (non-fatal)"),
+        }
+    }
+
     Ok(IndexResult {
         files_scanned,
         files_changed,

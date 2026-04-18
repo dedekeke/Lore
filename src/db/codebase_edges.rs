@@ -157,6 +157,21 @@ pub async fn find_shortest_path(
     Ok(vec![])
 }
 
+pub async fn get_all_edges(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<CodebaseEdge>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, source_entity, target_entity, edge_type, \
+         source_file, target_file, created_at \
+         FROM ai_memory.codebase_edges \
+         WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn delete_project_edges(pool: &PgPool, project_id: Uuid) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM ai_memory.codebase_edges WHERE project_id = $1")
         .bind(project_id)

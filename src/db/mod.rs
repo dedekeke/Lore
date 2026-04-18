@@ -1,6 +1,7 @@
 pub mod attempts;
 pub mod codebase;
 pub mod codebase_edges;
+pub mod communities;
 pub mod knowledge_edges;
 pub mod pool;
 pub mod projects;

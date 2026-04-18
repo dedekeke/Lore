@@ -1564,6 +1564,7 @@ dependencies = [
  "ort",
  "petgraph",
  "pgvector",
+ "regex",
  "reqwest",
  "rmcp",
  "serde",

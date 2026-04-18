@@ -183,6 +183,14 @@ impl LoreServer {
         rmcp::Error::internal_error(format!("Database error: {e}"), None)
     }
 
+    fn maybe_scrub(&self, input: String) -> String {
+        if self.config().scrub_secrets {
+            crate::scrubber::scrub(&input)
+        } else {
+            input
+        }
+    }
+
     async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
         if let Some(url) = &self.config().webhook_url {
             let project_name = if let Some(pid) = *self.inner.current_project_id.read().await {
@@ -301,6 +309,7 @@ impl LoreServer {
         #[schemars(description = "Optional tags for categorizing the rule")]
         tags: Option<Vec<String>>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let content = self.maybe_scrub(content);
         Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
@@ -529,6 +538,7 @@ impl LoreServer {
                 None,
             ));
         }
+        let content = content.map(|c| self.maybe_scrub(c));
         if let Some(ref c) = content {
             Self::validate_len("content", c, 4096)?;
         }
@@ -576,6 +586,7 @@ impl LoreServer {
         #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
         task_type: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let description = self.maybe_scrub(description);
         Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
         let parent = parent_task_id
@@ -613,6 +624,7 @@ impl LoreServer {
         #[schemars(description = "Optional agent identifier for multi-agent workflows")]
         agent_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let approach_summary = self.maybe_scrub(approach_summary);
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
         let git_ref = self.capture_git_ref().await;
@@ -660,6 +672,8 @@ impl LoreServer {
         )]
         code_snippet: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let reasoning = self.maybe_scrub(reasoning);
+        let code_snippet = code_snippet.map(|cs| self.maybe_scrub(cs));
         Self::validate_len("reasoning", &reasoning, 4096)?;
         if let Some(ref code) = code_snippet {
             Self::validate_len("code_snippet", code, 32768)?;
@@ -965,6 +979,7 @@ impl LoreServer {
         #[schemars(description = "New description text")]
         description: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let description = description.map(|d| self.maybe_scrub(d));
         if let Some(ref d) = description {
             Self::validate_len("description", d, 4096)?;
         }
@@ -1035,6 +1050,7 @@ impl LoreServer {
         )]
         resolved_attempt_id: Option<String>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let lesson = lesson.map(|l| self.maybe_scrub(l));
         if let Some(ref l) = lesson {
             Self::validate_len("lesson", l, 4096)?;
         }
@@ -1103,6 +1119,7 @@ impl LoreServer {
         #[schemars(description = "If true, save the reason as a Lesson rule")]
         save_lesson: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
+        let reason = self.maybe_scrub(reason);
         Self::validate_len("reason", &reason, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
         let success = db::tasks::abandon_task(self.pool(), tid)

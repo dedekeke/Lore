@@ -209,6 +209,43 @@ impl LoreServer {
         self.inner.tool_call_count.store(0, Ordering::Relaxed);
     }
 
+    /// Urgency score: base_priority + rejection_penalty + staleness.
+    /// Returns (score, human-readable explanation).
+    fn score_task(
+        summary: &db::tasks::TaskSummary,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (f64, String) {
+        let base = match summary.priority.as_deref() {
+            Some("P1") => 4.0,
+            Some("P2") => 3.0,
+            Some("P3") => 2.0,
+            Some("P4") => 1.0,
+            _ => 1.0,
+        };
+        let rejection_penalty = summary.rejected_attempts as f64 * 0.3;
+        let staleness_days = (now - summary.created_at).num_hours() as f64 / 24.0;
+        let staleness_score = staleness_days * 0.1;
+        // blocked_dependents deferred until task_links table exists
+        let total = base + rejection_penalty + staleness_score;
+
+        let mut parts = Vec::new();
+        if let Some(p) = &summary.priority {
+            parts.push(format!("{p}={base:.1}"));
+        }
+        if summary.rejected_attempts > 0 {
+            parts.push(format!("rejections={rejection_penalty:.1}"));
+        }
+        if staleness_days >= 1.0 {
+            parts.push(format!("stale={staleness_score:.1}"));
+        }
+        let explanation = if parts.is_empty() {
+            "base".to_string()
+        } else {
+            parts.join("+")
+        };
+        (total, explanation)
+    }
+
     fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
         let json = serde_json::to_string_pretty(val)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
@@ -1303,33 +1340,44 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        // Only show most recent 5 lessons
         let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
 
-        // Build action items
+        // Score and rank tasks by urgency
+        let now = chrono::Utc::now();
+        let mut scored: Vec<_> = summaries
+            .iter()
+            .map(|s| {
+                let (score, explanation) = Self::score_task(s, now);
+                (s, score, explanation)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Build action items from scored order
         let mut actions: Vec<String> = Vec::new();
-        for s in &summaries {
-            match s.status {
+        for (s, score, explanation) in &scored {
+            let action = match s.status {
                 db::TaskStatus::Active if s.pending_attempts > 0 => {
-                    actions.push(format!(
-                        "Task '{}' has {} pending attempt(s) awaiting outcome resolution",
+                    format!(
+                        "[score={score:.2}] Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
                         s.description, s.pending_attempts
-                    ));
+                    )
                 }
                 db::TaskStatus::Active => {
-                    actions.push(format!(
-                        "Task '{}' is active ({} attempts, {} rejected) — propose next approach",
+                    format!(
+                        "[score={score:.2}] Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
                         s.description, s.total_attempts, s.rejected_attempts
-                    ));
+                    )
                 }
                 db::TaskStatus::Blocked => {
-                    actions.push(format!(
-                        "Task '{}' is BLOCKED — needs unblocking before progress",
+                    format!(
+                        "[score={score:.2}] Task '{}' is BLOCKED — needs unblocking ({explanation})",
                         s.description
-                    ));
+                    )
                 }
-                _ => {}
-            }
+                _ => continue,
+            };
+            actions.push(action);
         }
         if actions.is_empty() {
             actions.push(
@@ -1986,5 +2034,52 @@ mod tests {
         assert!(!names.contains(&"forget_rule"));
         assert!(!names.contains(&"export_memory"));
         assert!(names.contains(&"remember_rule"));
+    }
+
+    #[test]
+    fn test_score_task_base_priority() {
+        let now = chrono::Utc::now();
+        let make = |priority: Option<&str>, rejected: i64| db::tasks::TaskSummary {
+            id: uuid::Uuid::new_v4(),
+            description: "test".into(),
+            status: db::TaskStatus::Active,
+            created_at: now,
+            priority: priority.map(|s| s.to_string()),
+            total_attempts: 0,
+            pending_attempts: 0,
+            rejected_attempts: rejected,
+            accepted_attempts: 0,
+        };
+
+        let (s1, _) = LoreServer::score_task(&make(Some("P1"), 0), now);
+        let (s2, _) = LoreServer::score_task(&make(Some("P2"), 0), now);
+        let (s4, _) = LoreServer::score_task(&make(None, 0), now);
+        assert!(s1 > s2);
+        assert!(s2 > s4);
+
+        // Rejections add 0.3 each
+        let (sr, _) = LoreServer::score_task(&make(None, 3), now);
+        assert!((sr - (1.0 + 0.9)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_score_task_staleness() {
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::days(10);
+        let summary = db::tasks::TaskSummary {
+            id: uuid::Uuid::new_v4(),
+            description: "stale".into(),
+            status: db::TaskStatus::Active,
+            created_at: old,
+            priority: None,
+            total_attempts: 0,
+            pending_attempts: 0,
+            rejected_attempts: 0,
+            accepted_attempts: 0,
+        };
+        let (score, explanation) = LoreServer::score_task(&summary, now);
+        // base(1.0) + staleness(10 * 0.1 = 1.0) = 2.0
+        assert!((score - 2.0).abs() < 0.1);
+        assert!(explanation.contains("stale"));
     }
 }

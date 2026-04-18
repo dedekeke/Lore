@@ -1832,6 +1832,146 @@ impl LoreServer {
     }
 
     #[tool(
+        description = "Summarize the current session via Gemini. Fetches active + blocked tasks, recent attempts, and recent lessons, then returns structured JSON { investigated, learned, completed, blocked, next_steps }. Optional save_as_lesson persists the learned bullets as a Lesson rule. Requires GEMINI_API_KEY."
+    )]
+    pub async fn generate_session_summary(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Max tasks to include (default 10, max 25)")]
+        max_tasks: Option<i64>,
+        #[tool(param)]
+        #[schemars(description = "Max attempts per task to include (default 5, max 10)")]
+        max_attempts_per_task: Option<i64>,
+        #[tool(param)]
+        #[schemars(
+            description = "If true, save the 'learned' bullets as a single Lesson rule (default false)"
+        )]
+        save_as_lesson: Option<bool>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let project_id = self.project_id().await?;
+        let max_tasks = max_tasks.unwrap_or(10).clamp(1, 25);
+        let max_attempts = max_attempts_per_task.unwrap_or(5).clamp(1, 10);
+        let save_as_lesson = save_as_lesson.unwrap_or(false);
+
+        let api_key = self
+            .config()
+            .gemini_api_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| {
+                rmcp::Error::internal_error(
+                    "GEMINI_API_KEY required for generate_session_summary",
+                    None,
+                )
+            })?;
+
+        let active_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                .await
+                .map_err(Self::db_err)?;
+        let blocked_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                .await
+                .map_err(Self::db_err)?;
+
+        let mut task_contexts: Vec<TaskContext> = Vec::new();
+        for task in active_tasks
+            .iter()
+            .chain(blocked_tasks.iter())
+            .take(max_tasks as usize)
+        {
+            let attempts = db::attempts::list_attempts(self.pool(), task.id, None)
+                .await
+                .unwrap_or_default();
+            let recent: Vec<AttemptSnippet> = attempts
+                .iter()
+                .rev()
+                .take(max_attempts as usize)
+                .rev()
+                .map(|a| AttemptSnippet {
+                    outcome: format!("{:?}", a.outcome).to_lowercase(),
+                    approach: a.approach_summary.clone(),
+                    reasoning: a.reasoning.clone(),
+                })
+                .collect();
+            task_contexts.push(TaskContext {
+                description: task.description.clone(),
+                status: format!("{:?}", task.status).to_lowercase(),
+                priority: task.priority.clone(),
+                attempts: recent,
+            });
+        }
+
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .unwrap_or_default();
+        let recent_lessons: Vec<String> = lessons
+            .iter()
+            .rev()
+            .take(5)
+            .map(|l| l.content.chars().take(240).collect::<String>())
+            .collect();
+
+        let prompt = build_session_summary_prompt(&task_contexts, &recent_lessons);
+        let raw = call_gemini_for_json(&self.inner.http_client, api_key, &prompt)
+            .await
+            .map_err(|e| {
+                rmcp::Error::internal_error(format!("Gemini request failed: {e}"), None)
+            })?;
+
+        let summary = parse_session_summary(&raw).map_err(|e| {
+            rmcp::Error::internal_error(
+                format!("Failed to parse Gemini response: {e}. Raw: {raw}"),
+                None,
+            )
+        })?;
+
+        let mut saved_lesson_id: Option<String> = None;
+        if save_as_lesson && !summary.learned.is_empty() {
+            let content = summary
+                .learned
+                .iter()
+                .map(|l| format!("- {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let content = self.maybe_scrub(content);
+            if content.len() <= 4096 {
+                let embedding = self.embed(&content).await.ok();
+                let id = db::semantic::create_rule(
+                    self.pool(),
+                    project_id,
+                    db::RuleCategory::Lesson,
+                    &content,
+                    embedding.as_deref(),
+                    &[],
+                )
+                .await
+                .map_err(Self::db_err)?;
+                self.inner.cache.invalidate_search();
+                saved_lesson_id = Some(id.to_string());
+            }
+        }
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "investigated": summary.investigated,
+                "learned": summary.learned,
+                "completed": summary.completed,
+                "blocked": summary.blocked,
+                "next_steps": summary.next_steps,
+                "tasks_considered": task_contexts.len(),
+                "saved_lesson_id": saved_lesson_id,
+            }),
+            "Use this summary to brief the next session or hand off to another agent.",
+        )
+    }
+
+    #[tool(
         description = "Index a project's codebase into vector storage for semantic code search. Scans files respecting .gitignore, chunks by language-aware boundaries, embeds via ONNX, stores in pgvector. Incremental: only re-indexes changed files (SHA-256 fingerprinting). Call at session start for fast code retrieval."
     )]
     pub async fn index_codebase(
@@ -2441,6 +2581,149 @@ async fn call_gemini_for_summaries(
     Ok(summaries)
 }
 
+#[derive(Debug)]
+struct AttemptSnippet {
+    outcome: String,
+    approach: String,
+    reasoning: String,
+}
+
+#[derive(Debug)]
+struct TaskContext {
+    description: String,
+    status: String,
+    priority: Option<String>,
+    attempts: Vec<AttemptSnippet>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct SessionSummary {
+    #[serde(default)]
+    investigated: Vec<String>,
+    #[serde(default)]
+    learned: Vec<String>,
+    #[serde(default)]
+    completed: Vec<String>,
+    #[serde(default)]
+    blocked: Vec<String>,
+    #[serde(default)]
+    next_steps: Vec<String>,
+}
+
+fn build_session_summary_prompt(tasks: &[TaskContext], lessons: &[String]) -> String {
+    let mut p = String::from(
+        "You are summarizing a coding session. Output ONLY a single JSON object, no prose, no markdown fences.\n\
+         Schema: {\"investigated\": [string], \"learned\": [string], \"completed\": [string], \"blocked\": [string], \"next_steps\": [string]}.\n\
+         Each array must contain short factual bullets (max 25 words each).\n\
+         - investigated: topics, files, or questions explored this session.\n\
+         - learned: concrete technical insights (bias toward reusable lessons).\n\
+         - completed: tasks/subtasks that reached an accepted outcome.\n\
+         - blocked: tasks stuck on rejections or missing info.\n\
+         - next_steps: what to do next, ordered by priority.\n\n",
+    );
+    if !tasks.is_empty() {
+        p.push_str("## Tasks\n");
+        for (i, t) in tasks.iter().enumerate() {
+            let prio = t.priority.as_deref().unwrap_or("-");
+            p.push_str(&format!(
+                "{}. [{} | {}] {}\n",
+                i + 1,
+                t.status,
+                prio,
+                t.description
+            ));
+            for a in &t.attempts {
+                let reasoning = if a.reasoning.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", a.reasoning)
+                };
+                p.push_str(&format!(
+                    "   - [{}] {}{}\n",
+                    a.outcome, a.approach, reasoning
+                ));
+            }
+        }
+        p.push('\n');
+    }
+    if !lessons.is_empty() {
+        p.push_str("## Recent lessons (context only, do not repeat verbatim)\n");
+        for l in lessons {
+            p.push_str(&format!("- {l}\n"));
+        }
+        p.push('\n');
+    }
+    p.push_str("Return the JSON object now.");
+    p
+}
+
+async fn call_gemini_for_json(
+    client: &reqwest::Client,
+    api_key: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+        api_key
+    );
+    let body = serde_json::json!({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 2048,
+            "responseMimeType": "application/json"
+        }
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gemini API {status}: {text}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
+
+    Ok(json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
+}
+
+fn parse_session_summary(raw: &str) -> Result<SessionSummary, String> {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_start())
+        .unwrap_or(trimmed);
+    let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
+
+    // Fall back to extracting the first balanced { ... } block if leading prose slipped in.
+    let candidate = if stripped.starts_with('{') {
+        stripped.to_string()
+    } else if let (Some(start), Some(end)) = (stripped.find('{'), stripped.rfind('}')) {
+        if end > start {
+            stripped[start..=end].to_string()
+        } else {
+            return Err("no JSON object found".into());
+        }
+    } else {
+        return Err("no JSON object found".into());
+    };
+
+    serde_json::from_str::<SessionSummary>(&candidate).map_err(|e| e.to_string())
+}
+
 impl ServerHandler for LoreServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -2650,8 +2933,8 @@ mod tests {
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
         assert!(
-            tools.len() >= 29,
-            "Expected at least 29 tools, got {}",
+            tools.len() >= 30,
+            "Expected at least 30 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -2671,6 +2954,78 @@ mod tests {
         assert!(names.contains(&"get_community_members"));
         assert!(names.contains(&"detect_cross_community_changes"));
         assert!(names.contains(&"get_file_context"));
+        assert!(names.contains(&"generate_session_summary"));
+    }
+
+    #[test]
+    fn test_session_summary_prompt_includes_tasks_and_lessons() {
+        let tasks = vec![TaskContext {
+            description: "Fix login bug".into(),
+            status: "active".into(),
+            priority: Some("P1".into()),
+            attempts: vec![AttemptSnippet {
+                outcome: "rejected".into(),
+                approach: "Retry with exponential backoff".into(),
+                reasoning: "Hit rate limit".into(),
+            }],
+        }];
+        let lessons = vec!["Always scrub secrets before logging".to_string()];
+        let prompt = build_session_summary_prompt(&tasks, &lessons);
+
+        assert!(prompt.contains("Fix login bug"));
+        assert!(prompt.contains("P1"));
+        assert!(prompt.contains("rejected"));
+        assert!(prompt.contains("Hit rate limit"));
+        assert!(prompt.contains("Always scrub secrets"));
+        assert!(prompt.contains("investigated"));
+        assert!(prompt.contains("next_steps"));
+    }
+
+    #[test]
+    fn test_session_summary_prompt_omits_empty_sections() {
+        let prompt = build_session_summary_prompt(&[], &[]);
+        assert!(!prompt.contains("## Tasks"));
+        assert!(!prompt.contains("## Recent lessons"));
+        assert!(prompt.contains("Return the JSON object now."));
+    }
+
+    #[test]
+    fn test_parse_session_summary_plain_json() {
+        let raw = r#"{"investigated":["a","b"],"learned":["l1"],"completed":[],"blocked":[],"next_steps":["n1"]}"#;
+        let s = parse_session_summary(raw).unwrap();
+        assert_eq!(s.investigated, vec!["a", "b"]);
+        assert_eq!(s.learned, vec!["l1"]);
+        assert_eq!(s.next_steps, vec!["n1"]);
+    }
+
+    #[test]
+    fn test_parse_session_summary_with_markdown_fence() {
+        let raw = "```json\n{\"learned\":[\"x\"]}\n```";
+        let s = parse_session_summary(raw).unwrap();
+        assert_eq!(s.learned, vec!["x"]);
+    }
+
+    #[test]
+    fn test_parse_session_summary_with_leading_prose() {
+        let raw = "Sure thing! Here is the summary:\n{\"completed\":[\"task 1\"]}\nDone.";
+        let s = parse_session_summary(raw).unwrap();
+        assert_eq!(s.completed, vec!["task 1"]);
+    }
+
+    #[test]
+    fn test_parse_session_summary_missing_fields_default_empty() {
+        let s = parse_session_summary("{}").unwrap();
+        assert!(s.investigated.is_empty());
+        assert!(s.learned.is_empty());
+        assert!(s.completed.is_empty());
+        assert!(s.blocked.is_empty());
+        assert!(s.next_steps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_session_summary_invalid_returns_err() {
+        assert!(parse_session_summary("not json at all").is_err());
+        assert!(parse_session_summary("{bad}").is_err());
     }
 
     #[test]

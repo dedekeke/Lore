@@ -708,9 +708,58 @@ impl LoreServer {
         let attempts = db::attempts::list_attempts(self.pool(), tid, filter)
             .await
             .map_err(Self::db_err)?;
+        let links = db::task_links::get_links_for_task(self.pool(), tid)
+            .await
+            .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
-            &attempts,
+            &serde_json::json!({
+                "attempts": attempts,
+                "task_links": links,
+            }),
             "Use the above failures to avoid repeating mistakes. Call propose_attempt with a new approach.",
+        )
+    }
+
+    #[tool(
+        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of."
+    )]
+    pub async fn link_tasks(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the source task")]
+        source_task_id: String,
+        #[tool(param)]
+        #[schemars(description = "UUID of the target task")]
+        target_task_id: String,
+        #[tool(param)]
+        #[schemars(description = "Link type: blocks, related_to, caused_by, or duplicate_of")]
+        link_type: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let source = Self::parse_uuid(&source_task_id)?;
+        let target = Self::parse_uuid(&target_task_id)?;
+        let valid_types = ["blocks", "related_to", "caused_by", "duplicate_of"];
+        let lt = link_type.to_lowercase();
+        if !valid_types.contains(&lt.as_str()) {
+            return Err(rmcp::Error::invalid_params(
+                format!(
+                    "Invalid link_type '{lt}'. Must be one of: {}",
+                    valid_types.join(", ")
+                ),
+                None,
+            ));
+        }
+        if source == target {
+            return Err(rmcp::Error::invalid_params(
+                "Cannot link a task to itself",
+                None,
+            ));
+        }
+        let id = db::task_links::create_link(self.pool(), source, target, &lt)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "link_id": id.to_string() }),
+            "Link created. Continue with your current task.",
         )
     }
 
@@ -2017,6 +2066,7 @@ mod tests {
         assert!(names.contains(&"remember_rule"));
         assert!(names.contains(&"forget_rule"));
         assert!(names.contains(&"generate_handoff"));
+        assert!(names.contains(&"link_tasks"));
     }
 
     #[test]

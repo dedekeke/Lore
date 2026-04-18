@@ -1832,7 +1832,7 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Summarize the current session via Gemini. Fetches active + blocked tasks, recent attempts, and recent lessons, then returns structured JSON { investigated, learned, completed, blocked, next_steps }. Optional save_as_lesson persists the learned bullets as a Lesson rule. Requires GEMINI_API_KEY."
+        description = "Fetch a structured session briefing: active + blocked tasks with recent attempts, plus recent lessons. Returns raw data plus a `client_prompt` and JSON schema so the MCP client LLM can synthesize the summary itself (no external LLM needed). If the client wants to persist the distilled lessons, it should call `remember_rule` with category='lesson' afterward."
     )]
     pub async fn generate_session_summary(
         &self,
@@ -1842,28 +1842,10 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Max attempts per task to include (default 5, max 10)")]
         max_attempts_per_task: Option<i64>,
-        #[tool(param)]
-        #[schemars(
-            description = "If true, save the 'learned' bullets as a single Lesson rule (default false)"
-        )]
-        save_as_lesson: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
         let max_tasks = max_tasks.unwrap_or(10).clamp(1, 25);
         let max_attempts = max_attempts_per_task.unwrap_or(5).clamp(1, 10);
-        let save_as_lesson = save_as_lesson.unwrap_or(false);
-
-        let api_key = self
-            .config()
-            .gemini_api_key
-            .as_deref()
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| {
-                rmcp::Error::internal_error(
-                    "GEMINI_API_KEY required for generate_session_summary",
-                    None,
-                )
-            })?;
 
         let active_tasks =
             db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
@@ -1917,57 +1899,34 @@ impl LoreServer {
             .map(|l| l.content.chars().take(240).collect::<String>())
             .collect();
 
-        let prompt = build_session_summary_prompt(&task_contexts, &recent_lessons);
-        let raw = call_gemini_for_json(&self.inner.http_client, api_key, &prompt)
-            .await
-            .map_err(|e| {
-                rmcp::Error::internal_error(format!("Gemini request failed: {e}"), None)
-            })?;
+        let tasks_json: Vec<serde_json::Value> = task_contexts
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "description": t.description,
+                    "status": t.status,
+                    "priority": t.priority,
+                    "recent_attempts": t.attempts.iter().map(|a| serde_json::json!({
+                        "outcome": a.outcome,
+                        "approach": a.approach,
+                        "reasoning": a.reasoning,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
 
-        let summary = parse_session_summary(&raw).map_err(|e| {
-            rmcp::Error::internal_error(
-                format!("Failed to parse Gemini response: {e}. Raw: {raw}"),
-                None,
-            )
-        })?;
-
-        let mut saved_lesson_id: Option<String> = None;
-        if save_as_lesson && !summary.learned.is_empty() {
-            let content = summary
-                .learned
-                .iter()
-                .map(|l| format!("- {l}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let content = self.maybe_scrub(content);
-            if content.len() <= 4096 {
-                let embedding = self.embed(&content).await.ok();
-                let id = db::semantic::create_rule(
-                    self.pool(),
-                    project_id,
-                    db::RuleCategory::Lesson,
-                    &content,
-                    embedding.as_deref(),
-                    &[],
-                )
-                .await
-                .map_err(Self::db_err)?;
-                self.inner.cache.invalidate_search();
-                saved_lesson_id = Some(id.to_string());
-            }
-        }
+        let client_prompt = build_session_summary_client_prompt();
+        let schema = session_summary_schema();
 
         Self::json_content_with_nudge(
             &serde_json::json!({
-                "investigated": summary.investigated,
-                "learned": summary.learned,
-                "completed": summary.completed,
-                "blocked": summary.blocked,
-                "next_steps": summary.next_steps,
+                "tasks": tasks_json,
+                "recent_lessons": recent_lessons,
                 "tasks_considered": task_contexts.len(),
-                "saved_lesson_id": saved_lesson_id,
+                "client_prompt": client_prompt,
+                "schema": schema,
             }),
-            "Use this summary to brief the next session or hand off to another agent.",
+            "Synthesize the summary yourself following `client_prompt` and `schema`. Optionally persist the distilled learnings via `remember_rule(category='lesson', content=...)`.",
         )
     }
 
@@ -2126,54 +2085,84 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Generate LLM summaries for indexed code chunks that lack them. Calls Gemini to produce 1-sentence descriptions per function/class. Run after index_codebase to improve high-level search queries."
+        description = "Return up to `limit` indexed code chunks that don't yet have a 1-sentence summary. The client LLM is expected to summarize each chunk and write the results back via `submit_chunk_summaries`. Safe to call repeatedly until `remaining` is 0."
     )]
-    pub async fn generate_summaries(
+    pub async fn list_chunks_needing_summary(
         &self,
         #[tool(param)]
-        #[schemars(description = "Max chunks to summarize per call (default 50, max 100)")]
+        #[schemars(description = "Max chunks to return per call (default 20, max 100)")]
         limit: Option<i64>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
-        let limit = limit.unwrap_or(50).min(100);
+        let limit = limit.unwrap_or(20).clamp(1, 100);
 
         let chunks = db::codebase::get_chunks_needing_summary(self.pool(), project_id, limit)
             .await
             .map_err(Self::db_err)?;
 
-        if chunks.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "All chunks already have summaries.",
-            )]));
+        let payload: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.to_string(),
+                    "language": c.language,
+                    "file_path": c.file_path,
+                    "chunk_name": c.chunk_name,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "content": c.content,
+                })
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "chunks": payload,
+                "remaining_hint": chunks.len(),
+                "client_prompt": "For each chunk, write exactly ONE short sentence (max 15 words) describing what the code does. Then call `submit_chunk_summaries` with two aligned arrays: `ids` (the chunk UUIDs you saw) and `summaries` (your sentences).",
+            }),
+            "Call submit_chunk_summaries with your summaries to persist them.",
+        )
+    }
+
+    #[tool(
+        description = "Persist LLM-generated 1-sentence summaries for indexed code chunks. Pass two parallel arrays: `ids` (chunk UUIDs from `list_chunks_needing_summary`) and `summaries` (one sentence each, max 512 chars). Arrays must be the same length; max 100 pairs per call."
+    )]
+    pub async fn submit_chunk_summaries(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Chunk UUIDs from list_chunks_needing_summary. Max 100.")]
+        ids: Vec<String>,
+        #[tool(param)]
+        #[schemars(description = "One-sentence summaries, aligned 1:1 with `ids`.")]
+        summaries: Vec<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        if ids.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "updated": 0 }),
+                "No summaries submitted.",
+            );
+        }
+        if ids.len() != summaries.len() {
+            return Err(rmcp::Error::invalid_params(
+                "`ids` and `summaries` must have the same length.",
+                None,
+            ));
+        }
+        if ids.len() > 100 {
+            return Err(rmcp::Error::invalid_params(
+                "Too many summaries in one call (max 100).",
+                None,
+            ));
         }
 
-        let api_key = self
-            .config()
-            .gemini_api_key
-            .as_deref()
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| {
-                rmcp::Error::internal_error("GEMINI_API_KEY required for generate_summaries", None)
-            })?;
-
-        let mut updates: Vec<(Uuid, String)> = Vec::new();
-        let mut errors = 0u64;
-
-        // Batch chunks into groups of 10 for efficient LLM calls
-        for batch in chunks.chunks(10) {
-            let prompt = build_summary_prompt(batch);
-            match call_gemini_for_summaries(&self.inner.http_client, api_key, &prompt).await {
-                Ok(summaries) => {
-                    for (chunk, summary) in batch.iter().zip(summaries) {
-                        if !summary.is_empty() {
-                            updates.push((chunk.id, summary));
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "LLM summary batch failed");
-                    errors += batch.len() as u64;
-                }
+        let mut updates: Vec<(Uuid, String)> = Vec::with_capacity(ids.len());
+        for (raw_id, raw_summary) in ids.iter().zip(summaries.iter()) {
+            Self::validate_len("summary", raw_summary, 512)?;
+            let id = Self::parse_uuid(raw_id)?;
+            let summary = self.maybe_scrub(raw_summary.trim().to_string());
+            if !summary.is_empty() {
+                updates.push((id, summary));
             }
         }
 
@@ -2183,11 +2172,10 @@ impl LoreServer {
 
         Self::json_content_with_nudge(
             &serde_json::json!({
-                "summaries_generated": updated,
-                "errors": errors,
-                "remaining": chunks.len() as u64 - updated - errors,
+                "updated": updated,
+                "submitted": ids.len(),
             }),
-            "Summaries improve search quality for high-level queries.",
+            "Run `list_chunks_needing_summary` again to keep filling coverage.",
         )
     }
 
@@ -2505,82 +2493,6 @@ impl LoreServer {
     }
 }
 
-fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
-    let mut prompt = String::from(
-        "For each numbered code snippet below, write exactly ONE short sentence (max 15 words) \
-         describing what the code does. Return one summary per line, numbered to match.\n\n",
-    );
-    for (i, chunk) in chunks.iter().enumerate() {
-        let lang = chunk.language.as_deref().unwrap_or("unknown");
-        prompt.push_str(&format!(
-            "--- Snippet {} ({}, {}:{}-{}) ---\n{}\n\n",
-            i + 1,
-            lang,
-            chunk.file_path,
-            chunk.start_line,
-            chunk.end_line,
-            chunk.content
-        ));
-    }
-    prompt
-}
-
-async fn call_gemini_for_summaries(
-    client: &reqwest::Client,
-    api_key: &str,
-    prompt: &str,
-) -> Result<Vec<String>, String> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-        api_key
-    );
-
-    let body = serde_json::json!({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
-    });
-
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Gemini API {status}: {text}"));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
-
-    let text = json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("");
-
-    let summaries: Vec<String> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            // Strip leading "1. " or "1) " numbering
-            let trimmed = l.trim();
-            if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
-                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-                rest.trim_start_matches(['.', ')', ':', '-', ' '])
-                    .to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .collect();
-
-    Ok(summaries)
-}
-
 #[derive(Debug)]
 struct AttemptSnippet {
     outcome: String,
@@ -2596,132 +2508,31 @@ struct TaskContext {
     attempts: Vec<AttemptSnippet>,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
-struct SessionSummary {
-    #[serde(default)]
-    investigated: Vec<String>,
-    #[serde(default)]
-    learned: Vec<String>,
-    #[serde(default)]
-    completed: Vec<String>,
-    #[serde(default)]
-    blocked: Vec<String>,
-    #[serde(default)]
-    next_steps: Vec<String>,
+fn build_session_summary_client_prompt() -> &'static str {
+    "You are synthesizing a session briefing from structured data the Lore server returned. \
+     Read `tasks` (active/blocked with recent attempts) and `recent_lessons`. \
+     Produce a single JSON object that matches `schema`. No prose, no markdown fences. \
+     Each array entry is a short factual bullet (max 25 words). \
+     - investigated: topics, files, or questions explored. \
+     - learned: concrete technical insights (bias toward reusable lessons). \
+     - completed: tasks/subtasks that reached an accepted outcome. \
+     - blocked: tasks stuck on rejections or missing info. \
+     - next_steps: what to do next, ordered by priority. \
+     If you want to persist distilled lessons, call `remember_rule(category='lesson', content=...)` afterward."
 }
 
-fn build_session_summary_prompt(tasks: &[TaskContext], lessons: &[String]) -> String {
-    let mut p = String::from(
-        "You are summarizing a coding session. Output ONLY a single JSON object, no prose, no markdown fences.\n\
-         Schema: {\"investigated\": [string], \"learned\": [string], \"completed\": [string], \"blocked\": [string], \"next_steps\": [string]}.\n\
-         Each array must contain short factual bullets (max 25 words each).\n\
-         - investigated: topics, files, or questions explored this session.\n\
-         - learned: concrete technical insights (bias toward reusable lessons).\n\
-         - completed: tasks/subtasks that reached an accepted outcome.\n\
-         - blocked: tasks stuck on rejections or missing info.\n\
-         - next_steps: what to do next, ordered by priority.\n\n",
-    );
-    if !tasks.is_empty() {
-        p.push_str("## Tasks\n");
-        for (i, t) in tasks.iter().enumerate() {
-            let prio = t.priority.as_deref().unwrap_or("-");
-            p.push_str(&format!(
-                "{}. [{} | {}] {}\n",
-                i + 1,
-                t.status,
-                prio,
-                t.description
-            ));
-            for a in &t.attempts {
-                let reasoning = if a.reasoning.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", a.reasoning)
-                };
-                p.push_str(&format!(
-                    "   - [{}] {}{}\n",
-                    a.outcome, a.approach, reasoning
-                ));
-            }
-        }
-        p.push('\n');
-    }
-    if !lessons.is_empty() {
-        p.push_str("## Recent lessons (context only, do not repeat verbatim)\n");
-        for l in lessons {
-            p.push_str(&format!("- {l}\n"));
-        }
-        p.push('\n');
-    }
-    p.push_str("Return the JSON object now.");
-    p
-}
-
-async fn call_gemini_for_json(
-    client: &reqwest::Client,
-    api_key: &str,
-    prompt: &str,
-) -> Result<String, String> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-        api_key
-    );
-    let body = serde_json::json!({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 2048,
-            "responseMimeType": "application/json"
-        }
-    });
-
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Gemini API {status}: {text}"));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
-
-    Ok(json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
-}
-
-fn parse_session_summary(raw: &str) -> Result<SessionSummary, String> {
-    let trimmed = raw.trim();
-    let stripped = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .map(|s| s.trim_start())
-        .unwrap_or(trimmed);
-    let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
-
-    // Fall back to extracting the first balanced { ... } block if leading prose slipped in.
-    let candidate = if stripped.starts_with('{') {
-        stripped.to_string()
-    } else if let (Some(start), Some(end)) = (stripped.find('{'), stripped.rfind('}')) {
-        if end > start {
-            stripped[start..=end].to_string()
-        } else {
-            return Err("no JSON object found".into());
-        }
-    } else {
-        return Err("no JSON object found".into());
-    };
-
-    serde_json::from_str::<SessionSummary>(&candidate).map_err(|e| e.to_string())
+fn session_summary_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "investigated": {"type": "array", "items": {"type": "string"}},
+            "learned":      {"type": "array", "items": {"type": "string"}},
+            "completed":    {"type": "array", "items": {"type": "string"}},
+            "blocked":      {"type": "array", "items": {"type": "string"}},
+            "next_steps":   {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["investigated", "learned", "completed", "blocked", "next_steps"],
+    })
 }
 
 impl ServerHandler for LoreServer {
@@ -2955,77 +2766,34 @@ mod tests {
         assert!(names.contains(&"detect_cross_community_changes"));
         assert!(names.contains(&"get_file_context"));
         assert!(names.contains(&"generate_session_summary"));
+        assert!(names.contains(&"list_chunks_needing_summary"));
+        assert!(names.contains(&"submit_chunk_summaries"));
+        assert!(!names.contains(&"generate_summaries"));
     }
 
     #[test]
-    fn test_session_summary_prompt_includes_tasks_and_lessons() {
-        let tasks = vec![TaskContext {
-            description: "Fix login bug".into(),
-            status: "active".into(),
-            priority: Some("P1".into()),
-            attempts: vec![AttemptSnippet {
-                outcome: "rejected".into(),
-                approach: "Retry with exponential backoff".into(),
-                reasoning: "Hit rate limit".into(),
-            }],
-        }];
-        let lessons = vec!["Always scrub secrets before logging".to_string()];
-        let prompt = build_session_summary_prompt(&tasks, &lessons);
-
-        assert!(prompt.contains("Fix login bug"));
-        assert!(prompt.contains("P1"));
-        assert!(prompt.contains("rejected"));
-        assert!(prompt.contains("Hit rate limit"));
-        assert!(prompt.contains("Always scrub secrets"));
-        assert!(prompt.contains("investigated"));
-        assert!(prompt.contains("next_steps"));
+    fn test_session_summary_client_prompt_mentions_schema() {
+        let p = build_session_summary_client_prompt();
+        assert!(p.contains("schema"));
+        assert!(p.contains("investigated"));
+        assert!(p.contains("next_steps"));
+        assert!(p.contains("remember_rule"));
     }
 
     #[test]
-    fn test_session_summary_prompt_omits_empty_sections() {
-        let prompt = build_session_summary_prompt(&[], &[]);
-        assert!(!prompt.contains("## Tasks"));
-        assert!(!prompt.contains("## Recent lessons"));
-        assert!(prompt.contains("Return the JSON object now."));
-    }
-
-    #[test]
-    fn test_parse_session_summary_plain_json() {
-        let raw = r#"{"investigated":["a","b"],"learned":["l1"],"completed":[],"blocked":[],"next_steps":["n1"]}"#;
-        let s = parse_session_summary(raw).unwrap();
-        assert_eq!(s.investigated, vec!["a", "b"]);
-        assert_eq!(s.learned, vec!["l1"]);
-        assert_eq!(s.next_steps, vec!["n1"]);
-    }
-
-    #[test]
-    fn test_parse_session_summary_with_markdown_fence() {
-        let raw = "```json\n{\"learned\":[\"x\"]}\n```";
-        let s = parse_session_summary(raw).unwrap();
-        assert_eq!(s.learned, vec!["x"]);
-    }
-
-    #[test]
-    fn test_parse_session_summary_with_leading_prose() {
-        let raw = "Sure thing! Here is the summary:\n{\"completed\":[\"task 1\"]}\nDone.";
-        let s = parse_session_summary(raw).unwrap();
-        assert_eq!(s.completed, vec!["task 1"]);
-    }
-
-    #[test]
-    fn test_parse_session_summary_missing_fields_default_empty() {
-        let s = parse_session_summary("{}").unwrap();
-        assert!(s.investigated.is_empty());
-        assert!(s.learned.is_empty());
-        assert!(s.completed.is_empty());
-        assert!(s.blocked.is_empty());
-        assert!(s.next_steps.is_empty());
-    }
-
-    #[test]
-    fn test_parse_session_summary_invalid_returns_err() {
-        assert!(parse_session_summary("not json at all").is_err());
-        assert!(parse_session_summary("{bad}").is_err());
+    fn test_session_summary_schema_has_required_fields() {
+        let s = session_summary_schema();
+        let required = s["required"].as_array().unwrap();
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        for f in [
+            "investigated",
+            "learned",
+            "completed",
+            "blocked",
+            "next_steps",
+        ] {
+            assert!(names.contains(&f), "schema missing required field {f}");
+        }
     }
 
     #[test]

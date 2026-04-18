@@ -2085,12 +2085,12 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Return up to `limit` indexed code chunks that don't yet have a 1-sentence summary. The client LLM is expected to summarize each chunk and write the results back via `submit_chunk_summaries`. Safe to call repeatedly until `remaining` is 0."
+        description = "Return up to `limit` indexed code chunks that don't yet have a 1-sentence summary. The client LLM is expected to summarize each chunk and write the results back via `submit_chunk_summaries`. The response includes `returned` (size of this batch) and `remaining_after` (chunks still needing a summary after this call) — loop until `remaining_after` is 0."
     )]
     pub async fn list_chunks_needing_summary(
         &self,
         #[tool(param)]
-        #[schemars(description = "Max chunks to return per call (default 20, max 100)")]
+        #[schemars(description = "Max chunks to return per call (default 20, min 1, max 100)")]
         limit: Option<i64>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let project_id = self.project_id().await?;
@@ -2099,6 +2099,11 @@ impl LoreServer {
         let chunks = db::codebase::get_chunks_needing_summary(self.pool(), project_id, limit)
             .await
             .map_err(Self::db_err)?;
+        let total_pending = db::codebase::count_chunks_needing_summary(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+        let returned = chunks.len() as i64;
+        let remaining_after = (total_pending - returned).max(0);
 
         let payload: Vec<serde_json::Value> = chunks
             .iter()
@@ -2118,10 +2123,11 @@ impl LoreServer {
         Self::json_content_with_nudge(
             &serde_json::json!({
                 "chunks": payload,
-                "remaining_hint": chunks.len(),
+                "returned": returned,
+                "remaining_after": remaining_after,
                 "client_prompt": "For each chunk, write exactly ONE short sentence (max 15 words) describing what the code does. Then call `submit_chunk_summaries` with two aligned arrays: `ids` (the chunk UUIDs you saw) and `summaries` (your sentences).",
             }),
-            "Call submit_chunk_summaries with your summaries to persist them.",
+            "Call submit_chunk_summaries, then call list_chunks_needing_summary again until `remaining_after` is 0.",
         )
     }
 

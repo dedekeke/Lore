@@ -21,6 +21,7 @@ pub struct CodeChunk {
     pub behavior_version: i32,
     pub chunk_name: Option<String>,
     pub chunk_kind: Option<String>,
+    pub community_id: Option<i32>,
 }
 
 /// Get existing file hashes for a project (for incremental indexing)
@@ -185,7 +186,7 @@ pub async fn search_chunks(
     let candidates = if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-             embedding, file_hash, indexed_at, summary, behavior_version, chunk_name, chunk_kind \
+             embedding, file_hash, indexed_at, summary, behavior_version, chunk_name, chunk_kind, community_id \
              FROM ai_memory.code_chunks \
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
@@ -220,7 +221,7 @@ pub async fn search_chunks(
             )
             SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
                    s.content, s.embedding, s.file_hash, s.indexed_at, s.summary, s.behavior_version, \
-                   s.chunk_name, s.chunk_kind
+                   s.chunk_name, s.chunk_kind, s.community_id
             FROM fused
             JOIN ai_memory.code_chunks s ON s.id = fused.id
             ORDER BY fused.rrf_score DESC
@@ -392,7 +393,7 @@ pub async fn get_chunks_needing_summary(
 ) -> Result<Vec<CodeChunk>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-         embedding, file_hash, indexed_at, summary, behavior_version \
+         embedding, file_hash, indexed_at, summary, behavior_version, chunk_name, chunk_kind, community_id \
          FROM ai_memory.code_chunks \
          WHERE project_id = $1 AND summary IS NULL \
          ORDER BY indexed_at DESC LIMIT $2",
@@ -485,6 +486,7 @@ mod tests {
             behavior_version: 1,
             chunk_name: None,
             chunk_kind: None,
+            community_id: None,
         }
     }
 

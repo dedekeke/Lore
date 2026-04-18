@@ -2229,6 +2229,10 @@ impl LoreServer {
         // Dependencies: callers/callees for first 5 named chunks
         let mut all_callers: Vec<serde_json::Value> = Vec::new();
         let mut all_callees: Vec<serde_json::Value> = Vec::new();
+        let mut seen_callers: std::collections::HashSet<(String, Option<String>)> =
+            std::collections::HashSet::new();
+        let mut seen_callees: std::collections::HashSet<(String, Option<String>)> =
+            std::collections::HashSet::new();
 
         let named_chunks: Vec<_> = chunks
             .iter()
@@ -2237,20 +2241,24 @@ impl LoreServer {
             .collect();
 
         for entity in &named_chunks {
-            if let Ok(callers) =
-                db::codebase_edges::get_callers(self.pool(), project_id, entity).await
-            {
-                for e in callers {
+            let callers = db::codebase_edges::get_callers(self.pool(), project_id, entity)
+                .await
+                .map_err(Self::db_err)?;
+            for e in callers {
+                let key = (e.source_entity.clone(), e.source_file.clone());
+                if seen_callers.insert(key) {
                     all_callers.push(serde_json::json!({
                         "entity": e.source_entity,
                         "file": e.source_file,
                     }));
                 }
             }
-            if let Ok(callees) =
-                db::codebase_edges::get_callees(self.pool(), project_id, entity).await
-            {
-                for e in callees {
+            let callees = db::codebase_edges::get_callees(self.pool(), project_id, entity)
+                .await
+                .map_err(Self::db_err)?;
+            for e in callees {
+                let key = (e.target_entity.clone(), e.target_file.clone());
+                if seen_callees.insert(key) {
                     all_callees.push(serde_json::json!({
                         "entity": e.target_entity,
                         "file": e.target_file,

@@ -55,13 +55,7 @@ cargo build --release
 
 ### Without local embeddings
 
-To skip the local ONNX runtime dependency (smaller binary, faster build):
-
-```bash
-cargo build --release --no-default-features
-```
-
-Set `EMBEDDING_PROVIDER=gemini` and `GEMINI_API_KEY` in your `.env`.
+Skipping the local ONNX runtime (`--no-default-features`) produces a smaller binary but disables embedding generation — all features that rely on vector search (rule recall, failure search, codebase indexing) will error. Build with default features unless you know you don't need them.
 
 ## Configuration
 
@@ -72,9 +66,7 @@ All settings via environment variables (see `.env.example`):
 | `DATABASE_URL`                    | `postgres://lore:password@localhost:5432/ai_memory` | PostgreSQL connection string                    |
 | `DATABASE_MAX_CONNECTIONS`        | `10`                                                | Connection pool size                            |
 | `DATABASE_STATEMENT_TIMEOUT_SECS` | `5`                                                 | Per-query timeout                               |
-| `EMBEDDING_PROVIDER`              | `local`                                             | `local` (ONNX via ort) or `gemini`              |
-| `GEMINI_API_KEY`                  | —                                                   | Required when provider is `gemini`              |
-| `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Embedding model name                            |
+| `EMBEDDING_MODEL`                 | `all-MiniLM-L6-v2`                                  | Local ONNX embedding model name                 |
 | `EMBEDDING_DIMENSIONS`            | `384`                                               | Must match model and DB schema                  |
 | `MCP_TRANSPORT`                   | `stdio`                                             | `stdio` or `sse`                                |
 | `MCP_SSE_PORT`                    | `3100`                                              | SSE port (only when `MCP_TRANSPORT=sse`)        |
@@ -157,9 +149,7 @@ Add to your MCP client config. For Claude Code, create `.mcp.json` in your proje
       "command": "/path/to/lore",
       "env": {
         "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory",
-        "EMBEDDING_PROVIDER": "gemini",
-        "GEMINI_API_KEY": "your-api-key",
-        "EMBEDDING_MODEL": "gemini-embedding-001",
+        "EMBEDDING_MODEL": "all-MiniLM-L6-v2",
         "EMBEDDING_DIMENSIONS": "384"
       }
     }

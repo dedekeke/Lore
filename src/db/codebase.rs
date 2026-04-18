@@ -404,6 +404,21 @@ pub async fn get_chunks_needing_summary(
     .await
 }
 
+/// Count chunks still needing a summary (for pagination in `list_chunks_needing_summary`).
+pub async fn count_chunks_needing_summary(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND summary IS NULL",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
 /// Batch update summaries for code chunks
 pub async fn update_summaries(
     pool: &PgPool,

@@ -8,16 +8,18 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let _ = dotenvy::dotenv();
 
-    // Suppress ONNX runtime verbose memory allocation logs
-    if std::env::var("ORT_LOG_LEVEL").is_err() {
-        std::env::set_var("ORT_LOG_LEVEL", "warning");
-    }
-
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into());
+    // ort emits graph-transformer/allocator spam via `ort::logging` tracing target; force warn.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&log_level))
+        .add_directive("ort=warn".parse().expect("valid ort directive"))
+        .add_directive(
+            "ort::logging=warn"
+                .parse()
+                .expect("valid ort::logging directive"),
+        );
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level)),
-        )
+        .with_env_filter(filter)
         // MCP stdio transport uses stdout for JSON-RPC, so logs must go to stderr
         .with_writer(std::io::stderr)
         .init();

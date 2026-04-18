@@ -459,8 +459,8 @@ async fn test_find_duplicate_clusters() {
     emb_b[0] = 0.51;
     // Orthogonal vector: first half positive, second half negative
     let mut emb_c = vec![1.0_f32; 384];
-    for i in 192..384 {
-        emb_c[i] = -1.0;
+    for item in emb_c.iter_mut().take(384).skip(192) {
+        *item = -1.0;
     }
 
     semantic::create_rule(&pool, pid, RuleCategory::Fact, "rule A", Some(&emb_a), &[])

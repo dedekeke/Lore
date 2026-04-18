@@ -26,9 +26,9 @@ pub async fn create_pool(config: &Config) -> Result<PgPool, sqlx::Error> {
         .connect(&config.database_url)
         .await?;
 
-    tracing::info!("Running database migrations");
+    tracing::debug!("Running database migrations");
     sqlx::migrate!().run(&pool).await?;
-    tracing::info!("Database migrations complete");
+    tracing::debug!("Database migrations complete");
 
     Ok(pool)
 }

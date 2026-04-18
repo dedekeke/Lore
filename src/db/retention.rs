@@ -24,12 +24,12 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
     let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
     loop {
         interval.tick().await;
-        tracing::info!("Running retention cleanup");
+        tracing::debug!("Running retention cleanup");
 
         match escalate_stale_pending(&pool, config.retention_pending_escalation_hours).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Escalated stale pending attempts to unknown")
+                    tracing::debug!(rows = n, "Escalated stale pending attempts to unknown")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to escalate stale pending attempts"),
@@ -37,7 +37,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_unknown_attempts(&pool, config.retention_unknown_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned unknown attempts")
+                    tracing::debug!(rows = n, "Pruned unknown attempts")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune unknown attempts"),
@@ -45,7 +45,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_old_attempts(&pool, config.retention_attempts_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned old attempts")
+                    tracing::debug!(rows = n, "Pruned old attempts")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune old attempts"),
@@ -53,7 +53,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_old_snapshots(&pool, config.retention_snapshots_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned old snapshots")
+                    tracing::debug!(rows = n, "Pruned old snapshots")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune old snapshots"),
@@ -61,7 +61,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match purge_completed_tasks(&pool, config.retention_tasks_archive_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Purged completed tasks")
+                    tracing::debug!(rows = n, "Purged completed tasks")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to purge completed tasks"),
@@ -71,7 +71,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         lessons = n,
                         "Consolidated old accepted attempts into lessons"
                     )

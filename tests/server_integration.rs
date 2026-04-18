@@ -192,7 +192,7 @@ async fn test_forget_rule() {
         .unwrap()
         .to_string();
 
-    server.forget_rule(rule_id).await.unwrap();
+    server.forget_rule(rule_id, None).await.unwrap();
 
     let list = server.list_rules(None, None).await.unwrap();
     assert!(extract_json(&list).as_array().unwrap().is_empty());

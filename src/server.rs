@@ -385,22 +385,40 @@ impl LoreServer {
         Self::json_content_with_nudge(&rules, "Apply these rules to your current task.")
     }
 
-    #[tool(description = "Delete a rule from memory")]
+    #[tool(
+        description = "Delete or supersede a rule. If supersede=true, marks rule as superseded (sets valid_until) instead of deleting — preserving history."
+    )]
     pub async fn forget_rule(
         &self,
         #[tool(param)]
-        #[schemars(description = "UUID of the rule to delete")]
+        #[schemars(description = "UUID of the rule to delete or supersede")]
         rule_id: String,
+        #[tool(param)]
+        #[schemars(
+            description = "If true, mark rule as superseded instead of deleting (default false)"
+        )]
+        supersede: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         let id = Self::parse_uuid(&rule_id)?;
-        let deleted = db::semantic::delete_rule(self.pool(), id)
-            .await
-            .map_err(Self::db_err)?;
-        self.inner.cache.invalidate_search();
-        Self::json_content_with_nudge(
-            &serde_json::json!({ "deleted": deleted }),
-            "Rule removed. Continue with your current task.",
-        )
+        if supersede.unwrap_or(false) {
+            let superseded = db::semantic::supersede_rule(self.pool(), id)
+                .await
+                .map_err(Self::db_err)?;
+            self.inner.cache.invalidate_search();
+            Self::json_content_with_nudge(
+                &serde_json::json!({ "superseded": superseded }),
+                "Rule superseded (valid_until set). It will no longer appear in searches.",
+            )
+        } else {
+            let deleted = db::semantic::delete_rule(self.pool(), id)
+                .await
+                .map_err(Self::db_err)?;
+            self.inner.cache.invalidate_search();
+            Self::json_content_with_nudge(
+                &serde_json::json!({ "deleted": deleted }),
+                "Rule removed. Continue with your current task.",
+            )
+        }
     }
 
     #[tool(description = "List all rules, optionally filtered by category")]

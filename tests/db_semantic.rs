@@ -105,6 +105,76 @@ async fn test_delete_rule() {
 }
 
 #[tokio::test]
+async fn test_supersede_rule_hides_from_list() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let emb = vec![0.5_f32; 384];
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Fact, "old fact", Some(&emb), &[])
+        .await
+        .unwrap();
+
+    // Before supersede: visible in list and search
+    let all = semantic::list_rules(&pool, pid, None, None).await.unwrap();
+    assert_eq!(all.len(), 1);
+
+    let results = semantic::search_rules_by_embedding(&pool, Some(pid), &emb, 10, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    // Supersede
+    assert!(semantic::supersede_rule(&pool, id).await.unwrap());
+
+    // After supersede: hidden from list and search
+    let all = semantic::list_rules(&pool, pid, None, None).await.unwrap();
+    assert_eq!(all.len(), 0);
+
+    let results = semantic::search_rules_by_embedding(&pool, Some(pid), &emb, 10, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 0);
+
+    // Rule still exists in DB (get_rule returns it)
+    let rule = semantic::get_rule(&pool, id).await.unwrap().unwrap();
+    assert!(rule.valid_until.is_some());
+
+    // Superseding again is a no-op
+    assert!(!semantic::supersede_rule(&pool, id).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_supersede_excludes_from_count() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Fact, "f1", None, &[])
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "f2", None, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(semantic::count_rules(&pool, pid).await.unwrap(), 2);
+    assert_eq!(
+        semantic::count_rules_by_category(&pool, pid, RuleCategory::Fact)
+            .await
+            .unwrap(),
+        2
+    );
+
+    semantic::supersede_rule(&pool, id).await.unwrap();
+
+    assert_eq!(semantic::count_rules(&pool, pid).await.unwrap(), 1);
+    assert_eq!(
+        semantic::count_rules_by_category(&pool, pid, RuleCategory::Fact)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn test_search_rules_by_embedding() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();

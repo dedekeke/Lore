@@ -31,8 +31,10 @@ pub async fn detect_communities(
     }
 
     // Build undirected graph: nodes = unique entity names, edges = connections
+    // Track entity -> file mapping for qualified community assignment
     let mut node_map: HashMap<String, u32> = HashMap::new();
     let mut node_names: Vec<String> = Vec::new();
+    let mut entity_files: HashMap<String, String> = HashMap::new();
     let mut graph = UnGraph::<(), ()>::new_undirected();
 
     let get_or_insert = |name: &str,
@@ -49,6 +51,8 @@ pub async fn detect_communities(
         idx
     };
 
+    // Deduplicate edges: same (source, target) pair may appear with different edge_types
+    let mut seen_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
     for edge in &edges {
         let src = get_or_insert(
             &edge.source_entity,
@@ -62,7 +66,14 @@ pub async fn detect_communities(
             &mut node_names,
             &mut graph,
         );
-        if src != tgt {
+        // Track entity -> file for community assignment
+        if let Some(ref f) = edge.source_file {
+            entity_files
+                .entry(edge.source_entity.clone())
+                .or_insert_with(|| f.clone());
+        }
+        let key = (src.min(tgt), src.max(tgt));
+        if src != tgt && seen_edges.insert(key) {
             graph.add_edge(src.into(), tgt.into(), ());
         }
     }
@@ -79,15 +90,17 @@ pub async fn detect_communities(
     let communities = louvain(&graph);
     let modularity = compute_modularity(&graph, &communities);
 
-    // Map node index -> community_id, then node_name -> community_id
-    let mut assignments: Vec<(String, i32)> = Vec::with_capacity(n);
+    // Map graph entities to community_id, qualified by file_path for unique matching
+    let mut assignments: Vec<(String, Option<String>, i32)> = Vec::with_capacity(n);
     for (idx, &comm) in communities.iter().enumerate() {
-        assignments.push((node_names[idx].clone(), comm as i32));
+        let name = &node_names[idx];
+        let file = entity_files.get(name).cloned();
+        assignments.push((name.clone(), file, comm as i32));
     }
 
     let num_communities = {
         let mut seen = std::collections::HashSet::new();
-        for &(_, c) in &assignments {
+        for &(_, _, c) in &assignments {
             seen.insert(c);
         }
         seen.len()
@@ -104,8 +117,9 @@ pub async fn detect_communities(
     })
 }
 
-/// Single-pass Louvain: each node starts in its own community, greedily move to
-/// the neighbor community yielding max modularity gain. Repeat until no moves.
+/// Single-pass Louvain (phase 1 only — no graph coarsening).
+/// Each node starts in its own community, greedily moves to neighbor community
+/// yielding max modularity gain. Repeats until stable. Phase 2 (hierarchy) can be added later.
 pub fn louvain(graph: &UnGraph<(), ()>) -> Vec<usize> {
     let n = graph.node_count();
     let m = graph.edge_count() as f64;
@@ -116,12 +130,10 @@ pub fn louvain(graph: &UnGraph<(), ()>) -> Vec<usize> {
     let two_m = 2.0 * m;
     let mut community: Vec<usize> = (0..n).collect();
 
-    // degree[i] = number of edges incident to node i
     let degree: Vec<f64> = (0..n)
         .map(|i| graph.neighbors(petgraph::graph::NodeIndex::new(i)).count() as f64)
         .collect();
 
-    // Precompute adjacency list for fast neighbor lookup
     let adj: Vec<Vec<usize>> = (0..n)
         .map(|i| {
             graph
@@ -130,6 +142,12 @@ pub fn louvain(graph: &UnGraph<(), ()>) -> Vec<usize> {
                 .collect()
         })
         .collect();
+
+    // Maintain sigma (sum of degrees per community) incrementally — O(1) per move
+    let mut sigma: HashMap<usize, f64> = HashMap::new();
+    for (i, &c) in community.iter().enumerate() {
+        *sigma.entry(c).or_default() += degree[i];
+    }
 
     let mut improved = true;
     let mut iterations = 0;
@@ -143,34 +161,28 @@ pub fn louvain(graph: &UnGraph<(), ()>) -> Vec<usize> {
             let current_comm = community[node];
             let ki = degree[node];
 
-            // Count edges to each neighboring community
+            // Count edges from node to each neighboring community
             let mut comm_edges: HashMap<usize, f64> = HashMap::new();
             for &nb in &adj[node] {
                 *comm_edges.entry(community[nb]).or_default() += 1.0;
             }
 
-            // Modularity gain for moving node from current_comm to target_comm:
-            // delta_Q = [e_target - ki * sigma_target / 2m] - [e_current + ki * sigma_current / 2m]
-            // (simplified Louvain formula)
-            let e_current = comm_edges.get(&current_comm).copied().unwrap_or(0.0);
-
-            // Sum of degrees in each community (excluding node itself for current)
-            let mut sigma: HashMap<usize, f64> = HashMap::new();
-            for (i, &c) in community.iter().enumerate() {
-                *sigma.entry(c).or_default() += degree[i];
-            }
-
+            // Standard Louvain delta-Q formula:
+            // gain(i -> C) = k_{i,C}/m - ki * sigma_C / (2m^2)
+            // loss(i leaving old) = k_{i,old_minus_i}/m - ki * (sigma_old - ki) / (2m^2)
+            // delta_Q = gain - loss
+            let k_i_current = comm_edges.get(&current_comm).copied().unwrap_or(0.0);
             let sigma_current = sigma.get(&current_comm).copied().unwrap_or(0.0) - ki;
 
             let mut best_comm = current_comm;
             let mut best_gain = 0.0;
 
-            for (&target_comm, &e_target) in &comm_edges {
+            for (&target_comm, &k_i_target) in &comm_edges {
                 if target_comm == current_comm {
                     continue;
                 }
                 let sigma_target = sigma.get(&target_comm).copied().unwrap_or(0.0);
-                let gain = (e_target - e_current) / two_m
+                let gain = (k_i_target - k_i_current) / two_m
                     - ki * (sigma_target - sigma_current) / (two_m * two_m);
                 if gain > best_gain {
                     best_gain = gain;
@@ -179,6 +191,9 @@ pub fn louvain(graph: &UnGraph<(), ()>) -> Vec<usize> {
             }
 
             if best_comm != current_comm {
+                // Update sigma incrementally
+                *sigma.entry(current_comm).or_default() -= ki;
+                *sigma.entry(best_comm).or_default() += ki;
                 community[node] = best_comm;
                 improved = true;
             }

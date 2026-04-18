@@ -2112,9 +2112,17 @@ impl LoreServer {
         let result = crate::community::detect_communities(self.pool(), project_id)
             .await
             .map_err(|e| rmcp::Error::internal_error(e, None))?;
+        let communities = db::communities::get_communities(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
-            &result,
-            "Run after index_codebase to detect module boundaries. Use get_community_members to inspect a community.",
+            &serde_json::json!({
+                "num_communities": result.num_communities,
+                "num_assigned": result.num_assigned,
+                "modularity": result.modularity,
+                "communities": communities,
+            }),
+            "Use get_community_members(community_id) to inspect a specific community.",
         )
     }
 

@@ -1,12 +1,13 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Batch update community_id on code_chunks by matching chunk_name.
-/// Returns the number of rows updated.
+/// Batch update community_id on code_chunks by matching (chunk_name, file_path).
+/// Uses file_path when available for unique matching — common names like "new" or "build"
+/// can appear in multiple files.
 pub async fn update_chunk_communities(
     pool: &PgPool,
     project_id: Uuid,
-    assignments: &[(String, i32)],
+    assignments: &[(String, Option<String>, i32)],
 ) -> Result<u64, sqlx::Error> {
     if assignments.is_empty() {
         return Ok(0);
@@ -14,17 +15,20 @@ pub async fn update_chunk_communities(
 
     let mut total = 0u64;
     for batch in assignments.chunks(500) {
-        let names: Vec<&str> = batch.iter().map(|(n, _)| n.as_str()).collect();
-        let ids: Vec<i32> = batch.iter().map(|(_, c)| *c).collect();
+        let names: Vec<&str> = batch.iter().map(|(n, _, _)| n.as_str()).collect();
+        let files: Vec<Option<&str>> = batch.iter().map(|(_, f, _)| f.as_deref()).collect();
+        let ids: Vec<i32> = batch.iter().map(|(_, _, c)| *c).collect();
 
         let result = sqlx::query(
             "UPDATE ai_memory.code_chunks AS c \
              SET community_id = u.community_id \
-             FROM UNNEST($2::text[], $3::int[]) AS u(chunk_name, community_id) \
-             WHERE c.project_id = $1 AND c.chunk_name = u.chunk_name",
+             FROM UNNEST($2::text[], $3::text[], $4::int[]) AS u(chunk_name, file_path, community_id) \
+             WHERE c.project_id = $1 AND c.chunk_name = u.chunk_name \
+             AND (u.file_path IS NULL OR c.file_path = u.file_path)",
         )
         .bind(project_id)
         .bind(&names)
+        .bind(&files)
         .bind(&ids)
         .execute(pool)
         .await?;

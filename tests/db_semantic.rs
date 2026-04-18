@@ -447,3 +447,36 @@ async fn test_search_hybrid_current_project_boost() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].project_id, pb);
 }
+
+#[tokio::test]
+async fn test_find_duplicate_clusters() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    // Two near-identical embeddings (high cosine similarity)
+    let emb_a = vec![0.5_f32; 384];
+    let mut emb_b = vec![0.5_f32; 384];
+    emb_b[0] = 0.51;
+    // Orthogonal vector: first half positive, second half negative
+    let mut emb_c = vec![1.0_f32; 384];
+    for i in 192..384 {
+        emb_c[i] = -1.0;
+    }
+
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "rule A", Some(&emb_a), &[])
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "rule B", Some(&emb_b), &[])
+        .await
+        .unwrap();
+    semantic::create_rule(&pool, pid, RuleCategory::Fact, "rule C", Some(&emb_c), &[])
+        .await
+        .unwrap();
+
+    let pairs = semantic::find_duplicate_clusters(&pool, pid, 10)
+        .await
+        .unwrap();
+    // A and B should be a duplicate pair, C should not match
+    assert_eq!(pairs.len(), 1);
+    assert!(pairs[0].similarity >= 0.88);
+}

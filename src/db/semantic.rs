@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 pub const SIMILARITY_DEDUP_THRESHOLD: f64 = 0.95;
 pub const SIMILARITY_CONTRADICTION_FLOOR: f64 = 0.80;
+pub const SIMILARITY_CLUSTER_THRESHOLD: f64 = 0.88;
 
 #[derive(Debug, Clone, PartialEq, sqlx::Type, serde::Serialize, serde::Deserialize)]
 #[sqlx(type_name = "ai_memory.rule_category", rename_all = "snake_case")]
@@ -390,6 +391,42 @@ pub async fn find_potential_contradictions(
     .bind(&emb)
     .bind(SIMILARITY_CONTRADICTION_FLOOR)
     .bind(SIMILARITY_DEDUP_THRESHOLD)
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+pub struct DuplicatePair {
+    pub rule_a_id: Uuid,
+    pub rule_a_content: String,
+    pub rule_b_id: Uuid,
+    pub rule_b_content: String,
+    pub similarity: f64,
+}
+
+/// Find pairs of rules with cosine similarity >= SIMILARITY_CLUSTER_THRESHOLD.
+/// NOTE: self-join is O(n²) on active rules per project — acceptable for <1k rules,
+/// revisit with ANN index or chunked scans if rule count grows significantly.
+pub async fn find_duplicate_clusters(
+    pool: &PgPool,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<DuplicatePair>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT a.id AS rule_a_id, a.content AS rule_a_content, \
+         b.id AS rule_b_id, b.content AS rule_b_content, \
+         (1.0 - (a.embedding <=> b.embedding))::float8 AS similarity \
+         FROM ai_memory.semantic_rules a \
+         JOIN ai_memory.semantic_rules b ON a.id < b.id \
+         WHERE a.project_id = $1 AND b.project_id = $1 \
+         AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL \
+         AND a.valid_until IS NULL AND b.valid_until IS NULL \
+         AND (1.0 - (a.embedding <=> b.embedding)) >= $2 \
+         ORDER BY similarity DESC LIMIT $3",
+    )
+    .bind(project_id)
+    .bind(SIMILARITY_CLUSTER_THRESHOLD)
+    .bind(limit)
     .fetch_all(pool)
     .await
 }

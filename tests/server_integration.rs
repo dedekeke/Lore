@@ -114,7 +114,7 @@ async fn test_remember_and_recall_rules() {
         .unwrap();
 
     let recalled = server
-        .recall_rules("systems language".into(), Some(10), None, None, None)
+        .recall_rules("systems language".into(), Some(10), None, None, None, None)
         .await
         .unwrap();
     let rules = extract_json(&recalled);
@@ -155,6 +155,7 @@ async fn test_recall_rules_cross_project() {
             None,
             None,
             Some(false),
+            None,
         )
         .await
         .unwrap();
@@ -169,6 +170,7 @@ async fn test_recall_rules_cross_project() {
             None,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();

@@ -402,6 +402,11 @@ impl LoreServer {
         #[tool(param)]
         #[schemars(description = "Search across all projects (default false)")]
         cross_project: Option<bool>,
+        #[tool(param)]
+        #[schemars(
+            description = "If true, return compact previews (id, category, first 80 chars, score, tags, hit_count, last_used_at) instead of full content. Use get_rule(id) to fetch full details."
+        )]
+        compact: Option<bool>,
     ) -> Result<CallToolResult, rmcp::Error> {
         Self::validate_len("query", &query, 2048)?;
         let current_project_id = self.project_id().await?;
@@ -415,7 +420,7 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::search_rules_hybrid(
+        let scored_rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
             current_project_id,
@@ -428,7 +433,50 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content_with_nudge(&rules, "Apply these rules to your current task.")
+
+        if compact.unwrap_or(false) {
+            let compact_results: Vec<serde_json::Value> = scored_rules
+                .iter()
+                .map(|sr| {
+                    let preview: String = sr.rule.content.chars().take(80).collect();
+                    serde_json::json!({
+                        "id": sr.rule.id.to_string(),
+                        "category": serde_json::to_value(&sr.rule.category).unwrap_or_default(),
+                        "preview": preview,
+                        "score": sr.score,
+                        "tags": sr.rule.tags,
+                        "hit_count": sr.rule.hit_count,
+                        "last_used_at": sr.rule.last_used_at,
+                    })
+                })
+                .collect();
+            return Self::json_content_with_nudge(
+                &compact_results,
+                "Use get_rule(id) to fetch full content for specific rules.",
+            );
+        }
+
+        Self::json_content_with_nudge(&scored_rules, "Apply these rules to your current task.")
+    }
+
+    #[tool(
+        description = "Fetch a single rule by ID with full content. Also increments its hit count. Use after recall_rules(compact=true) to drill into specific rules."
+    )]
+    pub async fn get_rule(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "UUID of the rule to fetch")]
+        rule_id: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let id = Self::parse_uuid(&rule_id)?;
+        let rule = db::semantic::get_rule(self.pool(), id)
+            .await
+            .map_err(Self::db_err)?
+            .ok_or_else(|| {
+                rmcp::Error::invalid_params(format!("Rule not found: {rule_id}"), None)
+            })?;
+        db::semantic::increment_hit_counts(self.pool(), &[id]);
+        Self::json_content_with_nudge(&rule, "Apply this rule to your current task.")
     }
 
     #[tool(
@@ -2609,6 +2657,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"remember_rule"));
         assert!(names.contains(&"forget_rule"));
+        assert!(names.contains(&"get_rule"));
         assert!(names.contains(&"generate_handoff"));
         assert!(names.contains(&"link_tasks"));
         assert!(names.contains(&"add_edge"));

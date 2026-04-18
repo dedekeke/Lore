@@ -20,7 +20,6 @@ pub async fn create_link(
     let row: (Uuid,) = sqlx::query_as(
         "INSERT INTO ai_memory.task_links (source_task_id, target_task_id, link_type) \
          VALUES ($1, $2, $3) \
-         ON CONFLICT (source_task_id, target_task_id, link_type) DO NOTHING \
          RETURNING id",
     )
     .bind(source_task_id)

@@ -1,61 +1,32 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-struct Pattern {
-    regex: Regex,
-    _name: &'static str,
-}
-
-static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
+static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         // PEM blocks (must be before generic patterns to handle multiline)
-        Pattern {
-            regex: Regex::new(r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----").unwrap(),
-            _name:"pem",
-        },
+        Regex::new(r"-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----").unwrap(),
         // JWT tokens
-        Pattern {
-            regex: Regex::new(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap(),
-            _name:"jwt",
-        },
+        Regex::new(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap(),
         // AWS access keys
-        Pattern {
-            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
-            _name:"aws",
-        },
+        Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
         // GitHub PATs
-        Pattern {
-            regex: Regex::new(r"gh[ps]_[A-Za-z0-9_]{36,}").unwrap(),
-            _name:"github_pat",
-        },
+        Regex::new(r"gh[ps]_[A-Za-z0-9_]{36,}").unwrap(),
         // Connection strings
-        Pattern {
-            regex: Regex::new(r#"(?i)(postgres|mysql|mongodb|redis)://[^\s'"]+"#).unwrap(),
-            _name:"connection_string",
-        },
+        Regex::new(r#"(?i)(postgres|mysql|mongodb|redis)://[^\s'"]+"#).unwrap(),
         // Bearer tokens
-        Pattern {
-            regex: Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+").unwrap(),
-            _name:"bearer",
-        },
+        Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+").unwrap(),
         // Generic API keys/tokens/secrets/passwords
-        Pattern {
-            regex: Regex::new(
-                r##"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[A-Za-z0-9/+=_-]{16,}['"]?"##,
-            )
-            .unwrap(),
-            _name:"generic_secret",
-        },
+        Regex::new(
+            r##"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[A-Za-z0-9/+=_-]{16,}['"]?"##,
+        )
+        .unwrap(),
     ]
 });
 
 pub fn scrub(input: &str) -> String {
     let mut result = input.to_string();
-    for pattern in PATTERNS.iter() {
-        result = pattern
-            .regex
-            .replace_all(&result, "[REDACTED]")
-            .into_owned();
+    for re in PATTERNS.iter() {
+        result = re.replace_all(&result, "[REDACTED]").into_owned();
     }
     result
 }

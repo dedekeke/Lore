@@ -2178,6 +2178,118 @@ impl LoreServer {
             },
         )
     }
+
+    #[tool(
+        description = "Get full context for a file: code structure, linked rules, call dependencies, and community info. Use before reading or modifying a file to understand its role in the codebase."
+    )]
+    pub async fn get_file_context(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "File path (must match indexed code_chunks file_path)")]
+        file_path: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("file_path", &file_path, 1024)?;
+        let project_id = self.project_id().await?;
+
+        // Code structure
+        let chunks = db::codebase::get_file_chunks_metadata(self.pool(), project_id, &file_path)
+            .await
+            .map_err(Self::db_err)?;
+
+        let code_structure: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "chunk_name": c.chunk_name,
+                    "chunk_kind": c.chunk_kind,
+                    "lines": format!("{}-{}", c.start_line, c.end_line),
+                    "community_id": c.community_id,
+                })
+            })
+            .collect();
+
+        // Linked rules
+        let file_rules =
+            db::rule_chunk_links::get_rules_for_file(self.pool(), &file_path, project_id)
+                .await
+                .map_err(Self::db_err)?;
+
+        let linked_rules: Vec<serde_json::Value> = file_rules
+            .iter()
+            .map(|r| {
+                let preview: String = r.content.chars().take(80).collect();
+                serde_json::json!({
+                    "id": r.rule_id.to_string(),
+                    "category": r.category,
+                    "preview": preview,
+                })
+            })
+            .collect();
+
+        // Dependencies: callers/callees for first 5 named chunks
+        let mut all_callers: Vec<serde_json::Value> = Vec::new();
+        let mut all_callees: Vec<serde_json::Value> = Vec::new();
+
+        let named_chunks: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.chunk_name.as_ref())
+            .take(5)
+            .collect();
+
+        for entity in &named_chunks {
+            if let Ok(callers) =
+                db::codebase_edges::get_callers(self.pool(), project_id, entity).await
+            {
+                for e in callers {
+                    all_callers.push(serde_json::json!({
+                        "entity": e.source_entity,
+                        "file": e.source_file,
+                    }));
+                }
+            }
+            if let Ok(callees) =
+                db::codebase_edges::get_callees(self.pool(), project_id, entity).await
+            {
+                for e in callees {
+                    all_callees.push(serde_json::json!({
+                        "entity": e.target_entity,
+                        "file": e.target_file,
+                    }));
+                }
+            }
+        }
+
+        // Communities
+        let file_paths = vec![file_path.clone()];
+        let communities =
+            db::communities::get_affected_communities(self.pool(), project_id, &file_paths)
+                .await
+                .map_err(Self::db_err)?;
+
+        let communities_json: Vec<serde_json::Value> = communities
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "community_id": c.community_id,
+                    "member_count": c.member_count,
+                })
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "file_path": file_path,
+                "code_structure": code_structure,
+                "linked_rules": linked_rules,
+                "dependencies": {
+                    "callers": all_callers,
+                    "callees": all_callees,
+                },
+                "communities": communities_json,
+            }),
+            "Apply these rules and context when reading or modifying this file.",
+        )
+    }
 }
 
 fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
@@ -2465,8 +2577,8 @@ mod tests {
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
         assert!(
-            tools.len() >= 28,
-            "Expected at least 28 tools, got {}",
+            tools.len() >= 29,
+            "Expected at least 29 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -2484,6 +2596,7 @@ mod tests {
         assert!(names.contains(&"detect_communities"));
         assert!(names.contains(&"get_community_members"));
         assert!(names.contains(&"detect_cross_community_changes"));
+        assert!(names.contains(&"get_file_context"));
     }
 
     #[test]

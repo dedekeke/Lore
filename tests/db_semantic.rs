@@ -209,7 +209,7 @@ async fn test_search_rules_by_embedding() {
             .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].content, "lesson A");
+    assert_eq!(results[0].rule.content, "lesson A");
 }
 
 #[tokio::test]
@@ -238,7 +238,7 @@ async fn test_search_rules_with_category_filter() {
     .unwrap();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].content, "lesson");
+    assert_eq!(results[0].rule.content, "lesson");
 }
 
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn test_search_by_embedding_filters_tags() {
             .await
             .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].content, "tagged");
+    assert_eq!(results[0].rule.content, "tagged");
 }
 
 #[tokio::test]
@@ -362,7 +362,7 @@ async fn test_search_hybrid_filters_tags() {
     .await
     .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].tags, vec!["keep".to_string()]);
+    assert_eq!(results[0].rule.tags, vec!["keep".to_string()]);
 }
 
 #[tokio::test]
@@ -390,7 +390,7 @@ async fn test_search_cross_project_none_returns_all_projects() {
         .await
         .unwrap();
     assert_eq!(a_only.len(), 1);
-    assert_eq!(a_only[0].content, "from a");
+    assert_eq!(a_only[0].rule.content, "from a");
 }
 
 #[tokio::test]
@@ -408,7 +408,7 @@ async fn test_search_populates_project_name() {
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].project_name.as_deref(), Some("named-proj"));
+    assert_eq!(results[0].rule.project_name.as_deref(), Some("named-proj"));
 }
 
 #[tokio::test]
@@ -445,7 +445,7 @@ async fn test_search_hybrid_current_project_boost() {
             .await
             .unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].project_id, pb);
+    assert_eq!(results[0].rule.project_id, pb);
 }
 
 #[tokio::test]

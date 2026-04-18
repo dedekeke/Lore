@@ -61,7 +61,6 @@ pub async fn create_rule(
     Ok(row.0)
 }
 
-#[allow(dead_code)]
 pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
         "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
@@ -185,7 +184,7 @@ pub async fn search_rules_hybrid(
     category: Option<RuleCategory>,
     task_type: Option<&str>,
     tags: Option<&[String]>,
-) -> Result<Vec<SemanticRule>, sqlx::Error> {
+) -> Result<Vec<ScoredRule>, sqlx::Error> {
     let ts_query = to_tsquery_safe(query);
     if ts_query.is_empty() {
         let results = search_rules_by_embedding(
@@ -198,7 +197,7 @@ pub async fn search_rules_hybrid(
             Some(current_project_id),
         )
         .await?;
-        increment_hit_counts(pool, &results);
+        increment_hit_counts_scored(pool, &results);
         return Ok(results);
     }
     let limit = limit.max(1);
@@ -211,6 +210,8 @@ pub async fn search_rules_hybrid(
         "AND (task_type_affinity IS NULL OR $7::text IS NULL OR $7 = ANY(task_type_affinity))";
     let tags_filter = "AND ($8::text[] IS NULL OR tags @> $8)";
 
+    // The fused_score column is computed as the full ranking formula and exposed
+    // alongside the rule so callers can use it for progressive disclosure.
     let sql = format!(
         "WITH vector_ranked AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $2::vector) AS v_rank
@@ -239,36 +240,45 @@ pub async fn search_rules_hybrid(
         SELECT s.id, s.project_id, s.category, s.content, s.embedding,
                s.source_task_id, s.created_at, s.expires_at,
                s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags,
-               s.valid_from, s.valid_until, p.name AS project_name
+               s.valid_from, s.valid_until, p.name AS project_name,
+               ((
+                 0.35 * fused.v_score
+               + 0.25 * fused.f_score
+               + 0.20 * CASE s.category::text
+                          WHEN 'constraint' THEN 1.0
+                          WHEN 'lesson'     THEN 0.75
+                          WHEN 'fact'       THEN 0.50
+                          WHEN 'preference' THEN 0.25
+                          ELSE 0.25 END
+               + 0.10 * EXP(
+                   -1.0 * CASE s.category::text
+                            WHEN 'constraint' THEN 0.0
+                            WHEN 'lesson'     THEN 0.01
+                            WHEN 'fact'       THEN 0.005
+                            WHEN 'preference' THEN 0.02
+                            ELSE 0.01 END
+                   * EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_used_at, s.created_at))) / 86400.0
+                 )
+               + 0.10 * LN(1 + s.hit_count) / NULLIF(LN(1 + mh.val), 0)
+               ) * COALESCE(s.weight, 1.0)
+                 * CASE WHEN s.project_id = $9 THEN 2.0 ELSE 1.0 END
+               )::float8 AS fused_score
         FROM fused
         JOIN ai_memory.semantic_rules s ON s.id = fused.id
         LEFT JOIN ai_memory.projects p ON p.id = s.project_id
         CROSS JOIN max_hits mh
-        ORDER BY (
-            0.35 * fused.v_score
-          + 0.25 * fused.f_score
-          + 0.20 * CASE s.category::text
-                     WHEN 'constraint' THEN 1.0
-                     WHEN 'lesson'     THEN 0.75
-                     WHEN 'fact'       THEN 0.50
-                     WHEN 'preference' THEN 0.25
-                     ELSE 0.25 END
-          + 0.10 * EXP(
-              -1.0 * CASE s.category::text
-                       WHEN 'constraint' THEN 0.0
-                       WHEN 'lesson'     THEN 0.01
-                       WHEN 'fact'       THEN 0.005
-                       WHEN 'preference' THEN 0.02
-                       ELSE 0.01 END
-              * EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_used_at, s.created_at))) / 86400.0
-            )
-          + 0.10 * LN(1 + s.hit_count) / NULLIF(LN(1 + mh.val), 0)
-        ) * COALESCE(s.weight, 1.0)
-          * CASE WHEN s.project_id = $9 THEN 2.0 ELSE 1.0 END DESC
+        ORDER BY fused_score DESC
         LIMIT $5"
     );
 
-    let results: Vec<SemanticRule> = sqlx::query_as(&sql)
+    #[derive(sqlx::FromRow)]
+    struct RuleWithScore {
+        #[sqlx(flatten)]
+        rule: SemanticRule,
+        fused_score: f64,
+    }
+
+    let rows: Vec<RuleWithScore> = sqlx::query_as(&sql)
         .bind(project_id) // $1 (nullable)
         .bind(&emb) // $2
         .bind(candidate_limit) // $3
@@ -281,16 +291,24 @@ pub async fn search_rules_hybrid(
         .fetch_all(pool)
         .await?;
 
-    increment_hit_counts(pool, &results);
+    let results: Vec<ScoredRule> = rows
+        .into_iter()
+        .map(|r| ScoredRule {
+            rule: r.rule,
+            score: r.fused_score,
+        })
+        .collect();
+
+    increment_hit_counts_scored(pool, &results);
     Ok(results)
 }
 
-/// Async background increment of hit_count and last_used_at (fire-and-forget with 5s timeout)
-fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
-    if rules.is_empty() {
+/// Fire-and-forget increment of hit_count and last_used_at for given rule IDs.
+pub fn increment_hit_counts(pool: &PgPool, ids: &[Uuid]) {
+    if ids.is_empty() {
         return;
     }
-    let ids: Vec<Uuid> = rules.iter().map(|r| r.id).collect();
+    let ids = ids.to_vec();
     let pool = pool.clone();
     tokio::spawn(async move {
         let result = tokio::time::timeout(
@@ -311,8 +329,14 @@ fn increment_hit_counts(pool: &PgPool, rules: &[SemanticRule]) {
     });
 }
 
+fn increment_hit_counts_scored(pool: &PgPool, rules: &[ScoredRule]) {
+    let ids: Vec<Uuid> = rules.iter().map(|r| r.rule.id).collect();
+    increment_hit_counts(pool, &ids);
+}
+
 /// Vector-only search (used when no text query available).
 /// When `current_project_id` is provided, results from that project get a 2x boost.
+/// Returns scored results where score = 1 - cosine_distance (higher is more similar).
 pub async fn search_rules_by_embedding(
     pool: &PgPool,
     project_id: Option<Uuid>,
@@ -321,14 +345,15 @@ pub async fn search_rules_by_embedding(
     category: Option<RuleCategory>,
     tags: Option<&[String]>,
     current_project_id: Option<Uuid>,
-) -> Result<Vec<SemanticRule>, sqlx::Error> {
+) -> Result<Vec<ScoredRule>, sqlx::Error> {
     let emb = Vector::from(embedding.to_vec());
     let order_clause = "ORDER BY (s.embedding <=> $2::vector) / \
         CASE WHEN $6::uuid IS NOT NULL AND s.project_id = $6 THEN 2.0 ELSE 1.0 END";
     let sql = format!(
         "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, \
          s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, \
-         s.tags, s.valid_from, s.valid_until, p.name AS project_name \
+         s.tags, s.valid_from, s.valid_until, p.name AS project_name, \
+         (1.0 - (s.embedding <=> $2::vector))::float8 AS cosine_score \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
          AND s.valid_until IS NULL \
@@ -337,7 +362,15 @@ pub async fn search_rules_by_embedding(
          AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
          {order_clause} LIMIT $3"
     );
-    sqlx::query_as(&sql)
+
+    #[derive(sqlx::FromRow)]
+    struct RuleWithCosine {
+        #[sqlx(flatten)]
+        rule: SemanticRule,
+        cosine_score: f64,
+    }
+
+    let rows: Vec<RuleWithCosine> = sqlx::query_as(&sql)
         .bind(project_id)
         .bind(&emb)
         .bind(limit)
@@ -345,7 +378,15 @@ pub async fn search_rules_by_embedding(
         .bind(tags)
         .bind(current_project_id)
         .fetch_all(pool)
-        .await
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| ScoredRule {
+            rule: r.rule,
+            score: r.cosine_score,
+        })
+        .collect())
 }
 
 /// Find rules with cosine similarity above threshold (for dedup detection)
@@ -429,6 +470,14 @@ pub async fn find_duplicate_clusters(
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// Rule with its fused relevance score from hybrid search.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScoredRule {
+    #[serde(flatten)]
+    pub rule: SemanticRule,
+    pub score: f64,
 }
 
 /// Sanitize user input into a safe tsquery string

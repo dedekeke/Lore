@@ -789,6 +789,128 @@ impl LoreServer {
         )
     }
 
+    // -- Knowledge graph tools --
+
+    #[tool(
+        description = "Add an edge to the knowledge graph between two entities (e.g. concepts, files, modules)"
+    )]
+    pub async fn add_edge(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Source entity name")]
+        source_entity: String,
+        #[tool(param)]
+        #[schemars(description = "Target entity name")]
+        target_entity: String,
+        #[tool(param)]
+        #[schemars(description = "Relationship type (e.g. depends_on, uses, related_to)")]
+        edge_type: String,
+        #[tool(param)]
+        #[schemars(description = "Confidence score 0.0-1.0 (default 1.0)")]
+        confidence: Option<f64>,
+        #[tool(param)]
+        #[schemars(description = "UUID of the task that produced this edge")]
+        source_task_id: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("source_entity", &source_entity, 512)?;
+        Self::validate_len("target_entity", &target_entity, 512)?;
+        Self::validate_len("edge_type", &edge_type, 128)?;
+        if let Some(c) = confidence {
+            if !(0.0..=1.0).contains(&c) {
+                return Err(rmcp::Error::invalid_params(
+                    "confidence must be between 0.0 and 1.0",
+                    None,
+                ));
+            }
+        }
+        let project_id = self.project_id().await?;
+        let task_id = source_task_id
+            .as_deref()
+            .map(Self::parse_uuid)
+            .transpose()?;
+        let id = db::knowledge_edges::create_edge(
+            self.pool(),
+            project_id,
+            &source_entity,
+            &target_entity,
+            &edge_type,
+            confidence,
+            task_id,
+        )
+        .await
+        .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "edge_id": id.to_string() }),
+            "Edge added to knowledge graph. Continue with your current task.",
+        )
+    }
+
+    #[tool(
+        description = "Query neighbors of an entity in the knowledge graph. Supports multi-hop traversal via depth parameter."
+    )]
+    pub async fn query_neighbors(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Entity name to find neighbors of")]
+        entity: String,
+        #[tool(param)]
+        #[schemars(description = "Filter by edge type")]
+        edge_type: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Traversal depth (default 1, max 5)")]
+        depth: Option<u32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("entity", &entity, 512)?;
+        let d = depth.unwrap_or(1).min(5);
+        let project_id = self.project_id().await?;
+        let edges = db::knowledge_edges::query_neighbors_bfs(
+            self.pool(),
+            project_id,
+            &entity,
+            edge_type.as_deref(),
+            d,
+        )
+        .await
+        .map_err(Self::db_err)?;
+        Self::json_content(&edges)
+    }
+
+    #[tool(
+        description = "Find the shortest path between two entities in the knowledge graph using BFS"
+    )]
+    pub async fn find_path(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Starting entity name")]
+        from_entity: String,
+        #[tool(param)]
+        #[schemars(description = "Target entity name")]
+        to_entity: String,
+        #[tool(param)]
+        #[schemars(description = "Max traversal depth (default 5, max 10)")]
+        max_depth: Option<u32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("from_entity", &from_entity, 512)?;
+        Self::validate_len("to_entity", &to_entity, 512)?;
+        let d = max_depth.unwrap_or(5).min(10);
+        let project_id = self.project_id().await?;
+        let path =
+            db::knowledge_edges::find_path(self.pool(), project_id, &from_entity, &to_entity, d)
+                .await
+                .map_err(Self::db_err)?;
+        if path.is_empty() {
+            Self::json_content(&serde_json::json!({
+                "path": [],
+                "message": "No path found between entities"
+            }))
+        } else {
+            Self::json_content(&serde_json::json!({
+                "path": path,
+                "hop_count": path.len()
+            }))
+        }
+    }
+
     #[tool(description = "Update an existing task's priority, task_type, or description")]
     pub async fn update_task(
         &self,
@@ -2084,8 +2206,8 @@ mod tests {
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
         assert!(
-            tools.len() >= 21,
-            "Expected at least 21 tools, got {}",
+            tools.len() >= 24,
+            "Expected at least 24 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -2093,6 +2215,9 @@ mod tests {
         assert!(names.contains(&"forget_rule"));
         assert!(names.contains(&"generate_handoff"));
         assert!(names.contains(&"link_tasks"));
+        assert!(names.contains(&"add_edge"));
+        assert!(names.contains(&"query_neighbors"));
+        assert!(names.contains(&"find_path"));
     }
 
     #[test]

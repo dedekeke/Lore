@@ -353,7 +353,7 @@ pub async fn search_rules_by_embedding(
         "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, \
          s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, \
          s.tags, s.valid_from, s.valid_until, p.name AS project_name, \
-         (1.0 - (s.embedding <=> $2::vector))::float8 AS cosine_score \
+         ((1.0 - (s.embedding <=> $2::vector)) * CASE WHEN $6::uuid IS NOT NULL AND s.project_id = $6 THEN 2.0 ELSE 1.0 END)::float8 AS cosine_score \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
          AND s.valid_until IS NULL \

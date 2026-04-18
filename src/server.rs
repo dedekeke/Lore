@@ -432,7 +432,7 @@ impl LoreServer {
                     let preview: String = sr.rule.content.chars().take(80).collect();
                     serde_json::json!({
                         "id": sr.rule.id.to_string(),
-                        "category": format!("{:?}", sr.rule.category).to_lowercase(),
+                        "category": serde_json::to_value(&sr.rule.category).unwrap_or_default(),
                         "preview": preview,
                         "score": sr.score,
                         "tags": sr.rule.tags,

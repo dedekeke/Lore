@@ -45,13 +45,7 @@ docker run -d --name lore-db \
 
 ### Without local ONNX embeddings
 
-Smaller binary, faster build. Use Gemini for embeddings:
-
-```bash
-cargo build --release --no-default-features
-```
-
-Set `EMBEDDING_PROVIDER=gemini` and `GEMINI_API_KEY` in `.env`.
+Building with `--no-default-features` skips the `ort` runtime (smaller binary, faster build) but disables every feature that relies on vector search — rule recall, failure search, codebase indexing, and hybrid/MMR code search will all return an error at runtime. Build with default features unless you're certain you don't need them.
 
 ---
 
@@ -66,9 +60,7 @@ Claude Code — drop in `.mcp.json` at project root:
       "command": "/path/to/lore",
       "env": {
         "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory",
-        "EMBEDDING_PROVIDER": "gemini",
-        "GEMINI_API_KEY": "your-api-key",
-        "EMBEDDING_MODEL": "gemini-embedding-001",
+        "EMBEDDING_MODEL": "all-MiniLM-L6-v2",
         "EMBEDDING_DIMENSIONS": "384"
       }
     }
@@ -131,7 +123,8 @@ Clients connect at `http://host:3100/sse`. Config for SSE-capable clients:
 | `index_codebase`                  | Scan files (respects `.gitignore`), tree-sitter AST-chunk, embed via ONNX, store in pgvector. Incremental (SHA-256). |
 | `search_codebase`                 | Hybrid vector + keyword search with MMR diversity re-ranking; optional file glob.|
 | `get_index_status`                | File count, chunk count, last indexed time, summary coverage.        |
-| `generate_summaries`              | Gemini-generated 1-sentence descriptions per chunk; improves high-level queries. |
+| `list_chunks_needing_summary`     | Return chunks lacking a 1-sentence summary plus a client prompt — the client LLM writes the summaries. |
+| `submit_chunk_summaries`          | Persist client-generated summaries via parallel `ids` / `summaries` arrays. |
 | `get_rules_for_file`              | Rules auto-linked to a file's code chunks via accepted outcomes.     |
 | `get_file_context`                | **All-in-one**: code structure + linked rules + callers/callees + community for a file. |
 | `find_callers` / `find_callees`   | Inbound / outbound edges from the call graph for a given entity.     |
@@ -156,6 +149,7 @@ Clients connect at `http://host:3100/sse`. Config for SSE-capable clients:
 | `get_active_context`    | Resume packet: current project, active task, recent attempts, wipe count. |
 | `log_context_wipe`      | Mark a context exhaustion event.                                       |
 | `generate_handoff`      | Dense handoff briefing for next session; auto-logs wipe.               |
+| `generate_session_summary` | Structured session briefing (tasks + attempts + lessons) plus a client prompt + JSON schema — the client LLM synthesizes the summary; no server-side LLM call. |
 | `get_next_steps`        | Cold-start briefing: ranked pending work + recent lessons (L0 minimal / L1 full). |
 | `get_protocol`          | Re-read mandatory episodic memory protocol rules.                      |
 | `switch_project`        | Switch project scope (creates if missing).                             |
@@ -179,9 +173,7 @@ All via environment variables (see `.env.example`):
 | `DATABASE_URL`                       | `postgres://lore:password@localhost:5432/ai_memory` | Postgres connection string                                     |
 | `DATABASE_MAX_CONNECTIONS`           | `10`                                                | Pool size                                                      |
 | `DATABASE_STATEMENT_TIMEOUT_SECS`    | `5`                                                 | Per-query timeout                                              |
-| `EMBEDDING_PROVIDER`                 | `local`                                             | `local` (ONNX via `ort`) or `gemini`                           |
-| `GEMINI_API_KEY`                     | —                                                   | Required when provider is `gemini`                             |
-| `EMBEDDING_MODEL`                    | `all-MiniLM-L6-v2`                                  | Embedding model name                                           |
+| `EMBEDDING_MODEL`                    | `all-MiniLM-L6-v2`                                  | Local ONNX embedding model name                                |
 | `EMBEDDING_DIMENSIONS`               | `384`                                               | Must match model and DB schema                                 |
 | `MCP_TRANSPORT`                      | `stdio`                                             | `stdio` or `sse`                                               |
 | `MCP_SSE_PORT`                       | `3100`                                              | SSE port                                                       |
@@ -195,7 +187,7 @@ All via environment variables (see `.env.example`):
 | `DECAY_MIN_ACCEPTED`                 | `2`                                                 | Min accepted attempts before consolidation                     |
 | `DEFAULT_PROJECT_NAME`               | `default`                                           | Fallback name for `switch_project`                             |
 | `DISABLED_TOOLS`                     | —                                                   | Comma-separated tools to hide/reject                           |
-| `CAPTURE_GIT_REF`                    | `true`                                              | Capture HEAD on `propose_attempt`                              |
+| `CAPTURE_GIT_REF`                    | `false`                                             | Capture HEAD on `propose_attempt`                              |
 | `LORE_PROACTIVE_CONTEXT`             | `false`                                             | Inject context into responses proactively                      |
 | `LORE_SCRUB_SECRETS`                 | `true`                                              | Redact secrets on every store path                             |
 | `DASHBOARD_ENABLED`                  | `false`                                             | Enable web dashboard                                           |

@@ -7,4 +7,5 @@ pub mod embeddings;
 pub mod indexer;
 pub mod server;
 pub mod tools;
+pub mod tree_sitter_chunker;
 pub mod webhooks;

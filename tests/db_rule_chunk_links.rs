@@ -180,6 +180,8 @@ async fn insert_test_chunk(
         embedding: Some(emb.to_vec()),
         file_hash: "abc123".to_string(),
         behavior_version: 1,
+        chunk_name: None,
+        chunk_kind: None,
     };
     codebase::insert_chunks(pool, project_id, &[chunk])
         .await

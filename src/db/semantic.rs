@@ -404,7 +404,9 @@ pub struct DuplicatePair {
     pub similarity: f64,
 }
 
-/// Find pairs of rules with cosine similarity >= SIMILARITY_CLUSTER_THRESHOLD
+/// Find pairs of rules with cosine similarity >= SIMILARITY_CLUSTER_THRESHOLD.
+/// NOTE: self-join is O(n²) on active rules per project — acceptable for <1k rules,
+/// revisit with ANN index or chunked scans if rule count grows significantly.
 pub async fn find_duplicate_clusters(
     pool: &PgPool,
     project_id: Uuid,
@@ -418,6 +420,7 @@ pub async fn find_duplicate_clusters(
          JOIN ai_memory.semantic_rules b ON a.id < b.id \
          WHERE a.project_id = $1 AND b.project_id = $1 \
          AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL \
+         AND a.valid_until IS NULL AND b.valid_until IS NULL \
          AND (1.0 - (a.embedding <=> b.embedding)) >= $2 \
          ORDER BY similarity DESC LIMIT $3",
     )

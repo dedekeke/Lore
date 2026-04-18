@@ -4,6 +4,7 @@ pub mod knowledge_edges;
 pub mod pool;
 pub mod projects;
 pub mod retention;
+pub mod rule_chunk_links;
 pub mod semantic;
 pub mod snapshots;
 pub mod task_links;

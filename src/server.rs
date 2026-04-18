@@ -703,6 +703,44 @@ impl LoreServer {
             }
         }
 
+        // Auto-link rules to code chunks on accepted outcomes (best-effort)
+        if out == db::AttemptOutcome::Accepted {
+            if let Some(ref code) = code_snippet {
+                if let Ok(Some(attempt)) = db::attempts::get_attempt(self.pool(), aid).await {
+                    match self.embed(code).await {
+                        Ok(code_emb) => {
+                            if let Ok(project_id) = self.project_id().await {
+                                let pool = self.pool().clone();
+                                let task_id = attempt.task_id;
+                                tokio::spawn(async move {
+                                    match db::rule_chunk_links::link_rules_from_code(
+                                        &pool, task_id, &code_emb, project_id, 0.80,
+                                    )
+                                    .await
+                                    {
+                                        Ok(n) => {
+                                            if n > 0 {
+                                                tracing::info!(
+                                                    links = n,
+                                                    "Auto-linked rules to code chunks"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Failed to auto-link rules to code chunks");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to embed code snippet for auto-linking");
+                        }
+                    }
+                }
+            }
+        }
+
         let nudge = match out {
             db::AttemptOutcome::Rejected => {
                 "Outcome logged. Next: call review_ledger(task_id) to review all past failures, then propose_attempt with a new approach."
@@ -1855,6 +1893,34 @@ impl LoreServer {
     }
 
     #[tool(
+        description = "Get semantic rules linked to code chunks in a given file. Returns rules that were auto-linked via embedding similarity when code was accepted."
+    )]
+    pub async fn get_rules_for_file(
+        &self,
+        #[tool(param)]
+        #[schemars(
+            description = "File path to look up (must match indexed code_chunks file_path)"
+        )]
+        file_path: String,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("file_path", &file_path, 1024)?;
+        let project_id = self.project_id().await?;
+        let rules = db::rule_chunk_links::get_rules_for_file(self.pool(), &file_path, project_id)
+            .await
+            .map_err(Self::db_err)?;
+        if rules.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "rules": [], "file_path": file_path }),
+                "No rules linked to this file. Index the codebase and accept attempts with code snippets to build links.",
+            );
+        }
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "rules": rules, "file_path": file_path }),
+            "Apply these rules when modifying this file.",
+        )
+    }
+
+    #[tool(
         description = "Generate LLM summaries for indexed code chunks that lack them. Calls Gemini to produce 1-sentence descriptions per function/class. Run after index_codebase to improve high-level search queries."
     )]
     pub async fn generate_summaries(
@@ -2206,8 +2272,8 @@ mod tests {
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
         assert!(
-            tools.len() >= 24,
-            "Expected at least 24 tools, got {}",
+            tools.len() >= 25,
+            "Expected at least 25 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -2218,6 +2284,7 @@ mod tests {
         assert!(names.contains(&"add_edge"));
         assert!(names.contains(&"query_neighbors"));
         assert!(names.contains(&"find_path"));
+        assert!(names.contains(&"get_rules_for_file"));
     }
 
     #[test]

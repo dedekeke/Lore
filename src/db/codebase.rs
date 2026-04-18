@@ -452,6 +452,47 @@ pub async fn get_file_hashes_versioned(
     .await
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChunkMeta {
+    pub id: Uuid,
+    pub chunk_name: Option<String>,
+    pub chunk_kind: Option<String>,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub community_id: Option<i32>,
+}
+
+pub async fn get_file_chunks_metadata(
+    pool: &PgPool,
+    project_id: Uuid,
+    file_path: &str,
+) -> Result<Vec<ChunkMeta>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, Option<String>, Option<String>, i32, i32, Option<i32>)>(
+        "SELECT id, chunk_name, chunk_kind, start_line, end_line, community_id \
+         FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND file_path = $2 \
+         ORDER BY start_line",
+    )
+    .bind(project_id)
+    .bind(file_path)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(id, chunk_name, chunk_kind, start_line, end_line, community_id)| ChunkMeta {
+                    id,
+                    chunk_name,
+                    chunk_kind,
+                    start_line,
+                    end_line,
+                    community_id,
+                },
+            )
+            .collect()
+    })
+}
+
 pub struct NewCodeChunk {
     pub file_path: String,
     pub start_line: i32,

@@ -1985,6 +1985,124 @@ impl LoreServer {
             "Summaries improve search quality for high-level queries.",
         )
     }
+
+    // -- Codebase edge tools --
+
+    #[tool(
+        description = "Find all callers of a function/method in the codebase edge graph. Returns entities that call (or reference) the given entity, with source file info."
+    )]
+    pub async fn find_callers(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Function or method name to find callers of")]
+        entity: String,
+        #[tool(param)]
+        #[schemars(description = "Edge type filter (default: 'calls')")]
+        edge_type: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("entity", &entity, 512)?;
+        let project_id = self.project_id().await?;
+        let _edge_type = edge_type.unwrap_or_else(|| "calls".to_string());
+        let edges = db::codebase_edges::get_callers(self.pool(), project_id, &entity)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "entity": entity,
+                "callers": edges.iter().map(|e| serde_json::json!({
+                    "caller": e.source_entity,
+                    "edge_type": e.edge_type,
+                    "source_file": e.source_file,
+                })).collect::<Vec<_>>(),
+                "count": edges.len(),
+            }),
+            "Use find_callees to see what this entity calls.",
+        )
+    }
+
+    #[tool(
+        description = "Find all callees of a function/method in the codebase edge graph. Returns entities that the given entity calls (or references), with target file info."
+    )]
+    pub async fn find_callees(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Function or method name to find callees of")]
+        entity: String,
+        #[tool(param)]
+        #[schemars(description = "Edge type filter (default: 'calls')")]
+        edge_type: Option<String>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("entity", &entity, 512)?;
+        let project_id = self.project_id().await?;
+        let _edge_type = edge_type.unwrap_or_else(|| "calls".to_string());
+        let edges = db::codebase_edges::get_callees(self.pool(), project_id, &entity)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "entity": entity,
+                "callees": edges.iter().map(|e| serde_json::json!({
+                    "callee": e.target_entity,
+                    "edge_type": e.edge_type,
+                    "target_file": e.target_file,
+                })).collect::<Vec<_>>(),
+                "count": edges.len(),
+            }),
+            "Use find_callers to see what calls this entity.",
+        )
+    }
+
+    #[tool(
+        description = "Find the shortest path between two entities in the codebase edge graph using BFS. Useful for understanding how two functions/modules are connected through call chains."
+    )]
+    pub async fn shortest_code_path(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Starting entity (function/method name)")]
+        from: String,
+        #[tool(param)]
+        #[schemars(description = "Target entity (function/method name)")]
+        to: String,
+        #[tool(param)]
+        #[schemars(description = "Max traversal depth (default 5, max 10)")]
+        max_depth: Option<i32>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        Self::validate_len("from", &from, 512)?;
+        Self::validate_len("to", &to, 512)?;
+        let depth = max_depth.unwrap_or(5).min(10);
+        let project_id = self.project_id().await?;
+        let path =
+            db::codebase_edges::find_shortest_path(self.pool(), project_id, &from, &to, depth)
+                .await
+                .map_err(Self::db_err)?;
+        if path.is_empty() {
+            Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "path": [],
+                    "message": "No path found between these entities within the depth limit"
+                }),
+                "Use find_callers/find_callees to explore individual nodes.",
+            )
+        } else {
+            Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "path": path.iter().map(|e| serde_json::json!({
+                        "source": e.source_entity,
+                        "target": e.target_entity,
+                        "edge_type": e.edge_type,
+                        "source_file": e.source_file,
+                        "target_file": e.target_file,
+                    })).collect::<Vec<_>>(),
+                    "hop_count": path.len(),
+                }),
+                "Use find_callers/find_callees to explore individual nodes.",
+            )
+        }
+    }
 }
 
 fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
@@ -2272,8 +2390,8 @@ mod tests {
     fn test_tool_box_lists_all_tools() {
         let tools = LoreServer::tool_box().list();
         assert!(
-            tools.len() >= 25,
-            "Expected at least 25 tools, got {}",
+            tools.len() >= 28,
+            "Expected at least 28 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -2285,6 +2403,9 @@ mod tests {
         assert!(names.contains(&"query_neighbors"));
         assert!(names.contains(&"find_path"));
         assert!(names.contains(&"get_rules_for_file"));
+        assert!(names.contains(&"find_callers"));
+        assert!(names.contains(&"find_callees"));
+        assert!(names.contains(&"shortest_code_path"));
     }
 
     #[test]

@@ -16,7 +16,8 @@ pub fn detect_language(path: &str) -> Option<String> {
         "rs" => "rust",
         "py" | "pyi" => "python",
         "js" | "jsx" | "mjs" => "javascript",
-        "ts" | "tsx" => "typescript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
         "go" => "go",
         "java" => "java",
         "c" | "h" => "c",
@@ -299,11 +300,11 @@ pub async fn index_codebase(
         let language = detect_language(&rel_path);
         let lang_str = language.as_deref().unwrap_or("");
 
-        // Try AST-based chunking first, fall back to regex
-        let ast_chunks = tree_sitter_chunker::chunk_file_ast(&content, lang_str);
+        // AST-first chunking: parse once, reuse tree for edge extraction
+        let ast_result = tree_sitter_chunker::chunk_file_ast(&content, lang_str);
         let lines: Vec<&str> = content.lines().collect();
 
-        if let Some(ref chunks) = ast_chunks {
+        if let Some((ref chunks, ref tree)) = ast_result {
             for ac in chunks {
                 let start = ac.start_line.saturating_sub(1);
                 let end = ac.end_line.min(lines.len());
@@ -324,8 +325,14 @@ pub async fn index_codebase(
                     chunk_kind: Some(ac.kind.clone()),
                 });
             }
+
+            // Extract edges from the already-parsed tree (no re-parse)
+            let mut calls = tree_sitter_chunker::extract_calls(tree, &content, &rel_path);
+            let mut imports = tree_sitter_chunker::extract_imports(tree, &content, &rel_path);
+            all_edges.append(&mut calls);
+            all_edges.append(&mut imports);
         } else {
-            // Regex fallback
+            // Regex fallback for unsupported languages or parse failures
             let ranges = chunk_file(&content, language.as_deref(), MAX_CHUNK_LINES);
             for (start, end) in ranges {
                 let chunk_content: String = lines[start..end].join("\n");
@@ -345,14 +352,6 @@ pub async fn index_codebase(
                     chunk_kind: None,
                 });
             }
-        }
-
-        // Extract edges from parsed tree (calls + imports)
-        if let Some(tree) = tree_sitter_chunker::parse_file(&content, lang_str) {
-            let mut calls = tree_sitter_chunker::extract_calls(&tree, &content, &rel_path);
-            let mut imports = tree_sitter_chunker::extract_imports(&tree, &content, &rel_path);
-            all_edges.append(&mut calls);
-            all_edges.append(&mut imports);
         }
     }
 

@@ -25,6 +25,7 @@ pub fn get_parser(language: &str) -> Option<Parser> {
         "python" => tree_sitter_python::LANGUAGE.into(),
         "javascript" => tree_sitter_javascript::LANGUAGE.into(),
         "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),
         "c" => tree_sitter_c::LANGUAGE.into(),
@@ -36,8 +37,9 @@ pub fn get_parser(language: &str) -> Option<Parser> {
 }
 
 /// Parse file with tree-sitter and extract top-level AST chunks.
+/// Returns (chunks, tree) so the tree can be reused for edge extraction without re-parsing.
 /// Returns None if no grammar exists or parse fails.
-pub fn chunk_file_ast(content: &str, language: &str) -> Option<Vec<AstChunk>> {
+pub fn chunk_file_ast(content: &str, language: &str) -> Option<(Vec<AstChunk>, Tree)> {
     let mut parser = get_parser(language)?;
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
@@ -51,9 +53,8 @@ pub fn chunk_file_ast(content: &str, language: &str) -> Option<Vec<AstChunk>> {
         return None;
     }
 
-    // Sort by start_line to maintain file order
     chunks.sort_by_key(|c| c.start_line);
-    Some(chunks)
+    Some((chunks, tree))
 }
 
 /// Node kinds we extract as top-level chunks per language
@@ -76,8 +77,8 @@ fn target_node_kinds(language: &str) -> Vec<&'static str> {
             "lexical_declaration",
             "export_statement",
         ],
-        // TS shares JS AST structure
-        "typescript" => vec![
+        // TS/TSX share JS AST structure
+        "typescript" | "tsx" => vec![
             "function_declaration",
             "class_declaration",
             "lexical_declaration",
@@ -265,9 +266,15 @@ fn walk_calls(
     };
     let fn_name = current_fn.as_deref().or(enclosing_fn);
 
-    // Extract call targets
-    if kind == "call_expression" {
-        if let Some(callee) = extract_callee(node, content) {
+    // Extract call targets (including Rust macro invocations like println!(), vec!())
+    if kind == "call_expression" || kind == "macro_invocation" {
+        let callee = if kind == "macro_invocation" {
+            node.child_by_field_name("macro")
+                .map(|n| node_text(n, content).to_string())
+        } else {
+            extract_callee(node, content)
+        };
+        if let Some(callee) = callee {
             let source = fn_name.unwrap_or("<module>");
             out.push(CodeEdge {
                 source_entity: source.to_string(),
@@ -387,12 +394,7 @@ fn clean_import_path(text: &str) -> String {
     trimmed.to_string()
 }
 
-/// Parse a file and return (tree, parser) for reuse in edge extraction
-pub fn parse_file(content: &str, language: &str) -> Option<Tree> {
-    let mut parser = get_parser(language)?;
-    parser.parse(content, None)
-}
-
+// tree-sitter byte offsets align to UTF-8 boundaries, so byte slicing is safe here
 fn node_text<'a>(node: Node<'a>, content: &'a str) -> &'a str {
     let start = node.start_byte();
     let end = node.end_byte();
@@ -427,7 +429,7 @@ enum Color {
     Blue,
 }
 "#;
-        let chunks = chunk_file_ast(src, "rust").unwrap();
+        let (chunks, _tree) = chunk_file_ast(src, "rust").unwrap();
         assert!(chunks.len() >= 4, "got {} chunks", chunks.len());
 
         let fn_chunk = chunks.iter().find(|c| c.kind == "function").unwrap();
@@ -456,7 +458,7 @@ class Person:
     def __init__(self, name):
         self.name = name
 "#;
-        let chunks = chunk_file_ast(src, "python").unwrap();
+        let (chunks, _tree) = chunk_file_ast(src, "python").unwrap();
         assert!(chunks.len() >= 2);
         assert!(chunks.iter().any(|c| c.kind == "function"));
         assert!(chunks.iter().any(|c| c.kind == "class"));
@@ -477,7 +479,7 @@ class Widget {
 
 const LIMIT = 100;
 "#;
-        let chunks = chunk_file_ast(src, "javascript").unwrap();
+        let (chunks, _tree) = chunk_file_ast(src, "javascript").unwrap();
         assert!(chunks.len() >= 3, "got {} chunks", chunks.len());
     }
 
@@ -496,10 +498,23 @@ fn caller() {
 
 fn helper() {}
 "#;
-        let tree = parse_file(src, "rust").unwrap();
+        let (_chunks, tree) = chunk_file_ast(src, "rust").unwrap();
         let edges = extract_calls(&tree, src, "src/lib.rs");
         assert!(!edges.is_empty());
         assert!(edges.iter().any(|e| e.target_entity == "helper"));
+    }
+
+    #[test]
+    fn test_extract_rust_macro_calls() {
+        let src = r#"
+fn main() {
+    println!("hello");
+    vec![1, 2, 3];
+}
+"#;
+        let (_chunks, tree) = chunk_file_ast(src, "rust").unwrap();
+        let edges = extract_calls(&tree, src, "src/main.rs");
+        assert!(edges.iter().any(|e| e.target_entity.contains("println")));
     }
 
     #[test]
@@ -510,7 +525,7 @@ use crate::db;
 
 fn main() {}
 "#;
-        let tree = parse_file(src, "rust").unwrap();
+        let (_chunks, tree) = chunk_file_ast(src, "rust").unwrap();
         let edges = extract_imports(&tree, src, "src/main.rs");
         assert_eq!(edges.len(), 2);
         assert!(edges
@@ -522,7 +537,7 @@ fn main() {}
     #[test]
     fn test_extract_python_imports() {
         let src = "from os.path import join\nimport sys\n\ndef main():\n    pass\n";
-        let tree = parse_file(src, "python").unwrap();
+        let (_chunks, tree) = chunk_file_ast(src, "python").unwrap();
         let edges = extract_imports(&tree, src, "app.py");
         assert!(edges.len() >= 2);
     }

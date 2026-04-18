@@ -8,6 +8,11 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let _ = dotenvy::dotenv();
 
+    // Suppress ONNX runtime verbose memory allocation logs
+    if std::env::var("ORT_LOG_LEVEL").is_err() {
+        std::env::set_var("ORT_LOG_LEVEL", "warning");
+    }
+
     let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into());
     tracing_subscriber::fmt()
         .with_env_filter(

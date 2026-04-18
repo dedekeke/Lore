@@ -97,7 +97,7 @@ pub async fn serve(pool: PgPool, port: u16) {
             return;
         }
     };
-    tracing::debug!(port, "Dashboard server started");
+    tracing::info!(port, "Dashboard server started");
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!(error = %e, "Dashboard server error");
     }

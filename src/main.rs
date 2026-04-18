@@ -66,7 +66,7 @@ async fn main() {
     match config.mcp_transport {
         McpTransport::Stdio => {
             let transport = rmcp::transport::io::stdio();
-            tracing::debug!("Lore MCP server listening on stdio");
+            tracing::info!("Lore MCP server listening on stdio");
             let handle = match server.serve(transport).await {
                 Ok(h) => h,
                 Err(e) => {
@@ -80,7 +80,7 @@ async fn main() {
         }
         McpTransport::Sse => {
             let addr: SocketAddr = ([0, 0, 0, 0], config.mcp_sse_port).into();
-            tracing::debug!(%addr, "Lore MCP server listening on SSE");
+            tracing::info!(%addr, "Lore MCP server listening on SSE");
             let sse_server = match rmcp::transport::sse_server::SseServer::serve(addr).await {
                 Ok(s) => s,
                 Err(e) => {

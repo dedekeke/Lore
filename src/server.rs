@@ -118,8 +118,8 @@ fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json:
         }
         included.push(r);
         used = next;
-        // Stop scanning once the budget is met — the outer guard above
-        // will drop the next rule on the subsequent iteration.
+        // Stop scanning immediately once the budget is met — no further
+        // rules are evaluated.
         if used >= PROCEDURAL_CHAR_BUDGET {
             break;
         }
@@ -150,7 +150,7 @@ fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json:
         "total_bytes": used,
         "truncated": truncated,
         "limit": PROCEDURAL_RULE_LIMIT,
-        "char_budget": PROCEDURAL_CHAR_BUDGET,
+        "byte_budget": PROCEDURAL_CHAR_BUDGET,
     })
 }
 
@@ -3477,7 +3477,7 @@ mod tests {
         assert_eq!(v["rules"].as_array().unwrap().len(), 2);
         assert_eq!(v["truncated"], false);
         assert_eq!(v["limit"], PROCEDURAL_RULE_LIMIT);
-        assert_eq!(v["char_budget"], PROCEDURAL_CHAR_BUDGET);
+        assert_eq!(v["byte_budget"], PROCEDURAL_CHAR_BUDGET);
     }
 
     #[test]

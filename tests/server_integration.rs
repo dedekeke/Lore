@@ -697,7 +697,7 @@ async fn test_get_active_context_procedural_block_surfaces_with_flag() {
     let block = json["procedural"].as_object().expect("procedural block");
     assert_eq!(block["truncated"], false);
     assert_eq!(block["limit"], 20);
-    assert_eq!(block["char_budget"], 2000);
+    assert_eq!(block["byte_budget"], 2000);
     let rules = block["rules"].as_array().unwrap();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0]["id"], id);

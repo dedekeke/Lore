@@ -1,0 +1,270 @@
+[
+  {
+    "id": "mini-001-recall-coding-style",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Prefer tabs over spaces in Go code.",
+        "category": "preference"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Use async/await over .then() chains in TypeScript.",
+        "category": "preference"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "indentation convention for Go",
+        "expected_hits": ["rule-go-tabs"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-go-tabs"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-002-attempt-ledger",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "start_task",
+        "task_ref": "t1",
+        "description": "Fix flaky integration test in auth module"
+      },
+      {
+        "kind": "propose_attempt",
+        "task_ref": "t1",
+        "approach": "Increase timeout from 1s to 5s"
+      },
+      {
+        "kind": "log_outcome",
+        "attempt_ref": "t1-a1",
+        "outcome": "rejected",
+        "reasoning": "Root cause was race condition in test setup, not timing"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "auth module flaky test timeout",
+        "expected_hits": ["attempt-t1-a1"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["attempt-t1-a1"],
+      "task_completion": false
+    }
+  },
+  {
+    "id": "mini-003-lesson-consolidation",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "When Postgres connection pool exhausts, check for unclosed transactions in retry loops.",
+        "category": "lesson"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "postgres pool exhaustion",
+        "expected_hits": ["rule-pg-pool-retry"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-pg-pool-retry"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-004-cross-task-link",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "start_task",
+        "task_ref": "t2",
+        "description": "Migrate user table to new schema"
+      },
+      {
+        "kind": "start_task",
+        "task_ref": "t3",
+        "description": "Add foreign key from orders.user_id to users.id"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "foreign key migration",
+        "expected_hits": ["task-t3"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["task-t3"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-005-contradiction-detection",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Always use SELECT * in analytics queries for flexibility.",
+        "category": "preference"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Never use SELECT * in production queries; always enumerate columns.",
+        "category": "preference"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "SELECT star usage",
+        "expected_hits": ["rule-no-select-star"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-no-select-star"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-006-temporal-validity",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Use Node.js 18 for all services.",
+        "category": "constraint"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Use Node.js 20 for all services. (Supersedes the Node 18 rule.)",
+        "category": "constraint"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "Node.js version",
+        "expected_hits": ["rule-node-20"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-node-20"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-007-failure-search",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "start_task",
+        "task_ref": "t4",
+        "description": "Deploy new Kafka consumer"
+      },
+      {
+        "kind": "propose_attempt",
+        "task_ref": "t4",
+        "approach": "Set auto.offset.reset=latest"
+      },
+      {
+        "kind": "log_outcome",
+        "attempt_ref": "t4-a1",
+        "outcome": "rejected",
+        "reasoning": "Lost messages on consumer restart; should have used earliest"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "kafka consumer offset reset",
+        "expected_hits": ["attempt-t4-a1"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["attempt-t4-a1"],
+      "task_completion": false
+    }
+  },
+  {
+    "id": "mini-008-multi-hit-recall",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Use snake_case for database column names.",
+        "category": "preference"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Prefix boolean columns with is_ or has_.",
+        "category": "preference"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Use plural table names (users, not user).",
+        "category": "preference"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "database naming conventions",
+        "expected_hits": ["rule-snake-case", "rule-boolean-prefix", "rule-plural-tables"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-snake-case", "rule-boolean-prefix", "rule-plural-tables"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-009-task-completion",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "start_task",
+        "task_ref": "t5",
+        "description": "Reduce bundle size of frontend"
+      },
+      {
+        "kind": "propose_attempt",
+        "task_ref": "t5",
+        "approach": "Enable code splitting and lazy loading for routes"
+      },
+      {
+        "kind": "log_outcome",
+        "attempt_ref": "t5-a1",
+        "outcome": "accepted",
+        "reasoning": "Initial bundle dropped from 2.4MB to 780KB"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "frontend bundle size reduction",
+        "expected_hits": ["attempt-t5-a1"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["attempt-t5-a1"],
+      "task_completion": true
+    }
+  },
+  {
+    "id": "mini-010-irrelevant-noise",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "The office WiFi password changes monthly.",
+        "category": "fact"
+      },
+      {
+        "kind": "remember_rule",
+        "content": "CI runs on GitHub Actions with ubuntu-latest.",
+        "category": "fact"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "continuous integration platform",
+        "expected_hits": ["rule-ci-github"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-ci-github"],
+      "task_completion": null
+    }
+  }
+]

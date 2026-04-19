@@ -915,6 +915,50 @@ async fn test_remember_rule_at_cap_warning() {
             .await
             .unwrap();
 
+    // Seed 19 so the write brings the post-count to exactly 20 = at_cap.
+    for i in 0..19 {
+        sqlx::query(
+            "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
+             VALUES ($1, 'instruction', $2, true)",
+        )
+        .bind(project_id)
+        .bind(format!("seed {i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "exactly-at-cap instruction".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    let warn = body["always_inject_cap_warning"]
+        .as_object()
+        .expect("at-cap warning");
+    assert_eq!(warn["level"], "at_cap");
+    assert_eq!(warn["count"], 20);
+}
+
+#[tokio::test]
+async fn test_remember_rule_over_cap_warning() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-over-cap", "/tmp/rr-over-cap"))
+        .await
+        .unwrap();
+    let project_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM ai_memory.projects WHERE name = $1")
+            .bind("rr-over-cap")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
     for i in 0..20 {
         sqlx::query(
             "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
@@ -939,8 +983,8 @@ async fn test_remember_rule_at_cap_warning() {
     let body = extract_json(&res);
     let warn = body["always_inject_cap_warning"]
         .as_object()
-        .expect("at-cap warning");
-    assert_eq!(warn["level"], "at_cap");
+        .expect("over-cap warning");
+    assert_eq!(warn["level"], "over_cap");
     assert_eq!(warn["count"], 21);
 }
 

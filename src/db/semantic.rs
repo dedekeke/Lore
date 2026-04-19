@@ -184,6 +184,7 @@ pub async fn list_rules(
 pub async fn update_rule(
     pool: &PgPool,
     id: Uuid,
+    project_id: Uuid,
     category: Option<RuleCategory>,
     content: Option<&str>,
     embedding: Option<&[f32]>,
@@ -191,16 +192,20 @@ pub async fn update_rule(
     is_always_injected: Option<bool>,
 ) -> Result<bool, sqlx::Error> {
     let emb = embedding.map(|e| Vector::from(e.to_vec()));
+    // Scope to project_id so a rule UUID leaked into the wrong project session
+    // cannot be silently mutated, and so the caller's subsequent cap probe is
+    // guaranteed to be counting the same project as the UPDATE touched.
     let result = sqlx::query(
         "UPDATE ai_memory.semantic_rules SET \
-         category = COALESCE($2, category), \
-         content = COALESCE($3, content), \
-         embedding = COALESCE($4, embedding), \
-         tags = COALESCE($5, tags), \
-         is_always_injected = COALESCE($6, is_always_injected) \
-         WHERE id = $1",
+         category = COALESCE($3, category), \
+         content = COALESCE($4, content), \
+         embedding = COALESCE($5, embedding), \
+         tags = COALESCE($6, tags), \
+         is_always_injected = COALESCE($7, is_always_injected) \
+         WHERE id = $1 AND project_id = $2",
     )
     .bind(id)
+    .bind(project_id)
     .bind(category.as_ref())
     .bind(content)
     .bind(emb.as_ref())

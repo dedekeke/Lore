@@ -253,10 +253,19 @@ impl LoreServer {
         }
     }
 
-    /// Emit a response-side warning when the project's active always-inject
-    /// rule count is at or above `PROCEDURAL_NEAR_CAP_THRESHOLD`. At/above the
-    /// hard `PROCEDURAL_RULE_LIMIT`, tags it as `at_cap` so the agent knows
-    /// the oldest rule will be dropped on the next `get_active_context` call.
+    /// Emit a response-side warning after an always-inject write.
+    ///
+    /// `count` is read **after** the write (TOCTOU: two concurrent writes can
+    /// both see the same post-value and under-report the true count — this is
+    /// accepted because the warning is advisory, not enforcement).
+    ///
+    /// Levels:
+    /// - `near_cap`: `count >= NEAR_CAP_THRESHOLD` and `count < PROCEDURAL_RULE_LIMIT`
+    /// - `at_cap`: `count == PROCEDURAL_RULE_LIMIT` (project is exactly at the cap)
+    /// - `over_cap`: `count > PROCEDURAL_RULE_LIMIT` — `list_always_injected_rules`
+    ///   is `ORDER BY created_at ASC LIMIT N`, so the **newest** rules get
+    ///   shadowed in `get_active_context` until older ones are retired.
+    ///
     /// DB errors fall through silently — the write already succeeded.
     async fn always_inject_cap_warning(
         pool: &sqlx::PgPool,
@@ -264,10 +273,10 @@ impl LoreServer {
     ) -> Option<serde_json::Value> {
         match db::semantic::count_always_injected_rules(pool, project_id).await {
             Ok(count) if count >= PROCEDURAL_NEAR_CAP_THRESHOLD => {
-                let level = if count >= PROCEDURAL_RULE_LIMIT {
-                    "at_cap"
-                } else {
-                    "near_cap"
+                let level = match count.cmp(&PROCEDURAL_RULE_LIMIT) {
+                    std::cmp::Ordering::Less => "near_cap",
+                    std::cmp::Ordering::Equal => "at_cap",
+                    std::cmp::Ordering::Greater => "over_cap",
                 };
                 Some(serde_json::json!({
                     "level": level,
@@ -280,6 +289,21 @@ impl LoreServer {
                 tracing::warn!(error = %e, "always_inject cap probe failed — skipping warning");
                 None
             }
+        }
+    }
+
+    fn cap_nudge(verb: &str, warning: Option<&serde_json::Value>) -> String {
+        match warning.and_then(|w| w.get("level").and_then(|l| l.as_str())) {
+            Some("over_cap") => format!(
+                "Rule {verb}. Over cap — `list_always_injected_rules` order is ASC, so this newer rule will be shadowed in get_active_context until an older rule is retired via forget_rule."
+            ),
+            Some("at_cap") => format!(
+                "Rule {verb}. At the always-inject cap — the next flagged write will push a rule out of get_active_context. Retire a stale rule via forget_rule."
+            ),
+            Some("near_cap") => format!(
+                "Rule {verb}. Approaching the always-inject cap — consider retiring a stale procedural rule."
+            ),
+            _ => format!("Rule {verb}. Continue with your current task."),
         }
     }
 
@@ -634,7 +658,7 @@ pub struct RememberRuleParams {
     #[schemars(description = "Optional tags for categorizing the rule")]
     pub tags: Option<Vec<String>>,
     #[schemars(
-        description = "Behavioral switch: when true, this rule is prepended to every get_active_context response. Defaults to true when category = 'instruction', false otherwise. Capped at 20 active always-inject rules per project."
+        description = "Behavioral switch: when true, this rule is prepended to every get_active_context response. Defaults to true when category = 'instruction', false otherwise. Capped at 20 active always-inject rules per project. NOTE: Only applies to new rules. Pre-existing `instruction` rules stored before this API landed remain at false — flip them explicitly via update_rule."
     )]
     pub always_inject: Option<bool>,
 }
@@ -1102,12 +1126,8 @@ impl LoreServer {
             );
         }
 
-        let nudge = if cap_warning.is_some() {
-            "Rule stored. Warning: project is near the always-inject cap — consider retiring a stale procedural rule."
-        } else {
-            "Rule stored. Continue with your current task."
-        };
-        Self::json_content_with_nudge(&body, nudge)
+        let nudge = Self::cap_nudge("stored", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
     }
 
     #[tool(description = "Recall rules from memory using semantic search")]
@@ -1323,6 +1343,7 @@ impl LoreServer {
         let updated = db::semantic::update_rule(
             self.pool(),
             id,
+            project_id,
             cat,
             content.as_deref(),
             embedding.as_deref(),
@@ -1349,12 +1370,8 @@ impl LoreServer {
             body["always_inject_cap_warning"] = w.clone();
         }
 
-        let nudge = if cap_warning.is_some() {
-            "Rule updated. Warning: project is near the always-inject cap — consider retiring a stale procedural rule."
-        } else {
-            "Rule updated. Continue with your current task."
-        };
-        Self::json_content_with_nudge(&body, nudge)
+        let nudge = Self::cap_nudge("updated", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
     }
 
     // -- Ledger tools --

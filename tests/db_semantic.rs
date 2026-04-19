@@ -771,7 +771,7 @@ async fn test_update_rule_toggles_is_always_injected() {
     );
 
     // Turn the flag on; leave every other field untouched.
-    let updated = semantic::update_rule(&pool, id, None, None, None, None, Some(true))
+    let updated = semantic::update_rule(&pool, id, pid, None, None, None, None, Some(true))
         .await
         .unwrap();
     assert!(updated);
@@ -784,10 +784,45 @@ async fn test_update_rule_toggles_is_always_injected() {
     );
 
     // None preserves the existing value (no regression when flag is absent).
-    semantic::update_rule(&pool, id, None, Some("renamed"), None, None, None)
+    semantic::update_rule(&pool, id, pid, None, Some("renamed"), None, None, None)
         .await
         .unwrap();
     let after = semantic::get_rule(&pool, id).await.unwrap().unwrap();
     assert!(after.is_always_injected, "None must not clear the flag");
     assert_eq!(after.content, "renamed");
+}
+
+#[tokio::test]
+async fn test_update_rule_scoped_to_project_id() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "pa", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "pb", "/b").await.unwrap();
+    let id = semantic::create_rule(&pool, pa, RuleCategory::Fact, "pa-owned", None, &[])
+        .await
+        .unwrap();
+
+    // Cross-project update must no-op (rows_affected = 0).
+    let updated = semantic::update_rule(
+        &pool,
+        id,
+        pb,
+        None,
+        Some("hijacked"),
+        None,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
+    assert!(!updated, "cross-project update must not touch the rule");
+
+    let rule = semantic::get_rule(&pool, id).await.unwrap().unwrap();
+    assert_eq!(rule.content, "pa-owned");
+    assert!(!rule.is_always_injected);
+
+    // Correct project scope succeeds.
+    let updated = semantic::update_rule(&pool, id, pa, None, None, None, None, Some(true))
+        .await
+        .unwrap();
+    assert!(updated);
 }

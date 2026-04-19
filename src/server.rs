@@ -85,26 +85,55 @@ pub struct LoreServerInner {
 /// always-inject bloat if a project accumulates many standing instructions.
 const PROCEDURAL_RULE_LIMIT: i64 = 20;
 
-/// Combined content-char budget across procedural rules in one response.
-/// Rules past the budget are dropped and `truncated: true` is set.
+/// Combined content-byte budget across procedural rules in one response.
+/// Rules past the budget are dropped and `truncated: true` is set. Budget is
+/// measured in UTF-8 bytes (via `str::len`), not chars — multi-byte content
+/// counts more. The response field is named `total_bytes` to match.
 const PROCEDURAL_CHAR_BUDGET: usize = 2000;
 
+/// Builds the `procedural` JSON block for `get_active_context`.
+///
+/// Contract:
+/// - Called only when `cfg.procedural_memory` is on. If the caller sees NO
+///   `procedural` key on the response, either the flag is off or the DB
+///   fetch failed (we log+skip rather than failing the whole tool call).
+/// - If the flag is on and the project has zero active always-inject rules,
+///   an empty `{rules: [], truncated: false, ...}` block IS emitted so
+///   consumers can distinguish "feature on, nothing to show" from "feature
+///   off / upstream error".
+/// - `truncated: true` means the response does not faithfully represent
+///   every active always-inject rule for the project — either a rule was
+///   dropped past the byte budget, or a single included rule exceeded it.
 fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json::Value {
     let total_candidates = rules.len();
     let mut included: Vec<&db::semantic::SemanticRule> = Vec::new();
     let mut used = 0usize;
     for r in &rules {
         let next = used.saturating_add(r.content.len());
+        // Fail-open on the FIRST rule: even if it alone exceeds the byte
+        // budget, surface it so a critical standing instruction is never
+        // silently dropped. Subsequent rules that overshoot are dropped.
         if next > PROCEDURAL_CHAR_BUDGET && !included.is_empty() {
             break;
         }
         included.push(r);
         used = next;
+        // Stop scanning once the budget is met — the outer guard above
+        // will drop the next rule on the subsequent iteration.
         if used >= PROCEDURAL_CHAR_BUDGET {
             break;
         }
     }
-    let truncated = included.len() < total_candidates;
+    let over_budget = used > PROCEDURAL_CHAR_BUDGET;
+    if over_budget {
+        tracing::warn!(
+            total_bytes = used,
+            budget = PROCEDURAL_CHAR_BUDGET,
+            included = included.len(),
+            "procedural block exceeds byte budget — a single always-inject rule is oversize"
+        );
+    }
+    let truncated = included.len() < total_candidates || over_budget;
     let projected: Vec<serde_json::Value> = included
         .iter()
         .map(|r| {
@@ -118,7 +147,7 @@ fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json:
         .collect();
     serde_json::json!({
         "rules": projected,
-        "total_chars": used,
+        "total_bytes": used,
         "truncated": truncated,
         "limit": PROCEDURAL_RULE_LIMIT,
         "char_budget": PROCEDURAL_CHAR_BUDGET,
@@ -3460,19 +3489,29 @@ mod tests {
         let included = v["rules"].as_array().unwrap();
         assert!(included.len() <= 2, "third rule must be dropped");
         assert_eq!(v["truncated"], true);
-        assert!(v["total_chars"].as_u64().unwrap() >= (PROCEDURAL_CHAR_BUDGET - 10) as u64);
+        assert!(v["total_bytes"].as_u64().unwrap() >= (PROCEDURAL_CHAR_BUDGET - 10) as u64);
     }
 
     #[test]
-    fn test_procedural_block_single_oversize_included() {
+    fn test_procedural_block_single_oversize_is_included_and_flagged_truncated() {
+        // fail-open: the rule surfaces so the caller sees the standing
+        // instruction, but truncated=true because the byte budget was blown.
         let big = "x".repeat(PROCEDURAL_CHAR_BUDGET + 500);
         let v = build_procedural_block(vec![fake_rule(&big)]);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 1);
         assert_eq!(
-            v["rules"].as_array().unwrap().len(),
-            1,
-            "a single oversize rule still surfaces (fail-open on first item)"
+            v["truncated"], true,
+            "truncated must be true when budget is exceeded, even by a single included rule"
         );
+        assert!(v["total_bytes"].as_u64().unwrap() > PROCEDURAL_CHAR_BUDGET as u64);
+    }
+
+    #[test]
+    fn test_procedural_block_empty_on_no_rules() {
+        let v = build_procedural_block(vec![]);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 0);
         assert_eq!(v["truncated"], false);
+        assert_eq!(v["total_bytes"], 0);
     }
 
     #[test]

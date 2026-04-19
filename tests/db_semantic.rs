@@ -604,6 +604,31 @@ async fn test_list_always_injected_excludes_superseded() {
 }
 
 #[tokio::test]
+async fn test_list_always_injected_excludes_future_dated() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Instruction, "future", None, &[])
+        .await
+        .unwrap();
+    flag_always_inject(&pool, id).await;
+    sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET valid_from = NOW() + INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        semantic::list_always_injected_rules(&pool, pid, 20)
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "future-dated rules (valid_from > NOW()) must not surface"
+    );
+}
+
+#[tokio::test]
 async fn test_list_always_injected_excludes_expired() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();

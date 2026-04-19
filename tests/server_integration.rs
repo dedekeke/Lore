@@ -670,7 +670,9 @@ async fn remember_then_flag_always_inject(
         .unwrap();
     let rule_id = extract_json(&res)["rule_id"]
         .as_str()
-        .expect("remember_rule returned no rule_id (dedup guard fired?)")
+        .unwrap_or_else(|| {
+            panic!("remember_rule returned no rule_id — dedup guard fired for content: {content:?}")
+        })
         .to_string();
     sqlx::query("UPDATE ai_memory.semantic_rules SET is_always_injected = true WHERE id = $1")
         .bind(uuid::Uuid::parse_str(&rule_id).unwrap())

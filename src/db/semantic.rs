@@ -111,6 +111,7 @@ pub async fn list_always_injected_rules(
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE s.project_id = $1 \
            AND s.is_always_injected = true \
+           AND s.valid_from <= NOW() \
            AND s.valid_until IS NULL \
            AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
          ORDER BY s.created_at ASC \

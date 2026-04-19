@@ -158,6 +158,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         category: category.clone(),
                         content: content.clone(),
                         tags: None,
+                        always_inject: None,
                     }))
                     .await?;
                 // `rule_id` absent when server short-circuits on duplicate_warning

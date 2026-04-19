@@ -22,6 +22,23 @@ Instead of re-loading thousands of tokens of chat history on every context wipe,
 
 ---
 
+## Why persistent memory?
+
+Lore is not independently benchmarked yet, so the numbers below come from published research on closely-related systems (episodic memory, reflection loops, temporal KGs, retrieval-augmented agents). They show the *direction* and *magnitude* of gains reported for the primitives Lore implements — not a guarantee of identical results in your setup.
+
+| Stat | From | Relevance to Lore |
+|------|------|-------------------|
+| **+26 pp task accuracy** — 93.4 vs ~67.4 on LongMemEval with structured memory vs full-context baseline | [Mem0 production algorithm](https://mem0.ai/research) | Mirrors Lore's rules + episodic ledger vs re-loading chat history |
+| **3–4× token reduction** per retrieval call — <7K tokens with memory vs 25K+ full-context | [Mem0 production algorithm](https://mem0.ai/research) | `recall_rules(compact=true)` + `get_rule` follow the same progressive disclosure pattern |
+| **30% accuracy drop without memory** on sustained multi-session interaction (LongMemEval, 500 questions) | [Si et al. 2024 — LongMemEval](https://arxiv.org/abs/2410.10813) | Quantifies the cost of losing context on every wipe — what Lore's ledger prevents |
+| **+11 pp pass@1 on HumanEval** (91% vs 80%) with verbal reflection over failed attempts | [Shinn et al. 2023 — Reflexion](https://arxiv.org/abs/2303.11366) | Directly analogous to Lore's `log_outcome('rejected', reasoning)` + auto-consolidation into lessons |
+| **+18.5 pp temporal reasoning & 90% latency reduction** on LongMemEval with temporal knowledge graph | [Rasmussen et al. 2025 — Zep Graphiti](https://arxiv.org/abs/2501.13956) | Supports Lore's temporal rule validity (`valid_from`/`valid_until`) and typed edges |
+| **0.40 → 0.66 accuracy** on multi-hop RAG (FRAMES) with retrieval vs none | [FRAMES 2024](https://arxiv.org/abs/2409.12941) | Cross-task links (`blocks`, `caused_by`) + community-aware search do similar multi-hop synthesis |
+
+**Caveats you should read.** Mem0 and Zep are self-reported on benchmarks they selected. Reflexion is a prompting technique, not a persistent store — the gain is within-session. LongMemEval and FRAMES are third-party benchmarks but measure chat/RAG, not coding agents. Treat these as lower bounds on "structured memory helps" rather than predictions for Lore specifically. A project-local eval harness is on the roadmap.
+
+---
+
 ## Quick Start
 
 ```bash

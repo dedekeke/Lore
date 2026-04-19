@@ -5,9 +5,11 @@
 //! (LoCoMo / LongMemEval / BEAM) come in follow-up PRs.
 
 pub mod fixtures;
+pub mod harness;
 pub mod loader;
 pub mod types;
 
 pub use fixtures::load_mini;
+pub use harness::{replay_case, CaseRun, RecallRun, ReplayError};
 pub use loader::{DatasetLoader, DatasetSource, EvalError};
 pub use types::{EvalCase, EvalEvent, ExpectedOutcome, OutcomeKind};

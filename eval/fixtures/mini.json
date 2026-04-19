@@ -6,12 +6,14 @@
       {
         "kind": "remember_rule",
         "content": "Prefer tabs over spaces in Go code.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-go-tabs"
       },
       {
         "kind": "remember_rule",
         "content": "Use async/await over .then() chains in TypeScript.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-ts-async"
       },
       {
         "kind": "recall_rules",
@@ -62,7 +64,8 @@
       {
         "kind": "remember_rule",
         "content": "When Postgres connection pool exhausts, check for unclosed transactions in retry loops.",
-        "category": "lesson"
+        "category": "lesson",
+        "label": "rule-pg-pool-retry"
       },
       {
         "kind": "recall_rules",
@@ -107,12 +110,14 @@
       {
         "kind": "remember_rule",
         "content": "Always use SELECT * in analytics queries for flexibility.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-select-star-analytics"
       },
       {
         "kind": "remember_rule",
         "content": "Never use SELECT * in production queries; always enumerate columns.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-no-select-star"
       },
       {
         "kind": "recall_rules",
@@ -132,12 +137,14 @@
       {
         "kind": "remember_rule",
         "content": "Use Node.js 18 for all services.",
-        "category": "constraint"
+        "category": "constraint",
+        "label": "rule-node-18"
       },
       {
         "kind": "remember_rule",
         "content": "Use Node.js 20 for all services. (Supersedes the Node 18 rule.)",
-        "category": "constraint"
+        "category": "constraint",
+        "label": "rule-node-20"
       },
       {
         "kind": "recall_rules",
@@ -188,17 +195,20 @@
       {
         "kind": "remember_rule",
         "content": "Use snake_case for database column names.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-snake-case"
       },
       {
         "kind": "remember_rule",
         "content": "Prefix boolean columns with is_ or has_.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-boolean-prefix"
       },
       {
         "kind": "remember_rule",
         "content": "Use plural table names (users, not user).",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-plural-tables"
       },
       {
         "kind": "recall_rules",
@@ -249,12 +259,14 @@
       {
         "kind": "remember_rule",
         "content": "The office WiFi password changes monthly.",
-        "category": "fact"
+        "category": "fact",
+        "label": "rule-wifi-noise"
       },
       {
         "kind": "remember_rule",
         "content": "CI runs on GitHub Actions with ubuntu-latest.",
-        "category": "fact"
+        "category": "fact",
+        "label": "rule-ci-github"
       },
       {
         "kind": "recall_rules",
@@ -274,7 +286,8 @@
       {
         "kind": "remember_rule",
         "content": "Use Rust edition 2024 for all new crates.",
-        "category": "preference"
+        "category": "preference",
+        "label": "rule-rust-2024"
       },
       {
         "kind": "recall_rules",

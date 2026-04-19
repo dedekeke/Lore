@@ -164,14 +164,19 @@ impl fmt::Display for CompareReport {
         for d in &self.datasets {
             writeln!(f, "  [{}]", d.name)?;
             for m in &d.deltas {
+                let tag = if m.regression {
+                    "  REGRESSION"
+                } else if !m.delta.is_finite() {
+                    // Non-finite delta = upstream NaN/inf in aggregate; surface
+                    // it in the CI log so it isn't mistaken for a clean pass.
+                    "  [non-finite delta — upstream bug]"
+                } else {
+                    ""
+                };
                 writeln!(
                     f,
                     "    {:<20} baseline={:.4} current={:.4} delta={:+.4}{}",
-                    m.name,
-                    m.baseline,
-                    m.current,
-                    m.delta,
-                    if m.regression { "  REGRESSION" } else { "" },
+                    m.name, m.baseline, m.current, m.delta, tag,
                 )?;
             }
             for s in &d.shape_mismatches {
@@ -398,8 +403,11 @@ mod tests {
             .deltas
             .iter()
             .find(|d| d.name == "mean_precision_at_k")
-            .unwrap();
+            .expect("mean_precision_at_k delta must be present in report");
         assert!(!precision.regression);
+        // Display surfaces the non-finite delta rather than silently passing.
+        let s = format!("{report}");
+        assert!(s.contains("non-finite delta"), "{s}");
     }
 
     #[test]

@@ -4,11 +4,12 @@ use lore::config::Config;
 use lore::embeddings::fake::FakeEmbeddingProvider;
 use lore::embeddings::AnyEmbeddingProvider;
 use lore::server::{
-    AbandonTaskParams, CompleteTaskParams, ExportMemoryParams, FindSimilarFailuresParams,
-    ForgetRuleParams, GenerateHandoffParams, GetNextStepsParams, GetTaskStatsParams,
-    ListRulesParams, ListTasksParams, LogContextWipeParams, LogOutcomeParams, LoreServer,
-    ProposeAttemptParams, RecallRulesParams, RememberRuleParams, ReviewLedgerParams,
-    StartTaskParams, SwitchProjectParams, UpdateRuleParams,
+    AbandonTaskParams, CompleteTaskParams, DeleteScratchParams, ExportMemoryParams,
+    FindSimilarFailuresParams, ForgetRuleParams, GenerateHandoffParams, GetNextStepsParams,
+    GetTaskStatsParams, ListRulesParams, ListScratchParams, ListTasksParams, LogContextWipeParams,
+    LogOutcomeParams, LoreServer, ProposeAttemptParams, ReadScratchParams, RecallRulesParams,
+    RememberRuleParams, ReviewLedgerParams, StartTaskParams, SwitchProjectParams, UpdateRuleParams,
+    WriteScratchParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
@@ -1107,4 +1108,193 @@ async fn test_update_rule_allows_only_always_inject() {
     assert_eq!(body["updated"], true);
     assert_eq!(body["always_inject"], false);
     assert!(!rule_is_flagged(&pool, &rule_id).await);
+}
+
+#[tokio::test]
+async fn test_scratchpad_write_read_list_delete() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("scratch-proj", "/tmp/scratch-proj"))
+        .await
+        .unwrap();
+
+    let written = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "focus".into(),
+            value: "auth refactor".into(),
+            task_id: None,
+            ttl_secs: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&written);
+    assert_eq!(body["key"], "focus");
+    assert_eq!(body["value"], "auth refactor");
+
+    let read = server
+        .read_scratch(Parameters(ReadScratchParams {
+            key: "focus".into(),
+            task_id: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&read)["value"], "auth refactor");
+
+    server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "focus".into(),
+            value: "rename columns".into(),
+            task_id: None,
+            ttl_secs: None,
+        }))
+        .await
+        .unwrap();
+    let read2 = server
+        .read_scratch(Parameters(ReadScratchParams {
+            key: "focus".into(),
+            task_id: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&read2)["value"], "rename columns");
+
+    let listed = server
+        .list_scratch(Parameters(ListScratchParams {
+            task_id: None,
+            limit: Some(10),
+        }))
+        .await
+        .unwrap();
+    let list = extract_json(&listed);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["key"], "focus");
+
+    let deleted = server
+        .delete_scratch(Parameters(DeleteScratchParams {
+            key: "focus".into(),
+            task_id: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(extract_json(&deleted)["deleted"], true);
+
+    let miss = server
+        .read_scratch(Parameters(ReadScratchParams {
+            key: "focus".into(),
+            task_id: None,
+        }))
+        .await
+        .unwrap();
+    assert!(extract_json(&miss)["entry"].is_null());
+}
+
+#[tokio::test]
+async fn test_scratchpad_value_scrubbed() {
+    let (server, _pool, _c) = setup_server_with(|c| c.scrub_secrets = true).await;
+    server
+        .switch_project(switch_params("scratch-scrub", "/tmp/scratch-scrub"))
+        .await
+        .unwrap();
+
+    let secret = "api_key=abcdefghijklmnop1234";
+    server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "creds".into(),
+            value: secret.into(),
+            task_id: None,
+            ttl_secs: None,
+        }))
+        .await
+        .unwrap();
+
+    let read = server
+        .read_scratch(Parameters(ReadScratchParams {
+            key: "creds".into(),
+            task_id: None,
+        }))
+        .await
+        .unwrap();
+    let stored = extract_json(&read)["value"].as_str().unwrap().to_string();
+    assert!(
+        !stored.contains("abcdefghijklmnop1234"),
+        "secret must be scrubbed from stored value, got {stored:?}"
+    );
+    assert!(stored.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn test_scratchpad_invalid_ttl_rejected() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("scratch-ttl", "/tmp/scratch-ttl"))
+        .await
+        .unwrap();
+
+    let err = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "k".into(),
+            value: "v".into(),
+            task_id: None,
+            ttl_secs: Some(0),
+        }))
+        .await;
+    assert!(err.is_err(), "ttl_secs=0 must be rejected");
+
+    let neg = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "k".into(),
+            value: "v".into(),
+            task_id: None,
+            ttl_secs: Some(-1),
+        }))
+        .await;
+    assert!(neg.is_err(), "negative ttl_secs must be rejected");
+
+    let huge = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "k".into(),
+            value: "v".into(),
+            task_id: None,
+            ttl_secs: Some(i64::MAX),
+        }))
+        .await;
+    assert!(huge.is_err(), "overflow-class ttl_secs must be rejected");
+}
+
+#[tokio::test]
+async fn test_scratchpad_blank_key_rejected() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("scratch-blank", "/tmp/scratch-blank"))
+        .await
+        .unwrap();
+
+    for k in ["", "   ", "\t\n"] {
+        let err = server
+            .write_scratch(Parameters(WriteScratchParams {
+                key: k.into(),
+                value: "v".into(),
+                task_id: None,
+                ttl_secs: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on write");
+
+        let err = server
+            .read_scratch(Parameters(ReadScratchParams {
+                key: k.into(),
+                task_id: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on read");
+
+        let err = server
+            .delete_scratch(Parameters(DeleteScratchParams {
+                key: k.into(),
+                task_id: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on delete");
+    }
 }

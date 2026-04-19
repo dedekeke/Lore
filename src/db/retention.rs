@@ -66,6 +66,14 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
             }
             Err(e) => tracing::warn!(error = %e, "Failed to purge completed tasks"),
         }
+        match prune_expired_scratchpad(&pool).await {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::debug!(rows = n, "Pruned expired scratchpad entries")
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to prune expired scratchpad entries"),
+        }
         match consolidate_old_attempts(&pool, config.decay_after_days, config.decay_min_accepted)
             .await
         {
@@ -236,6 +244,18 @@ pub async fn consolidate_old_attempts(
         created += 1;
     }
     Ok(created)
+}
+
+/// Physically delete scratchpad rows whose `expires_at` has passed. Reads
+/// already filter these out; this reclaims storage.
+pub async fn prune_expired_scratchpad(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM ai_memory.scratchpad \
+         WHERE expires_at IS NOT NULL AND expires_at <= NOW()",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 // TODO: implement proper archival (move to archive table) — deferred to post-MVP

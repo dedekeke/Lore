@@ -9,7 +9,8 @@ local-embeddings = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
 eval = []
 
 [dependencies]
-rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server", "macros"] }
+rmcp = { version = "0.10.0", features = ["server", "transport-io", "transport-sse-server", "macros", "elicitation"] }
+schemars = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

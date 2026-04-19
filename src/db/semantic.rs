@@ -247,17 +247,19 @@ pub async fn search_rules_hybrid(
                  0.35 * fused.v_score
                + 0.25 * fused.f_score
                + 0.20 * CASE s.category::text
-                          WHEN 'constraint' THEN 1.0
-                          WHEN 'lesson'     THEN 0.75
-                          WHEN 'fact'       THEN 0.50
-                          WHEN 'preference' THEN 0.25
+                          WHEN 'constraint'  THEN 1.0
+                          WHEN 'instruction' THEN 0.80
+                          WHEN 'lesson'      THEN 0.75
+                          WHEN 'fact'        THEN 0.50
+                          WHEN 'preference'  THEN 0.25
                           ELSE 0.25 END
                + 0.10 * EXP(
                    -1.0 * CASE s.category::text
-                            WHEN 'constraint' THEN 0.0
-                            WHEN 'lesson'     THEN 0.01
-                            WHEN 'fact'       THEN 0.005
-                            WHEN 'preference' THEN 0.02
+                            WHEN 'constraint'  THEN 0.0
+                            WHEN 'instruction' THEN 0.005
+                            WHEN 'lesson'      THEN 0.01
+                            WHEN 'fact'        THEN 0.005
+                            WHEN 'preference'  THEN 0.02
                             ELSE 0.01 END
                    * EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_used_at, s.created_at))) / 86400.0
                  )

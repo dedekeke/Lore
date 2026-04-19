@@ -49,6 +49,12 @@ async fn test_create_instruction_rule() {
     let rule = semantic::get_rule(&pool, id).await.unwrap().unwrap();
     assert_eq!(rule.category, RuleCategory::Instruction);
     assert!(!rule.is_always_injected);
+
+    let listed = semantic::list_rules(&pool, pid, Some(RuleCategory::Instruction), None)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
 }
 
 #[tokio::test]

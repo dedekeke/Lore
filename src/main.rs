@@ -1,7 +1,7 @@
 use lore::config::{Config, McpTransport};
 use lore::{db, embeddings, server};
 use rmcp::ServiceExt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -82,7 +82,17 @@ async fn main() {
             }
         }
         McpTransport::Sse => {
-            let addr: SocketAddr = ([0, 0, 0, 0], config.mcp_sse_port).into();
+            let bind: IpAddr = config.mcp_sse_bind.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = %config.mcp_sse_bind,
+                    "Invalid MCP_SSE_BIND, defaulting to 127.0.0.1"
+                );
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            });
+            let addr: SocketAddr = SocketAddr::new(bind, config.mcp_sse_port);
+            if bind.is_unspecified() {
+                tracing::warn!(%addr, "SSE bound to 0.0.0.0 — exposed to the network. Use MCP_SSE_BIND=127.0.0.1 for local-only.");
+            }
             tracing::info!(%addr, "Lore MCP server listening on SSE");
             let sse_server = match rmcp::transport::sse_server::SseServer::serve(addr).await {
                 Ok(s) => s,

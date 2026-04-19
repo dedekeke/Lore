@@ -28,6 +28,7 @@ pub struct Config {
 
     pub mcp_transport: McpTransport,
     pub mcp_sse_port: u16,
+    pub mcp_sse_bind: String,
     pub log_level: String,
 
     pub retention_attempts_days: u32,
@@ -80,7 +81,8 @@ impl Config {
             embedding_dimensions: parse_warn_or("EMBEDDING_DIMENSIONS", 384),
 
             mcp_transport,
-            mcp_sse_port: parse_warn_or("MCP_SSE_PORT", 3100),
+            mcp_sse_port: parse_warn_or("MCP_SSE_PORT", 3101),
+            mcp_sse_bind: env::var("MCP_SSE_BIND").unwrap_or_else(|_| "127.0.0.1".into()),
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into()),
 
             retention_attempts_days: parse_warn_or("RETENTION_ATTEMPTS_DAYS", 30),
@@ -117,7 +119,7 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
                 == "true",
-            dashboard_port: parse_warn_or("DASHBOARD_PORT", 3101),
+            dashboard_port: parse_warn_or("DASHBOARD_PORT", 3102),
             capture_git_ref: env::var("CAPTURE_GIT_REF")
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
@@ -169,6 +171,7 @@ mod tests {
             "EMBEDDING_DIMENSIONS",
             "MCP_TRANSPORT",
             "MCP_SSE_PORT",
+            "MCP_SSE_BIND",
             "LOG_LEVEL",
             "RETENTION_ATTEMPTS_DAYS",
             "RETENTION_SNAPSHOTS_DAYS",

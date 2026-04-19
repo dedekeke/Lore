@@ -42,65 +42,47 @@ Lore is not independently benchmarked yet, so the numbers below come from publis
 
 ## Quick Start
 
-```bash
-cp .env.example .env
-cargo build --release
-./target/release/lore
-```
-
-Requires Rust 1.75+, Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector).
-
-### Docker Postgres
+One command — starts Postgres (via docker), builds, and runs Lore as an HTTP/SSE daemon on port **3101**:
 
 ```bash
-docker run -d --name lore-db \
-  -e POSTGRES_USER=lore \
-  -e POSTGRES_PASSWORD=password \
-  -e POSTGRES_DB=ai_memory \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
+./start.sh
 ```
 
-### Without local ONNX embeddings
+Then point any MCP client at it (same config works in every project — no per-project `.mcp.json` needed):
 
-Building with `--no-default-features` skips the `ort` runtime (smaller binary, faster build) but disables every feature that relies on vector search — rule recall, failure search, codebase indexing, and hybrid/MMR code search will all return an error at runtime. Build with default features unless you're certain you don't need them.
+```json
+{ "mcpServers": { "lore": { "url": "http://localhost:3101/sse" } } }
+```
 
----
+That's it. `./start.sh` also supports `stop`, `restart`, `status`, `logs`, `foreground`. PID and logs live in `./run/`.
 
-## MCP Client Config
+**Scope:** this is a local, single-user daemon. It binds `127.0.0.1:3101` by default (no auth). To expose it on the network, set `MCP_SSE_BIND=0.0.0.0` in `.env` — understand the tool surface is unauthenticated before you do.
 
-Claude Code — drop in `.mcp.json` at project root:
+Requires Rust 1.75+, Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
+
+### Stdio mode (legacy)
+
+If your client only speaks stdio, set `MCP_TRANSPORT=stdio` and point it at the binary:
 
 ```json
 {
   "mcpServers": {
     "lore": {
-      "command": "/path/to/lore",
+      "command": "/path/to/target/release/lore",
       "env": {
-        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory",
-        "EMBEDDING_MODEL": "all-MiniLM-L6-v2",
-        "EMBEDDING_DIMENSIONS": "384"
+        "MCP_TRANSPORT": "stdio",
+        "DATABASE_URL": "postgres://lore:password@localhost:5432/ai_memory"
       }
     }
   }
 }
 ```
 
-Claude Desktop uses the same shape in `claude_desktop_config.json`.
+> The binary loads `.env` from its CWD via `dotenvy`; clients that launch it from elsewhere must pass env vars explicitly.
 
-> The binary loads `.env` from its CWD via `dotenvy`, but MCP clients launch it from elsewhere — **always pass required env vars explicitly** in the MCP config.
+### Without local ONNX embeddings
 
-### SSE transport (remote)
-
-```bash
-MCP_TRANSPORT=sse MCP_SSE_PORT=3100 ./target/release/lore
-```
-
-Clients connect at `http://host:3100/sse`. Config for SSE-capable clients:
-
-```json
-{ "mcpServers": { "lore": { "url": "http://localhost:3100/sse" } } }
-```
+Building with `--no-default-features` skips the `ort` runtime (smaller binary, faster build) but disables every feature that relies on vector search — rule recall, failure search, codebase indexing, and hybrid/MMR code search will all return an error at runtime. Build with default features unless you're certain you don't need them.
 
 ---
 
@@ -194,7 +176,8 @@ All via environment variables (see `.env.example`):
 | `EMBEDDING_MODEL`                    | `all-MiniLM-L6-v2`                                  | Local ONNX embedding model name                                |
 | `EMBEDDING_DIMENSIONS`               | `384`                                               | Must match model and DB schema                                 |
 | `MCP_TRANSPORT`                      | `stdio`                                             | `stdio` or `sse`                                               |
-| `MCP_SSE_PORT`                       | `3100`                                              | SSE port                                                       |
+| `MCP_SSE_PORT`                       | `3101`                                              | SSE port                                                       |
+| `MCP_SSE_BIND`                       | `127.0.0.1`                                         | SSE bind address (set `0.0.0.0` to expose on the network)      |
 | `LOG_LEVEL`                          | `warn`                                              | Tracing filter (adds `ort=warn` automatically)                 |
 | `RETENTION_ATTEMPTS_DAYS`            | `30`                                                | Auto-delete attempts older than N days                         |
 | `RETENTION_SNAPSHOTS_DAYS`           | `7`                                                 | Auto-delete context snapshots older than N days                |
@@ -209,7 +192,7 @@ All via environment variables (see `.env.example`):
 | `LORE_PROACTIVE_CONTEXT`             | `false`                                             | Inject context into responses proactively                      |
 | `LORE_SCRUB_SECRETS`                 | `true`                                              | Redact secrets on every store path                             |
 | `DASHBOARD_ENABLED`                  | `false`                                             | Enable web dashboard                                           |
-| `DASHBOARD_PORT`                     | `3101`                                              | Dashboard HTTP port                                            |
+| `DASHBOARD_PORT`                     | `3102`                                              | Dashboard HTTP port                                            |
 | `WEBHOOK_URL`                        | —                                                   | HTTP endpoint for event notifications                          |
 | `WEBHOOK_EVENTS`                     | `task_completed,task_abandoned,rejection_threshold` | Event types to fire                                            |
 | `WEBHOOK_REJECTION_THRESHOLD`        | `3`                                                 | Fire webhook after N rejections on same task                   |

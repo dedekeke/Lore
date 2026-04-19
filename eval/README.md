@@ -10,7 +10,7 @@ This directory lands across five tasks (P1-T1..P1-T5). P1-T1 and P1-T2 are merge
 |------|-------|
 | P1-T1 ✅ | Types, loader trait, `fixtures/mini.json` (12 synthetic cases), unit test |
 | P1-T2 ✅ | `src/eval/harness.rs` replay runner + `tests/eval_replay.rs` |
-| P1-T3 | `src/eval/metrics.rs` (precision@k, recall@k, MRR, task accuracy) |
+| P1-T3 ✅ | `src/eval/metrics.rs` (precision@k, recall@k, MRR) + smoke assertions |
 | P1-T4 | `eval/baselines.json` captured from develop HEAD |
 | P1-T5 | Nightly GitHub Actions workflow + PR delta bot |
 | Follow-up | Real dataset loaders: LoCoMo, LongMemEval, BEAM |
@@ -57,6 +57,10 @@ See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) p
 P1-T3 grades by mapping the UUIDs returned by `recall_rules` back to labels via this map and comparing to `expected_hits`.
 
 An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip. Cases whose `expected_hits` reference `task-*` or `attempt-*` labels (e.g. `mini-002`, `mini-004`, `mini-007`, `mini-009`, `mini-012`) will score zero against the current `recall_rules` implementation because that tool searches `semantic_rules` only; a dedicated `FindSimilarFailures` event type is a planned follow-up.
+
+### Metrics (P1-T3)
+
+`src/eval/metrics.rs` computes **precision@k**, **recall@k**, and **MRR** over `CaseRun`s. Means are taken across individual `RecallRun`s, so a case with more queries contributes proportionally to the aggregate. Labels that did not resolve to a UUID at replay time (near-duplicate short-circuit, or `task-*`/`attempt-*` references that `recall_rules` cannot return) stay in the recall denominator but can never enter the numerator — they score as misses. Negative cases (empty `expected_hits`) contribute to precision (1.0 when the server returned nothing, 0.0 otherwise) and are excluded from recall/MRR means, which are undefined without gold references.
 
 ## Baseline update policy
 

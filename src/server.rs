@@ -12,6 +12,52 @@ use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
 use crate::webhooks;
 
+struct PromptArg {
+    name: &'static str,
+    description: &'static str,
+    required: bool,
+}
+
+struct PromptDef {
+    name: &'static str,
+    description: &'static str,
+    arguments: &'static [PromptArg],
+    render: fn(&serde_json::Map<String, serde_json::Value>) -> String,
+}
+
+impl PromptDef {
+    fn to_prompt(&self) -> Prompt {
+        let args: Vec<PromptArgument> = self
+            .arguments
+            .iter()
+            .map(|a| PromptArgument {
+                name: a.name.to_string(),
+                description: Some(a.description.to_string()),
+                required: Some(a.required),
+            })
+            .collect();
+        Prompt::new::<&str, String>(
+            self.name,
+            Some(self.description.to_string()),
+            if args.is_empty() { None } else { Some(args) },
+        )
+    }
+
+    fn render(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+        (self.render)(args)
+    }
+}
+
+fn arg_str(args: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| Some(v.to_string()))
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 pub struct LoreServer {
     inner: Arc<LoreServerInner>,
@@ -275,6 +321,116 @@ impl LoreServer {
         let json = serde_json::to_string_pretty(&obj)
             .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    fn prompt_catalog() -> Vec<PromptDef> {
+        vec![
+            PromptDef {
+                name: "plan_task",
+                description:
+                    "Decompose a goal into a parent task plus subtasks following the Lore protocol.",
+                arguments: &[PromptArg {
+                    name: "goal",
+                    description: "What the user wants to accomplish.",
+                    required: true,
+                }],
+                render: |args| {
+                    let goal = arg_str(args, "goal");
+                    format!(
+                        "New goal: {goal}\n\n\
+                         Follow Lore protocol:\n\
+                         1. Call start_task(description=\"{goal}\") first.\n\
+                         2. If this involves 3+ distinct steps, decompose into subtasks via start_task(..., parent_task_id=<id>).\n\
+                         3. For each subtask, call propose_attempt BEFORE writing code.\n\
+                         4. Set priority (P1-P4) and task_type (Bug/Feature/Security/Refactor) where appropriate."
+                    )
+                },
+            },
+            PromptDef {
+                name: "resume_work",
+                description: "Cold-start briefing: pick the top pending task and continue.",
+                arguments: &[],
+                render: |_args| {
+                    "Resuming session. Steps:\n\
+                     1. Call get_next_steps() for the scored action list.\n\
+                     2. Select the top-scored active task.\n\
+                     3. Call review_ledger(task_id) if it has rejected attempts.\n\
+                     4. Call propose_attempt(task_id, approach) before writing code."
+                        .to_string()
+                },
+            },
+            PromptDef {
+                name: "review_ledger",
+                description: "Inspect prior attempts for a task before proposing a new approach.",
+                arguments: &[PromptArg {
+                    name: "task_id",
+                    description: "UUID of the task to review.",
+                    required: true,
+                }],
+                render: |args| {
+                    let task_id = arg_str(args, "task_id");
+                    format!(
+                        "Call review_ledger(task_id=\"{task_id}\") and analyse:\n\
+                         - Rejected attempts: why did each fail? Identify the pattern.\n\
+                         - Pending attempts: is any awaiting user confirmation?\n\
+                         - Do NOT repeat an approach that was already rejected.\n\
+                         Then call propose_attempt with a genuinely different strategy."
+                    )
+                },
+            },
+            PromptDef {
+                name: "diagnose_failure",
+                description: "Log a failed attempt and propose a corrective fix.",
+                arguments: &[
+                    PromptArg {
+                        name: "task_id",
+                        description: "UUID of the task.",
+                        required: true,
+                    },
+                    PromptArg {
+                        name: "error",
+                        description: "Error message or failure description.",
+                        required: true,
+                    },
+                ],
+                render: |args| {
+                    let task_id = arg_str(args, "task_id");
+                    let error = arg_str(args, "error");
+                    format!(
+                        "Failure reported on task {task_id}.\n\
+                         Error: {error}\n\n\
+                         Protocol:\n\
+                         1. Call log_outcome(attempt_id=<last_pending>, outcome=\"rejected\", reasoning=\"{error}\", code_snippet=<failing code>).\n\
+                         2. Call review_ledger(task_id=\"{task_id}\") to cross-check prior failures.\n\
+                         3. Call propose_attempt with a fix that addresses the root cause, not the symptom."
+                    )
+                },
+            },
+            PromptDef {
+                name: "record_lesson",
+                description: "Store a reusable lesson learned from a completed task.",
+                arguments: &[
+                    PromptArg {
+                        name: "topic",
+                        description: "Short topic tag for the lesson.",
+                        required: true,
+                    },
+                    PromptArg {
+                        name: "insight",
+                        description: "What was learned and why it matters.",
+                        required: true,
+                    },
+                ],
+                render: |args| {
+                    let topic = arg_str(args, "topic");
+                    let insight = arg_str(args, "insight");
+                    format!(
+                        "Call remember_rule(category=\"lesson\", content=\"[{topic}] {insight}\"). \
+                         Make the content self-contained: future sessions will retrieve it without surrounding context, so include the trigger condition and the corrective action."
+                    )
+                },
+            },
+        ]
     }
 
     pub fn protocol_text() -> &'static str {
@@ -2548,6 +2704,7 @@ impl ServerHandler for LoreServer {
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
             ..Default::default()
         }
@@ -2575,6 +2732,37 @@ impl ServerHandler for LoreServer {
                     name: "Active Context".into(),
                     description: Some(
                         "Current project, active tasks, and context wipe count".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://tasks/active".into(),
+                    name: "Active Tasks".into(),
+                    description: Some(
+                        "Currently active tasks for the current project with attempt counts".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://lessons/recent".into(),
+                    name: "Recent Lessons".into(),
+                    description: Some(
+                        "Ten most recent Lesson-category rules for the current project".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://rules".into(),
+                    name: "Semantic Rules".into(),
+                    description: Some(
+                        "All active semantic rules for the current project, grouped by category"
+                            .into(),
                     ),
                     mime_type: Some("application/json".into()),
                     size: None,
@@ -2627,11 +2815,144 @@ impl ServerHandler for LoreServer {
                     contents: vec![ResourceContents::text(text, "lore://active-context")],
                 })
             }
+            "lore://tasks/active" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let tasks =
+                        db::tasks::list_tasks(self.pool(), pid, Some(db::TaskStatus::Active))
+                            .await
+                            .unwrap_or_default();
+                    let mut out = Vec::with_capacity(tasks.len());
+                    for t in &tasks {
+                        let attempts = db::attempts::list_attempts(self.pool(), t.id, None)
+                            .await
+                            .unwrap_or_default();
+                        let pending = attempts
+                            .iter()
+                            .filter(|a| matches!(a.outcome, db::attempts::AttemptOutcome::Pending))
+                            .count();
+                        let rejected = attempts
+                            .iter()
+                            .filter(|a| matches!(a.outcome, db::attempts::AttemptOutcome::Rejected))
+                            .count();
+                        out.push(serde_json::json!({
+                            "id": t.id,
+                            "description": t.description,
+                            "priority": t.priority,
+                            "task_type": t.task_type,
+                            "created_at": t.created_at,
+                            "total_attempts": attempts.len(),
+                            "pending_attempts": pending,
+                            "rejected_attempts": rejected,
+                        }));
+                    }
+                    serde_json::to_string_pretty(&serde_json::json!({ "tasks": out }))
+                        .unwrap_or_default()
+                } else {
+                    r#"{"tasks": [], "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://tasks/active")],
+                })
+            }
+            "lore://lessons/recent" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let rules = db::semantic::list_rules(
+                        self.pool(),
+                        pid,
+                        Some(db::semantic::RuleCategory::Lesson),
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    let recent: Vec<_> = rules.into_iter().rev().take(10).collect();
+                    serde_json::to_string_pretty(&serde_json::json!({ "lessons": recent }))
+                        .unwrap_or_default()
+                } else {
+                    r#"{"lessons": [], "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://lessons/recent")],
+                })
+            }
+            "lore://rules" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let rules = db::semantic::list_rules(self.pool(), pid, None, None)
+                        .await
+                        .unwrap_or_default();
+                    let mut by_cat: std::collections::BTreeMap<String, Vec<_>> =
+                        std::collections::BTreeMap::new();
+                    for r in rules {
+                        let key = format!("{:?}", r.category).to_lowercase();
+                        by_cat.entry(key).or_default().push(r);
+                    }
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "rules_by_category": by_cat }),
+                    )
+                    .unwrap_or_default()
+                } else {
+                    r#"{"rules_by_category": {}, "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://rules")],
+                })
+            }
             _ => Err(ErrorData::resource_not_found(
                 "Unknown resource URI",
                 Some(serde_json::Value::String(request.uri)),
             )),
         }
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, rmcp::Error> {
+        Ok(ListPromptsResult {
+            prompts: Self::prompt_catalog()
+                .into_iter()
+                .map(|p| p.to_prompt())
+                .collect(),
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, rmcp::Error> {
+        let def = Self::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == request.name)
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    "Unknown prompt name",
+                    Some(serde_json::json!({ "name": request.name })),
+                )
+            })?;
+
+        let args = request.arguments.unwrap_or_default();
+        for a in def.arguments {
+            if a.required && !args.contains_key(a.name) {
+                return Err(ErrorData::invalid_params(
+                    "Missing required argument",
+                    Some(serde_json::json!({
+                        "prompt": def.name,
+                        "argument": a.name,
+                    })),
+                ));
+            }
+        }
+
+        let text = def.render(&args);
+        Ok(GetPromptResult {
+            description: Some(def.description.to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, text)],
+        })
     }
 
     async fn list_tools(
@@ -2864,5 +3185,77 @@ mod tests {
         // base(1.0) + staleness(10 * 0.1 = 1.0) = 2.0
         assert!((score - 2.0).abs() < 0.1);
         assert!(explanation.contains("stale"));
+    }
+
+    #[test]
+    fn test_prompt_catalog_has_all_templates() {
+        let names: Vec<&str> = LoreServer::prompt_catalog()
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        for expected in [
+            "plan_task",
+            "resume_work",
+            "review_ledger",
+            "diagnose_failure",
+            "record_lesson",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "prompt catalog missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prompt_def_to_prompt_encodes_required_args() {
+        let plan = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "plan_task")
+            .expect("plan_task present");
+        let prompt = plan.to_prompt();
+        assert_eq!(prompt.name, "plan_task");
+        let args = prompt.arguments.expect("arguments set");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "goal");
+        assert_eq!(args[0].required, Some(true));
+    }
+
+    #[test]
+    fn test_prompt_render_substitutes_args() {
+        let plan = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "plan_task")
+            .unwrap();
+        let mut args = serde_json::Map::new();
+        args.insert("goal".into(), serde_json::json!("Add OAuth login"));
+        let out = plan.render(&args);
+        assert!(out.contains("Add OAuth login"));
+        assert!(out.contains("start_task"));
+    }
+
+    #[test]
+    fn test_prompt_resume_work_has_no_required_args() {
+        let resume = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "resume_work")
+            .unwrap();
+        let prompt = resume.to_prompt();
+        assert!(prompt.arguments.is_none());
+    }
+
+    #[test]
+    fn test_diagnose_failure_renders_both_args() {
+        let diag = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "diagnose_failure")
+            .unwrap();
+        let mut args = serde_json::Map::new();
+        args.insert("task_id".into(), serde_json::json!("abc-123"));
+        args.insert("error".into(), serde_json::json!("connection refused"));
+        let out = diag.render(&args);
+        assert!(out.contains("abc-123"));
+        assert!(out.contains("connection refused"));
+        assert!(out.contains("log_outcome"));
     }
 }

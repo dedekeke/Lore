@@ -14,8 +14,15 @@ on:
       - "src/eval/**"
       - "eval/**"
       - "tests/eval_replay.rs"
+      - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/eval.yml"
+
+# One run per ref — if pushes land in quick succession, cancel the older one so
+# the PR comment bot doesn't race two updaters and double-post.
+concurrency:
+  group: eval-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

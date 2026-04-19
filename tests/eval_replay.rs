@@ -129,27 +129,6 @@ async fn mini_fixture_replays_without_error() {
         )
     });
     let report = compare(&baseline, &current, DEFAULT_TOLERANCE);
-    for d in &report.datasets {
-        for delta in &d.deltas {
-            eprintln!(
-                "  {} {}: baseline={:.4} current={:.4} delta={:+.4}{}",
-                d.name,
-                delta.name,
-                delta.baseline,
-                delta.current,
-                delta.delta,
-                if delta.regression {
-                    " (REGRESSION)"
-                } else {
-                    ""
-                },
-            );
-        }
-    }
-    assert!(
-        !report.has_regression(),
-        "baseline regression detected (tolerance={}): {:#?}",
-        report.tolerance,
-        report,
-    );
+    eprint!("{report}");
+    assert!(!report.has_regression(), "baseline regression:\n{report}");
 }

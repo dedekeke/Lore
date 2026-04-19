@@ -1,0 +1,192 @@
+name: Eval
+
+on:
+  schedule:
+    # 06:00 UTC daily. Keeps the baseline honest without blocking PR latency.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [master, develop, develop/claude]
+    paths:
+      - "src/embeddings/**"
+      - "src/db/semantic.rs"
+      - "src/tools/search.rs"
+      - "src/eval/**"
+      - "eval/**"
+      - "tests/eval_replay.rs"
+      - "Cargo.lock"
+      - ".github/workflows/eval.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # Keep ORT single-threaded when local-embeddings comes online (P1 follow-up).
+  # The fake provider doesn't care, but pinning now avoids CI flake later.
+  OMP_NUM_THREADS: "1"
+
+jobs:
+  # Shared runner: replays the mini fixture against a fresh pgvector testcontainer
+  # and writes `eval-out/{current,report}.json`. The baseline gate inside the
+  # test fails the job on regression; this workflow just surfaces the delta.
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      has_regression: ${{ steps.verdict.outputs.has_regression }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.94.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: eval
+
+      - name: cargo test (eval replay)
+        env:
+          EVAL_EXPORT_JSON: ${{ github.workspace }}/eval-out
+          RUST_LOG: warn
+        run: cargo test --features eval --test eval_replay -- --nocapture
+
+      - name: Render summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f eval-out/report.json ]; then
+            echo "eval-out/report.json missing — replay likely failed before export." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Eval delta vs \`eval/baselines.json\`"
+            echo ""
+            tol=$(jq -r '.tolerance' eval-out/report.json)
+            echo "_tolerance: \`${tol}\`_"
+            echo ""
+            for ds in $(jq -r '.datasets[].name' eval-out/report.json); do
+              echo "### \`${ds}\`"
+              echo ""
+              echo "| metric | baseline | current | delta | status |"
+              echo "|--------|---------:|--------:|------:|:------:|"
+              jq -r --arg ds "$ds" '
+                .datasets[] | select(.name==$ds) | .deltas[] |
+                "| \(.name) | \(.baseline) | \(.current) | \(.delta) | \(if .regression then "REGRESSION" elif (.delta|isnan) or (.delta|isinfinite) then "non-finite" else "ok" end) |"
+              ' eval-out/report.json
+              echo ""
+              shape=$(jq -r --arg ds "$ds" '.datasets[] | select(.name==$ds) | .shape_mismatches | length' eval-out/report.json)
+              if [ "$shape" != "0" ]; then
+                echo "**Shape drift:**"
+                jq -r --arg ds "$ds" '.datasets[] | select(.name==$ds) | .shape_mismatches[] | "- " + .' eval-out/report.json
+                echo ""
+              fi
+            done
+            miss=$(jq -r '.missing_datasets | length' eval-out/report.json)
+            extra=$(jq -r '.extra_datasets | length' eval-out/report.json)
+            if [ "$miss" != "0" ] || [ "$extra" != "0" ]; then
+              echo "### Coverage drift"
+              jq -r '"- missing: \(.missing_datasets)\n- extra: \(.extra_datasets)"' eval-out/report.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compute verdict
+        id: verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f eval-out/report.json ]; then
+            echo "has_regression=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          regress=$(jq -r '
+            (.missing_datasets | length) > 0 or
+            (.extra_datasets | length) > 0 or
+            any(.datasets[]; (.shape_mismatches | length) > 0 or any(.deltas[]; .regression))
+          ' eval-out/report.json)
+          echo "has_regression=${regress}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-metrics-${{ github.event_name }}-${{ github.sha }}
+          path: eval-out/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # PR-only: upsert a single comment with the delta table. Separate job so the
+  # permissions surface is minimal (no pull-requests:write on nightly).
+  comment:
+    needs: replay
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: eval-metrics-${{ github.event_name }}-${{ github.sha }}
+          path: eval-out
+
+      - uses: actions/github-script@v7
+        env:
+          HAS_REGRESSION: ${{ needs.replay.outputs.has_regression }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'eval-out/report.json';
+            if (!fs.existsSync(path)) {
+              core.warning('report.json missing; skipping PR comment');
+              return;
+            }
+            const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const fmt = (x) => (typeof x === 'number' && Number.isFinite(x)) ? x.toFixed(4) : String(x);
+            const verdict = process.env.HAS_REGRESSION;
+            const tag = '<!-- eval-delta-bot -->';
+            const header = verdict === 'true'
+              ? '### :rotating_light: Eval delta — REGRESSION'
+              : verdict === 'unknown'
+                ? '### :warning: Eval delta — report missing'
+                : '### :white_check_mark: Eval delta — ok';
+            const lines = [tag, header, '', `_tolerance: \`${report.tolerance}\`_`, ''];
+            for (const ds of report.datasets) {
+              lines.push(`**\`${ds.name}\`**`);
+              lines.push('');
+              lines.push('| metric | baseline | current | delta | status |');
+              lines.push('|--------|---------:|--------:|------:|:------:|');
+              for (const m of ds.deltas) {
+                const status = m.regression
+                  ? 'REGRESSION'
+                  : (!Number.isFinite(m.delta) ? 'non-finite' : 'ok');
+                lines.push(`| ${m.name} | ${fmt(m.baseline)} | ${fmt(m.current)} | ${fmt(m.delta)} | ${status} |`);
+              }
+              if (ds.shape_mismatches.length) {
+                lines.push('', '_Shape drift:_');
+                for (const s of ds.shape_mismatches) lines.push(`- ${s}`);
+              }
+              lines.push('');
+            }
+            if (report.missing_datasets.length || report.extra_datasets.length) {
+              lines.push(`_missing: ${JSON.stringify(report.missing_datasets)} · extra: ${JSON.stringify(report.extra_datasets)}_`);
+            }
+            const body = lines.join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(tag));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

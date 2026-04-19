@@ -742,6 +742,46 @@ pub struct UpdateRuleParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WriteScratchParams {
+    #[schemars(description = "Scratchpad key (unique within project/task scope)")]
+    pub key: String,
+    #[schemars(description = "Value to store (max 4096 chars, scrubbed for secrets)")]
+    pub value: String,
+    #[schemars(
+        description = "Optional task UUID to scope the entry to a task. If omitted, entry is project-scoped."
+    )]
+    pub task_id: Option<String>,
+    #[schemars(
+        description = "Optional time-to-live in seconds. If set, expires_at = NOW() + ttl_secs. Expired entries are filtered from reads."
+    )]
+    pub ttl_secs: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadScratchParams {
+    #[schemars(description = "Scratchpad key")]
+    pub key: String,
+    #[schemars(description = "Optional task UUID. If omitted, reads the project-scoped entry.")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListScratchParams {
+    #[schemars(description = "Optional task UUID. If omitted, lists the project-scoped entries.")]
+    pub task_id: Option<String>,
+    #[schemars(description = "Max entries to return (default 50, max 500)")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteScratchParams {
+    #[schemars(description = "Scratchpad key")]
+    pub key: String,
+    #[schemars(description = "Optional task UUID. If omitted, deletes the project-scoped entry.")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StartTaskParams {
     #[schemars(description = "Description of the task")]
     pub description: String,
@@ -1372,6 +1412,102 @@ impl LoreServer {
 
         let nudge = Self::cap_nudge("updated", cap_warning.as_ref());
         Self::json_content_with_nudge(&body, &nudge)
+    }
+
+    // -- Scratchpad tools --
+
+    #[tool(
+        description = "Write a short-term scratchpad entry (upsert by project/task/key). Optional TTL expires the entry."
+    )]
+    pub async fn write_scratch(
+        &self,
+        Parameters(WriteScratchParams {
+            key,
+            value,
+            task_id,
+            ttl_secs,
+        }): Parameters<WriteScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("key", &key, 256)?;
+        let value = self.maybe_scrub(value);
+        Self::validate_len("value", &value, 4096)?;
+        if let Some(t) = ttl_secs {
+            if t <= 0 {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "ttl_secs must be > 0",
+                    None,
+                ));
+            }
+        }
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entry =
+            db::scratchpad::write_scratch(self.pool(), project_id, task, &key, &value, ttl_secs)
+                .await
+                .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &entry,
+            "Scratch entry written. Read it back with read_scratch(key, task_id).",
+        )
+    }
+
+    #[tool(
+        description = "Read a scratchpad entry by key within the current project/task scope. Expired entries are hidden."
+    )]
+    pub async fn read_scratch(
+        &self,
+        Parameters(ReadScratchParams { key, task_id }): Parameters<ReadScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("key", &key, 256)?;
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entry = db::scratchpad::read_scratch(self.pool(), project_id, task, &key)
+            .await
+            .map_err(Self::db_err)?;
+        match entry {
+            Some(e) => Self::json_content_with_nudge(&e, "Use this entry in your current task."),
+            None => Self::json_content_with_nudge(
+                &serde_json::json!({ "entry": null }),
+                "No entry found (or expired). Write one with write_scratch.",
+            ),
+        }
+    }
+
+    #[tool(
+        description = "List non-expired scratchpad entries for the current project/task scope, newest-first."
+    )]
+    pub async fn list_scratch(
+        &self,
+        Parameters(ListScratchParams { task_id, limit }): Parameters<ListScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let limit = limit.unwrap_or(50).clamp(1, 500);
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entries = db::scratchpad::list_scratch(self.pool(), project_id, task, limit)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&entries)
+    }
+
+    #[tool(description = "Delete a scratchpad entry by key within the current project/task scope.")]
+    pub async fn delete_scratch(
+        &self,
+        Parameters(DeleteScratchParams { key, task_id }): Parameters<DeleteScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("key", &key, 256)?;
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let deleted = db::scratchpad::delete_scratch(self.pool(), project_id, task, &key)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "deleted": deleted }),
+            if deleted {
+                "Entry deleted."
+            } else {
+                "No matching entry."
+            },
+        )
     }
 
     // -- Ledger tools --

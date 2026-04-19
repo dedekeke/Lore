@@ -41,6 +41,9 @@ pub fn fetch_cached(src: &DatasetSource, cache_dir: &Path) -> Result<PathBuf, Ev
     if dest.exists() && verify_sha256(&dest, src.sha256)? {
         return Ok(dest);
     }
+    // Per-process tmp suffix so concurrent fetchers don't clobber each other.
+    let tmp = dest.with_extension(format!("tmp.{}", std::process::id()));
+    let _guard = TmpGuard(&tmp);
     let resp = reqwest::blocking::get(src.url)
         .map_err(|e| EvalError::Http(format!("GET {}: {e}", src.url)))?;
     if !resp.status().is_success() {
@@ -53,18 +56,23 @@ pub fn fetch_cached(src: &DatasetSource, cache_dir: &Path) -> Result<PathBuf, Ev
     let bytes = resp
         .bytes()
         .map_err(|e| EvalError::Http(format!("read body: {e}")))?;
-    let tmp = dest.with_extension("tmp");
     fs::write(&tmp, &bytes)?;
     if !verify_sha256(&tmp, src.sha256)? {
-        let got = hex_sha256(&tmp)?;
-        let _ = fs::remove_file(&tmp);
         return Err(EvalError::ShaMismatch {
             expected: src.sha256.to_string(),
-            got,
+            got: hex_sha256(&tmp)?,
         });
     }
     fs::rename(&tmp, &dest)?;
     Ok(dest)
+}
+
+/// Removes the tmp file on drop unless it was renamed into place.
+struct TmpGuard<'a>(&'a Path);
+impl Drop for TmpGuard<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
 }
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<bool, EvalError> {

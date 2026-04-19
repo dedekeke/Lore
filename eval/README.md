@@ -40,6 +40,16 @@ Each loader must declare `sha256` and `license` on `DatasetSource` before being 
 
 See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) plus an `ExpectedOutcome` (expected recall hits, optional task completion). The replay runner (P1-T2) stands up a fresh `LoreServer`, executes the events against the real MCP surface, and grades the recall output against `expected.recall_hit_ids`.
 
+### ID resolution (for P1-T2)
+
+`expected_hits` and `recall_hit_ids` are **human-readable labels**, not real DB IDs. Inserted rules/attempts get UUIDs at runtime that the fixture author cannot predict. The replay runner resolves labels like this:
+
+1. As each `remember_rule` / `propose_attempt` / `start_task` event fires, record the returned real ID plus the label the fixture author would naturally assign (e.g. first rule in `mini-001` → `rule-go-tabs`). Labels are derived by a deterministic slug of the event's content/approach prefix, scoped to the case.
+2. When a `recall_rules` event resolves, map each returned UUID back to its label via that per-case table.
+3. Grade by label-set equality (or top-K rank) against `expected_hits`.
+
+An empty `expected_hits` / `recall_hit_ids` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip.
+
 ## Baseline update policy
 
 `baselines.json` is the source of truth. Only update it in a review-gated PR that explicitly calls out why the delta is intended (model swap, schema change, scoring tweak). Accidental baseline drift from unrelated PRs must be reverted.

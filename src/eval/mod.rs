@@ -10,4 +10,4 @@ pub mod types;
 
 pub use fixtures::load_mini;
 pub use loader::{DatasetLoader, DatasetSource, EvalError};
-pub use types::{EvalCase, EvalEvent, ExpectedOutcome};
+pub use types::{EvalCase, EvalEvent, ExpectedOutcome, OutcomeKind};

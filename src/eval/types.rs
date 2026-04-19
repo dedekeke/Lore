@@ -21,7 +21,7 @@ pub enum EvalEvent {
     },
     LogOutcome {
         attempt_ref: String,
-        outcome: String,
+        outcome: OutcomeKind,
         reasoning: String,
     },
     RememberRule {
@@ -32,6 +32,15 @@ pub enum EvalEvent {
         query: String,
         expected_hits: Vec<String>,
     },
+}
+
+/// Mirrors the `outcome` values accepted by `log_outcome` in `src/server.rs`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeKind {
+    Accepted,
+    Rejected,
+    Pending,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -266,5 +266,50 @@
       "recall_hit_ids": ["rule-ci-github"],
       "task_completion": null
     }
+  },
+  {
+    "id": "mini-011-zero-hit-precision",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Use Rust edition 2024 for all new crates.",
+        "category": "preference"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "favorite ice cream flavor",
+        "expected_hits": []
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": [],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-012-incomplete-workflow",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "start_task",
+        "task_ref": "t6",
+        "description": "Investigate memory leak in image processor"
+      },
+      {
+        "kind": "propose_attempt",
+        "task_ref": "t6",
+        "approach": "Run valgrind against the long-running worker"
+      },
+      {
+        "kind": "recall_rules",
+        "query": "image processor memory leak investigation",
+        "expected_hits": ["attempt-t6-a1"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["attempt-t6-a1"],
+      "task_completion": null
+    }
   }
 ]

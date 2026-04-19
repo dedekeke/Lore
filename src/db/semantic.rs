@@ -14,6 +14,7 @@ pub enum RuleCategory {
     Fact,
     Constraint,
     Lesson,
+    Instruction,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
@@ -35,6 +36,7 @@ pub struct SemanticRule {
     pub tags: Vec<String>,
     pub valid_from: DateTime<Utc>,
     pub valid_until: Option<DateTime<Utc>>,
+    pub is_always_injected: bool,
     pub project_name: Option<String>,
 }
 
@@ -63,7 +65,7 @@ pub async fn create_rule(
 
 pub async fn get_rule(pool: &PgPool, id: Uuid) -> Result<Option<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id WHERE s.id = $1",
     )
     .bind(id)
@@ -103,7 +105,7 @@ pub async fn list_rules(
     tags: Option<&[String]>,
 ) -> Result<Vec<SemanticRule>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE s.project_id = $1 AND s.valid_until IS NULL \
          AND ($2::ai_memory.rule_category IS NULL OR s.category = $2) \
@@ -240,22 +242,24 @@ pub async fn search_rules_hybrid(
         SELECT s.id, s.project_id, s.category, s.content, s.embedding,
                s.source_task_id, s.created_at, s.expires_at,
                s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags,
-               s.valid_from, s.valid_until, p.name AS project_name,
+               s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name,
                ((
                  0.35 * fused.v_score
                + 0.25 * fused.f_score
                + 0.20 * CASE s.category::text
-                          WHEN 'constraint' THEN 1.0
-                          WHEN 'lesson'     THEN 0.75
-                          WHEN 'fact'       THEN 0.50
-                          WHEN 'preference' THEN 0.25
+                          WHEN 'constraint'  THEN 1.0
+                          WHEN 'instruction' THEN 0.80
+                          WHEN 'lesson'      THEN 0.75
+                          WHEN 'fact'        THEN 0.50
+                          WHEN 'preference'  THEN 0.25
                           ELSE 0.25 END
                + 0.10 * EXP(
                    -1.0 * CASE s.category::text
-                            WHEN 'constraint' THEN 0.0
-                            WHEN 'lesson'     THEN 0.01
-                            WHEN 'fact'       THEN 0.005
-                            WHEN 'preference' THEN 0.02
+                            WHEN 'constraint'  THEN 0.0
+                            WHEN 'instruction' THEN 0.005
+                            WHEN 'lesson'      THEN 0.01
+                            WHEN 'fact'        THEN 0.005
+                            WHEN 'preference'  THEN 0.02
                             ELSE 0.01 END
                    * EXTRACT(EPOCH FROM (NOW() - COALESCE(s.last_used_at, s.created_at))) / 86400.0
                  )
@@ -352,7 +356,7 @@ pub async fn search_rules_by_embedding(
     let sql = format!(
         "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, \
          s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, \
-         s.tags, s.valid_from, s.valid_until, p.name AS project_name, \
+         s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name, \
          ((1.0 - (s.embedding <=> $2::vector)) * CASE WHEN $6::uuid IS NOT NULL AND s.project_id = $6 THEN 2.0 ELSE 1.0 END)::float8 AS cosine_score \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE ($1::uuid IS NULL OR s.project_id = $1) AND s.embedding IS NOT NULL \
@@ -399,7 +403,7 @@ pub async fn find_duplicates(
     let emb = Vector::from(embedding.to_vec());
     // cosine distance <=> returns distance (0 = identical), so similarity = 1 - distance
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE s.project_id = $1 AND s.embedding IS NOT NULL AND s.valid_until IS NULL \
          AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \
@@ -421,7 +425,7 @@ pub async fn find_potential_contradictions(
     let emb = Vector::from(embedding.to_vec());
     // TODO: combine with find_duplicates into single scan (fetch >= CONTRADICTION_FLOOR, partition in app code)
     sqlx::query_as(
-        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, p.name AS project_name \
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name \
          FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
          WHERE s.project_id = $1 AND s.embedding IS NOT NULL AND s.valid_until IS NULL \
          AND (1.0 - (s.embedding <=> $2::vector)) >= $3 \

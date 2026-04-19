@@ -24,6 +24,37 @@ async fn test_create_and_get_rule() {
     assert_eq!(rule.content, "the sky is blue");
     assert_eq!(rule.category, RuleCategory::Fact);
     assert!(rule.tags.is_empty());
+    assert!(
+        !rule.is_always_injected,
+        "is_always_injected must default to false"
+    );
+}
+
+#[tokio::test]
+async fn test_create_instruction_rule() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let id = semantic::create_rule(
+        &pool,
+        pid,
+        RuleCategory::Instruction,
+        "always prefer explicit error handling",
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let rule = semantic::get_rule(&pool, id).await.unwrap().unwrap();
+    assert_eq!(rule.category, RuleCategory::Instruction);
+    assert!(!rule.is_always_injected);
+
+    let listed = semantic::list_rules(&pool, pid, Some(RuleCategory::Instruction), None)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
 }
 
 #[tokio::test]

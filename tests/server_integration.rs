@@ -3,7 +3,14 @@ mod common;
 use lore::config::Config;
 use lore::embeddings::fake::FakeEmbeddingProvider;
 use lore::embeddings::AnyEmbeddingProvider;
-use lore::server::LoreServer;
+use lore::server::{
+    AbandonTaskParams, CompleteTaskParams, ExportMemoryParams, FindSimilarFailuresParams,
+    ForgetRuleParams, GenerateHandoffParams, GetNextStepsParams, GetTaskStatsParams,
+    ListRulesParams, ListTasksParams, LogContextWipeParams, LogOutcomeParams, LoreServer,
+    ProposeAttemptParams, RecallRulesParams, RememberRuleParams, ReviewLedgerParams,
+    StartTaskParams, SwitchProjectParams, UpdateRuleParams,
+};
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 
 async fn setup_server() -> (
@@ -30,12 +37,28 @@ fn extract_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
     serde_json::from_str(text).expect("Invalid JSON in result")
 }
 
+fn switch_params(name: &str, path: &str) -> Parameters<SwitchProjectParams> {
+    Parameters(SwitchProjectParams {
+        name: Some(name.into()),
+        root_path: Some(path.into()),
+    })
+}
+
+fn start_task_params(description: &str) -> Parameters<StartTaskParams> {
+    Parameters(StartTaskParams {
+        description: description.into(),
+        parent_task_id: None,
+        priority: None,
+        task_type: None,
+    })
+}
+
 #[tokio::test]
 async fn test_switch_project_and_get_context() {
     let (server, _pool, _c) = setup_server().await;
 
     let result = server
-        .switch_project(Some("integration-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("integration-test", "/tmp"))
         .await
         .unwrap();
 
@@ -53,12 +76,12 @@ async fn test_full_task_lifecycle() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("lifecycle".into()), Some("/tmp".into()))
+        .switch_project(switch_params("lifecycle", "/tmp"))
         .await
         .unwrap();
 
     let task_result = server
-        .start_task("implement feature X".into(), None, None, None)
+        .start_task(start_task_params("implement feature X"))
         .await
         .unwrap();
     let task_id = extract_json(&task_result)["task_id"]
@@ -67,7 +90,11 @@ async fn test_full_task_lifecycle() {
         .to_string();
 
     let attempt_result = server
-        .propose_attempt(task_id.clone(), "try approach A".into(), None)
+        .propose_attempt(Parameters(ProposeAttemptParams {
+            task_id: task_id.clone(),
+            approach_summary: "try approach A".into(),
+            agent_id: None,
+        }))
         .await
         .unwrap();
     let attempt_id = extract_json(&attempt_result)["attempt_id"]
@@ -76,24 +103,34 @@ async fn test_full_task_lifecycle() {
         .to_string();
 
     let outcome = server
-        .log_outcome(
+        .log_outcome(Parameters(LogOutcomeParams {
             attempt_id,
-            "rejected".into(),
-            "didn't compile".into(),
-            None,
-            None,
-        )
+            outcome: "rejected".into(),
+            reasoning: "didn't compile".into(),
+            git_ref: None,
+            code_snippet: None,
+        }))
         .await
         .unwrap();
     assert!(extract_json(&outcome)["success"].as_bool().unwrap());
 
-    let ledger = server.review_ledger(task_id.clone(), None).await.unwrap();
+    let ledger = server
+        .review_ledger(Parameters(ReviewLedgerParams {
+            task_id: task_id.clone(),
+            outcome_filter: None,
+        }))
+        .await
+        .unwrap();
     let ledger_json = extract_json(&ledger);
     assert_eq!(ledger_json["attempts"].as_array().unwrap().len(), 1);
     assert!(ledger_json["task_links"].as_array().unwrap().is_empty());
 
     let complete = server
-        .complete_task(task_id, Some("always check compilation first".into()), None)
+        .complete_task(Parameters(CompleteTaskParams {
+            task_id,
+            lesson: Some("always check compilation first".into()),
+            resolved_attempt_id: None,
+        }))
         .await
         .unwrap();
     assert!(extract_json(&complete)["success"].as_bool().unwrap());
@@ -104,17 +141,28 @@ async fn test_remember_and_recall_rules() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("rules-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("rules-test", "/tmp"))
         .await
         .unwrap();
 
     server
-        .remember_rule("fact".into(), "Rust is a systems language".into(), None)
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "Rust is a systems language".into(),
+            tags: None,
+        }))
         .await
         .unwrap();
 
     let recalled = server
-        .recall_rules("systems language".into(), Some(10), None, None, None, None)
+        .recall_rules(Parameters(RecallRulesParams {
+            query: "systems language".into(),
+            limit: Some(10),
+            category: None,
+            tags: None,
+            cross_project: None,
+            compact: None,
+        }))
         .await
         .unwrap();
     let rules = extract_json(&recalled);
@@ -125,11 +173,9 @@ async fn test_remember_and_recall_rules() {
 async fn test_recall_rules_cross_project() {
     let (server, pool, _c) = setup_server().await;
 
-    // Create second project directly
     let other_pid = lore::db::projects::create_project(&pool, "other-proj", "/other")
         .await
         .unwrap();
-    // Need embedding matching server's fake provider (384 dim)
     let emb = vec![0.5_f32; 384];
     lore::db::semantic::create_rule(
         &pool,
@@ -143,35 +189,33 @@ async fn test_recall_rules_cross_project() {
     .unwrap();
 
     server
-        .switch_project(Some("current-proj".into()), Some("/cur".into()))
+        .switch_project(switch_params("current-proj", "/cur"))
         .await
         .unwrap();
 
-    // Without cross_project: other proj rule not visible
     let local = server
-        .recall_rules(
-            "rust memory safety".into(),
-            Some(10),
-            None,
-            None,
-            Some(false),
-            None,
-        )
+        .recall_rules(Parameters(RecallRulesParams {
+            query: "rust memory safety".into(),
+            limit: Some(10),
+            category: None,
+            tags: None,
+            cross_project: Some(false),
+            compact: None,
+        }))
         .await
         .unwrap();
     let local_rules = extract_json(&local);
     assert!(local_rules.as_array().unwrap().is_empty());
 
-    // With cross_project: visible
     let cross = server
-        .recall_rules(
-            "rust memory safety".into(),
-            Some(10),
-            None,
-            None,
-            Some(true),
-            None,
-        )
+        .recall_rules(Parameters(RecallRulesParams {
+            query: "rust memory safety".into(),
+            limit: Some(10),
+            category: None,
+            tags: None,
+            cross_project: Some(true),
+            compact: None,
+        }))
         .await
         .unwrap();
     let cross_rules = extract_json(&cross);
@@ -183,12 +227,16 @@ async fn test_forget_rule() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("forget-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("forget-test", "/tmp"))
         .await
         .unwrap();
 
     let result = server
-        .remember_rule("preference".into(), "use tabs".into(), None)
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "preference".into(),
+            content: "use tabs".into(),
+            tags: None,
+        }))
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -196,9 +244,21 @@ async fn test_forget_rule() {
         .unwrap()
         .to_string();
 
-    server.forget_rule(rule_id, None).await.unwrap();
+    server
+        .forget_rule(Parameters(ForgetRuleParams {
+            rule_id,
+            supersede: None,
+        }))
+        .await
+        .unwrap();
 
-    let list = server.list_rules(None, None).await.unwrap();
+    let list = server
+        .list_rules(Parameters(ListRulesParams {
+            category: None,
+            tags: None,
+        }))
+        .await
+        .unwrap();
     assert!(extract_json(&list).as_array().unwrap().is_empty());
 }
 
@@ -207,15 +267,24 @@ async fn test_export_memory() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("export-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("export-test", "/tmp"))
         .await
         .unwrap();
     server
-        .remember_rule("fact".into(), "test fact".into(), None)
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "test fact".into(),
+            tags: None,
+        }))
         .await
         .unwrap();
 
-    let export = server.export_memory("json".into()).await.unwrap();
+    let export = server
+        .export_memory(Parameters(ExportMemoryParams {
+            format: "json".into(),
+        }))
+        .await
+        .unwrap();
     let json = extract_json(&export);
 
     assert!(!json["rules"].as_array().unwrap().is_empty());
@@ -228,24 +297,29 @@ async fn test_get_task_stats() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("stats-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("stats-test", "/tmp"))
         .await
         .unwrap();
 
-    // Empty stats
-    let result = server.get_task_stats(None).await.unwrap();
+    let result = server
+        .get_task_stats(Parameters(GetTaskStatsParams { status: None }))
+        .await
+        .unwrap();
     let json = extract_json(&result);
     assert_eq!(json["summary"]["total_tasks"], 0);
 
-    // Create task with attempts
     let task = server
-        .start_task("stats task".into(), None, None, None)
+        .start_task(start_task_params("stats task"))
         .await
         .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let attempt = server
-        .propose_attempt(task_id.clone(), "approach A".into(), None)
+        .propose_attempt(Parameters(ProposeAttemptParams {
+            task_id: task_id.clone(),
+            approach_summary: "approach A".into(),
+            agent_id: None,
+        }))
         .await
         .unwrap();
     let attempt_id = extract_json(&attempt)["attempt_id"]
@@ -254,23 +328,37 @@ async fn test_get_task_stats() {
         .to_string();
 
     server
-        .log_outcome(attempt_id, "rejected".into(), "nope".into(), None, None)
-        .await
-        .unwrap();
-
-    let result = server.get_task_stats(None).await.unwrap();
-    let json = extract_json(&result);
-    assert_eq!(json["summary"]["total_tasks"], 1);
-    assert_eq!(json["summary"]["total_rejected"], 1);
-
-    // Complete and verify resolution_minutes appears
-    server
-        .complete_task(task_id.clone(), None, None)
+        .log_outcome(Parameters(LogOutcomeParams {
+            attempt_id,
+            outcome: "rejected".into(),
+            reasoning: "nope".into(),
+            git_ref: None,
+            code_snippet: None,
+        }))
         .await
         .unwrap();
 
     let result = server
-        .get_task_stats(Some("completed".into()))
+        .get_task_stats(Parameters(GetTaskStatsParams { status: None }))
+        .await
+        .unwrap();
+    let json = extract_json(&result);
+    assert_eq!(json["summary"]["total_tasks"], 1);
+    assert_eq!(json["summary"]["total_rejected"], 1);
+
+    server
+        .complete_task(Parameters(CompleteTaskParams {
+            task_id: task_id.clone(),
+            lesson: None,
+            resolved_attempt_id: None,
+        }))
+        .await
+        .unwrap();
+
+    let result = server
+        .get_task_stats(Parameters(GetTaskStatsParams {
+            status: Some("completed".into()),
+        }))
         .await
         .unwrap();
     let json = extract_json(&result);
@@ -283,24 +371,32 @@ async fn test_abandon_task() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("abandon-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("abandon-test", "/tmp"))
         .await
         .unwrap();
 
     let task = server
-        .start_task("abandon me".into(), None, None, None)
+        .start_task(start_task_params("abandon me"))
         .await
         .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let result = server
-        .abandon_task(task_id.clone(), "not needed".into(), Some(true))
+        .abandon_task(Parameters(AbandonTaskParams {
+            task_id: task_id.clone(),
+            reason: "not needed".into(),
+            save_lesson: Some(true),
+        }))
         .await
         .unwrap();
     assert!(extract_json(&result)["success"].as_bool().unwrap());
 
-    // Verify task is abandoned via list
-    let list = server.list_tasks(Some("abandoned".into())).await.unwrap();
+    let list = server
+        .list_tasks(Parameters(ListTasksParams {
+            status: Some("abandoned".into()),
+        }))
+        .await
+        .unwrap();
     let tasks = extract_json(&list);
     assert_eq!(tasks.as_array().unwrap().len(), 1);
 }
@@ -310,24 +406,32 @@ async fn test_list_tasks() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("list-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("list-test", "/tmp"))
         .await
         .unwrap();
 
     server
-        .start_task("task A".into(), None, None, None)
+        .start_task(start_task_params("task A"))
         .await
         .unwrap();
     server
-        .start_task("task B".into(), None, None, None)
+        .start_task(start_task_params("task B"))
         .await
         .unwrap();
 
-    let list = server.list_tasks(None).await.unwrap();
+    let list = server
+        .list_tasks(Parameters(ListTasksParams { status: None }))
+        .await
+        .unwrap();
     let tasks = extract_json(&list);
     assert_eq!(tasks.as_array().unwrap().len(), 2);
 
-    let active = server.list_tasks(Some("active".into())).await.unwrap();
+    let active = server
+        .list_tasks(Parameters(ListTasksParams {
+            status: Some("active".into()),
+        }))
+        .await
+        .unwrap();
     assert_eq!(extract_json(&active).as_array().unwrap().len(), 2);
 }
 
@@ -336,12 +440,16 @@ async fn test_update_rule() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("update-rule-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("update-rule-test", "/tmp"))
         .await
         .unwrap();
 
     let result = server
-        .remember_rule("fact".into(), "original content".into(), None)
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "original content".into(),
+            tags: None,
+        }))
         .await
         .unwrap();
     let rule_id = extract_json(&result)["rule_id"]
@@ -350,18 +458,21 @@ async fn test_update_rule() {
         .to_string();
 
     let updated = server
-        .update_rule(
-            rule_id.clone(),
-            Some("lesson".into()),
-            Some("updated content".into()),
-            None,
-        )
+        .update_rule(Parameters(UpdateRuleParams {
+            rule_id: rule_id.clone(),
+            category: Some("lesson".into()),
+            content: Some("updated content".into()),
+            tags: None,
+        }))
         .await
         .unwrap();
     assert!(extract_json(&updated)["updated"].as_bool().unwrap());
 
     let list = server
-        .list_rules(Some("lesson".into()), None)
+        .list_rules(Parameters(ListRulesParams {
+            category: Some("lesson".into()),
+            tags: None,
+        }))
         .await
         .unwrap();
     let rules = extract_json(&list).as_array().unwrap().clone();
@@ -374,13 +485,16 @@ async fn test_find_similar_failures() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("failures-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("failures-test", "/tmp"))
         .await
         .unwrap();
 
-    // With no data, should return empty
     let result = server
-        .find_similar_failures("compilation error".into(), Some(5), None)
+        .find_similar_failures(Parameters(FindSimilarFailuresParams {
+            error_description: "compilation error".into(),
+            limit: Some(5),
+            cross_project: None,
+        }))
         .await
         .unwrap();
     let json = extract_json(&result);
@@ -392,16 +506,21 @@ async fn test_generate_handoff() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("handoff-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("handoff-test", "/tmp"))
         .await
         .unwrap();
 
     server
-        .start_task("active task".into(), None, None, None)
+        .start_task(start_task_params("active task"))
         .await
         .unwrap();
 
-    let result = server.generate_handoff(Some(5000)).await.unwrap();
+    let result = server
+        .generate_handoff(Parameters(GenerateHandoffParams {
+            token_count: Some(5000),
+        }))
+        .await
+        .unwrap();
     let text = result
         .content
         .iter()
@@ -419,11 +538,14 @@ async fn test_get_next_steps() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("nextsteps-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("nextsteps-test", "/tmp"))
         .await
         .unwrap();
 
-    let result = server.get_next_steps(None).await.unwrap();
+    let result = server
+        .get_next_steps(Parameters(GetNextStepsParams { tier: None }))
+        .await
+        .unwrap();
     let json = extract_json(&result);
     assert!(json["project"].is_object());
     assert!(json["tasks"].is_array());
@@ -434,18 +556,22 @@ async fn test_get_next_steps_l0_tier() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("l0-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("l0-test", "/tmp"))
         .await
         .unwrap();
     server
-        .start_task("active one".into(), None, None, None)
+        .start_task(start_task_params("active one"))
         .await
         .unwrap();
 
-    let result = server.get_next_steps(Some("L0".into())).await.unwrap();
+    let result = server
+        .get_next_steps(Parameters(GetNextStepsParams {
+            tier: Some("L0".into()),
+        }))
+        .await
+        .unwrap();
     let json = extract_json(&result);
 
-    // L0 returns counts only — no per-task payload
     assert!(json["project"].is_object());
     assert_eq!(json["active_task_count"].as_i64().unwrap(), 1);
     assert_eq!(json["blocked_task_count"].as_i64().unwrap(), 0);
@@ -458,11 +584,16 @@ async fn test_get_next_steps_l0_tier() {
 async fn test_get_next_steps_l0_case_insensitive() {
     let (server, _pool, _c) = setup_server().await;
     server
-        .switch_project(Some("l0-ci".into()), Some("/tmp".into()))
+        .switch_project(switch_params("l0-ci", "/tmp"))
         .await
         .unwrap();
 
-    let result = server.get_next_steps(Some("l0".into())).await.unwrap();
+    let result = server
+        .get_next_steps(Parameters(GetNextStepsParams {
+            tier: Some("l0".into()),
+        }))
+        .await
+        .unwrap();
     let json = extract_json(&result);
     assert!(json["active_task_count"].is_number());
 }
@@ -472,17 +603,24 @@ async fn test_log_context_wipe() {
     let (server, _pool, _c) = setup_server().await;
 
     server
-        .switch_project(Some("wipe-test".into()), Some("/tmp".into()))
+        .switch_project(switch_params("wipe-test", "/tmp"))
         .await
         .unwrap();
 
     let task = server
-        .start_task("wipe task".into(), None, None, None)
+        .start_task(start_task_params("wipe task"))
         .await
         .unwrap();
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
-    let result = server.log_context_wipe(task_id, 10000, None).await.unwrap();
+    let result = server
+        .log_context_wipe(Parameters(LogContextWipeParams {
+            task_id,
+            token_count: 10000,
+            last_attempt_id: None,
+        }))
+        .await
+        .unwrap();
     let json = extract_json(&result);
     assert!(json["snapshot_id"].as_str().is_some());
 }

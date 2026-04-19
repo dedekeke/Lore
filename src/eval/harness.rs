@@ -11,10 +11,14 @@
 
 use std::collections::HashMap;
 
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, RawContent};
 use thiserror::Error;
 
-use crate::server::LoreServer;
+use crate::server::{
+    LogOutcomeParams, LoreServer, ProposeAttemptParams, RecallRulesParams, RememberRuleParams,
+    StartTaskParams, SwitchProjectParams,
+};
 
 use super::types::{EvalCase, EvalEvent, OutcomeKind};
 
@@ -32,8 +36,8 @@ pub enum ReplayError {
     UnknownAttemptRef(String),
 }
 
-impl From<rmcp::Error> for ReplayError {
-    fn from(e: rmcp::Error) -> Self {
+impl From<rmcp::ErrorData> for ReplayError {
+    fn from(e: rmcp::ErrorData) -> Self {
         ReplayError::Mcp(e.to_string())
     }
 }
@@ -69,7 +73,10 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
     // to keep cases isolated; the path is synthetic and never touched on disk.
     let root_path = format!("/tmp/lore-eval/{}", case.id);
     server
-        .switch_project(Some(project_name), Some(root_path))
+        .switch_project(Parameters(SwitchProjectParams {
+            name: Some(project_name),
+            root_path: Some(root_path),
+        }))
         .await?;
 
     let mut labels: HashMap<String, String> = HashMap::new();
@@ -86,7 +93,12 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                 description,
             } => {
                 let res = server
-                    .start_task(description.clone(), None, None, None)
+                    .start_task(Parameters(StartTaskParams {
+                        description: description.clone(),
+                        parent_task_id: None,
+                        priority: None,
+                        task_type: None,
+                    }))
                     .await?;
                 let task_id = json_field(&res, "task_id")?;
                 task_uuids.insert(task_ref.clone(), task_id.clone());
@@ -98,7 +110,11 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                     .ok_or_else(|| ReplayError::UnknownTaskRef(task_ref.clone()))?
                     .clone();
                 let res = server
-                    .propose_attempt(task_id, approach.clone(), None)
+                    .propose_attempt(Parameters(ProposeAttemptParams {
+                        task_id,
+                        approach_summary: approach.clone(),
+                        agent_id: None,
+                    }))
                     .await?;
                 let attempt_id = json_field(&res, "attempt_id")?;
                 let n = attempt_counter.entry(task_ref.clone()).or_insert(0);
@@ -122,13 +138,13 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                     OutcomeKind::Pending => "pending",
                 };
                 server
-                    .log_outcome(
+                    .log_outcome(Parameters(LogOutcomeParams {
                         attempt_id,
-                        outcome_str.to_string(),
-                        reasoning.clone(),
-                        None,
-                        None,
-                    )
+                        outcome: outcome_str.to_string(),
+                        reasoning: reasoning.clone(),
+                        git_ref: None,
+                        code_snippet: None,
+                    }))
                     .await?;
             }
             EvalEvent::RememberRule {
@@ -137,7 +153,11 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                 label,
             } => {
                 let res = server
-                    .remember_rule(category.clone(), content.clone(), None)
+                    .remember_rule(Parameters(RememberRuleParams {
+                        category: category.clone(),
+                        content: content.clone(),
+                        tags: None,
+                    }))
                     .await?;
                 // `rule_id` absent when server short-circuits on duplicate_warning
                 // (cosine >= 0.95). Surface via `deduplicated_labels` so P1-T3
@@ -158,7 +178,14 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                 expected_hits,
             } => {
                 let res = server
-                    .recall_rules(query.clone(), Some(10), None, None, None, Some(true))
+                    .recall_rules(Parameters(RecallRulesParams {
+                        query: query.clone(),
+                        limit: Some(10),
+                        category: None,
+                        tags: None,
+                        cross_project: None,
+                        compact: Some(true),
+                    }))
                     .await?;
                 let returned_ids = parse_compact_ids(&res)?;
                 recalls.push(RecallRun {

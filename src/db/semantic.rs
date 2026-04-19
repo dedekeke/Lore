@@ -48,16 +48,52 @@ pub async fn create_rule(
     embedding: Option<&[f32]>,
     tags: &[String],
 ) -> Result<Uuid, sqlx::Error> {
+    create_rule_with_flag(pool, project_id, category, content, embedding, tags, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_rule_with_flag(
+    pool: &PgPool,
+    project_id: Uuid,
+    category: RuleCategory,
+    content: &str,
+    embedding: Option<&[f32]>,
+    tags: &[String],
+    is_always_injected: bool,
+) -> Result<Uuid, sqlx::Error> {
     let emb = embedding.map(|e| Vector::from(e.to_vec()));
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.semantic_rules (project_id, category, content, embedding, tags) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO ai_memory.semantic_rules (project_id, category, content, embedding, tags, is_always_injected) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(project_id)
     .bind(&category)
     .bind(content)
     .bind(emb.as_ref())
     .bind(tags)
+    .bind(is_always_injected)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// Count active always-injected rules in scope of a project.
+/// Used by `remember_rule` / `update_rule` to surface a near-cap warning
+/// before the procedural char-budget silently drops a rule in
+/// `build_procedural_block`.
+pub async fn count_always_injected_rules(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM ai_memory.semantic_rules \
+         WHERE project_id = $1 \
+           AND is_always_injected = true \
+           AND valid_from <= NOW() \
+           AND valid_until IS NULL \
+           AND (expires_at IS NULL OR expires_at > NOW())",
+    )
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -144,28 +180,37 @@ pub async fn list_rules(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_rule(
     pool: &PgPool,
     id: Uuid,
+    project_id: Uuid,
     category: Option<RuleCategory>,
     content: Option<&str>,
     embedding: Option<&[f32]>,
     tags: Option<&[String]>,
+    is_always_injected: Option<bool>,
 ) -> Result<bool, sqlx::Error> {
     let emb = embedding.map(|e| Vector::from(e.to_vec()));
+    // Scope to project_id so a rule UUID leaked into the wrong project session
+    // cannot be silently mutated, and so the caller's subsequent cap probe is
+    // guaranteed to be counting the same project as the UPDATE touched.
     let result = sqlx::query(
         "UPDATE ai_memory.semantic_rules SET \
-         category = COALESCE($2, category), \
-         content = COALESCE($3, content), \
-         embedding = COALESCE($4, embedding), \
-         tags = COALESCE($5, tags) \
-         WHERE id = $1",
+         category = COALESCE($3, category), \
+         content = COALESCE($4, content), \
+         embedding = COALESCE($5, embedding), \
+         tags = COALESCE($6, tags), \
+         is_always_injected = COALESCE($7, is_always_injected) \
+         WHERE id = $1 AND project_id = $2",
     )
     .bind(id)
+    .bind(project_id)
     .bind(category.as_ref())
     .bind(content)
     .bind(emb.as_ref())
     .bind(tags)
+    .bind(is_always_injected)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)

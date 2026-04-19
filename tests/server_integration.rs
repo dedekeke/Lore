@@ -162,6 +162,7 @@ async fn test_remember_and_recall_rules() {
             category: "fact".into(),
             content: "Rust is a systems language".into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -248,6 +249,7 @@ async fn test_forget_rule() {
             category: "preference".into(),
             content: "use tabs".into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -288,6 +290,7 @@ async fn test_export_memory() {
             category: "fact".into(),
             content: "test fact".into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -463,6 +466,7 @@ async fn test_update_rule() {
             category: "fact".into(),
             content: "original content".into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -477,6 +481,7 @@ async fn test_update_rule() {
             category: Some("lesson".into()),
             content: Some("updated content".into()),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -665,6 +670,7 @@ async fn remember_then_flag_always_inject(
             category: "instruction".into(),
             content: content.into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -733,6 +739,7 @@ async fn test_get_active_context_procedural_excludes_non_always_inject() {
             category: "preference".into(),
             content: "don't flag this one".into(),
             tags: None,
+            always_inject: None,
         }))
         .await
         .unwrap();
@@ -744,4 +751,360 @@ async fn test_get_active_context_procedural_excludes_non_always_inject() {
         block["rules"].as_array().unwrap().is_empty(),
         "non-always-inject rules must not surface in procedural block"
     );
+}
+
+async fn rule_is_flagged(pool: &sqlx::PgPool, rule_id: &str) -> bool {
+    let row: (bool,) =
+        sqlx::query_as("SELECT is_always_injected FROM ai_memory.semantic_rules WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(rule_id).unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    row.0
+}
+
+#[tokio::test]
+async fn test_remember_rule_instruction_defaults_to_always_inject_true() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-instr-default", "/tmp/rr-instr-default"))
+        .await
+        .unwrap();
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "prefix all migrations with timestamp".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["always_inject"], true);
+    let rule_id = body["rule_id"].as_str().unwrap();
+    assert!(rule_is_flagged(&pool, rule_id).await);
+}
+
+#[tokio::test]
+async fn test_remember_rule_non_instruction_defaults_to_false() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-fact-default", "/tmp/rr-fact-default"))
+        .await
+        .unwrap();
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "repo uses sqlx 0.8".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["always_inject"], false);
+    let rule_id = body["rule_id"].as_str().unwrap();
+    assert!(!rule_is_flagged(&pool, rule_id).await);
+}
+
+#[tokio::test]
+async fn test_remember_rule_explicit_override_wins_for_non_instruction() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-override-on", "/tmp/rr-override-on"))
+        .await
+        .unwrap();
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "constraint".into(),
+            content: "never run untrusted SQL".into(),
+            tags: None,
+            always_inject: Some(true),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["always_inject"], true);
+    let rule_id = body["rule_id"].as_str().unwrap();
+    assert!(rule_is_flagged(&pool, rule_id).await);
+}
+
+#[tokio::test]
+async fn test_remember_rule_explicit_override_wins_for_instruction() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-override-off", "/tmp/rr-override-off"))
+        .await
+        .unwrap();
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "document instruction that shouldn't auto-inject".into(),
+            tags: None,
+            always_inject: Some(false),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["always_inject"], false);
+    let rule_id = body["rule_id"].as_str().unwrap();
+    assert!(!rule_is_flagged(&pool, rule_id).await);
+}
+
+#[tokio::test]
+async fn test_remember_rule_near_cap_warning() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-near-cap", "/tmp/rr-near-cap"))
+        .await
+        .unwrap();
+
+    let project_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM ai_memory.projects WHERE name = $1")
+            .bind("rr-near-cap")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Seed 17 always-inject rules so the next insert hits exactly 18 (near_cap).
+    for i in 0..17 {
+        sqlx::query(
+            "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
+             VALUES ($1, 'instruction', $2, true)",
+        )
+        .bind(project_id)
+        .bind(format!("seeded rule {i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "the 18th standing instruction".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    let warn = body["always_inject_cap_warning"]
+        .as_object()
+        .expect("near-cap warning");
+    assert_eq!(warn["level"], "near_cap");
+    assert_eq!(warn["count"], 18);
+    assert_eq!(warn["limit"], 20);
+}
+
+#[tokio::test]
+async fn test_remember_rule_at_cap_warning() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-at-cap", "/tmp/rr-at-cap"))
+        .await
+        .unwrap();
+    let project_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM ai_memory.projects WHERE name = $1")
+            .bind("rr-at-cap")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Seed 19 so the write brings the post-count to exactly 20 = at_cap.
+    for i in 0..19 {
+        sqlx::query(
+            "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
+             VALUES ($1, 'instruction', $2, true)",
+        )
+        .bind(project_id)
+        .bind(format!("seed {i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "exactly-at-cap instruction".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    let warn = body["always_inject_cap_warning"]
+        .as_object()
+        .expect("at-cap warning");
+    assert_eq!(warn["level"], "at_cap");
+    assert_eq!(warn["count"], 20);
+}
+
+#[tokio::test]
+async fn test_remember_rule_over_cap_warning() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-over-cap", "/tmp/rr-over-cap"))
+        .await
+        .unwrap();
+    let project_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM ai_memory.projects WHERE name = $1")
+            .bind("rr-over-cap")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    for i in 0..20 {
+        sqlx::query(
+            "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
+             VALUES ($1, 'instruction', $2, true)",
+        )
+        .bind(project_id)
+        .bind(format!("seed {i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "overflow instruction".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    let warn = body["always_inject_cap_warning"]
+        .as_object()
+        .expect("over-cap warning");
+    assert_eq!(warn["level"], "over_cap");
+    assert_eq!(warn["count"], 21);
+}
+
+#[tokio::test]
+async fn test_remember_rule_no_warning_when_flag_off() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("rr-no-warn", "/tmp/rr-no-warn"))
+        .await
+        .unwrap();
+    let project_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM ai_memory.projects WHERE name = $1")
+            .bind("rr-no-warn")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Seed the project at the cap to prove the probe is gated on the write's flag.
+    for i in 0..20 {
+        sqlx::query(
+            "INSERT INTO ai_memory.semantic_rules (project_id, category, content, is_always_injected) \
+             VALUES ($1, 'instruction', $2, true)",
+        )
+        .bind(project_id)
+        .bind(format!("seed {i}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "no inject on this one".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert!(
+        body.get("always_inject_cap_warning").is_none(),
+        "no warning expected when rule is not always-inject"
+    );
+}
+
+#[tokio::test]
+async fn test_update_rule_flips_always_inject() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("ur-flip", "/tmp/ur-flip"))
+        .await
+        .unwrap();
+
+    let created = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "fact".into(),
+            content: "flip me later".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let rule_id = extract_json(&created)["rule_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!rule_is_flagged(&pool, &rule_id).await);
+
+    let res = server
+        .update_rule(Parameters(UpdateRuleParams {
+            rule_id: rule_id.clone(),
+            category: None,
+            content: None,
+            tags: None,
+            always_inject: Some(true),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["always_inject"], true);
+    assert!(rule_is_flagged(&pool, &rule_id).await);
+}
+
+#[tokio::test]
+async fn test_update_rule_allows_only_always_inject() {
+    let (server, pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("ur-only-flag", "/tmp/ur-only-flag"))
+        .await
+        .unwrap();
+
+    let created = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: "start as always-inject".into(),
+            tags: None,
+            always_inject: None,
+        }))
+        .await
+        .unwrap();
+    let rule_id = extract_json(&created)["rule_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Only the always_inject field — must not error with "Provide at least one of"
+    let res = server
+        .update_rule(Parameters(UpdateRuleParams {
+            rule_id: rule_id.clone(),
+            category: None,
+            content: None,
+            tags: None,
+            always_inject: Some(false),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&res);
+    assert_eq!(body["updated"], true);
+    assert_eq!(body["always_inject"], false);
+    assert!(!rule_is_flagged(&pool, &rule_id).await);
 }

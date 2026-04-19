@@ -85,6 +85,11 @@ pub struct LoreServerInner {
 /// always-inject bloat if a project accumulates many standing instructions.
 const PROCEDURAL_RULE_LIMIT: i64 = 20;
 
+/// Soft threshold (90% of the hard cap) for surfacing a near-cap warning
+/// in `remember_rule` / `update_rule` responses. Agents learn about the
+/// cap before they hit it — gives them a chance to retire a stale rule.
+const PROCEDURAL_NEAR_CAP_THRESHOLD: i64 = 18;
+
 /// Combined content-byte budget across procedural rules in one response.
 /// Rules past the budget are dropped and `truncated: true` is set. Budget is
 /// measured in UTF-8 bytes (via `str::len`), not chars — multi-byte content
@@ -245,6 +250,60 @@ impl LoreServer {
             Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
             None
+        }
+    }
+
+    /// Emit a response-side warning after an always-inject write.
+    ///
+    /// `count` is read **after** the write (TOCTOU: two concurrent writes can
+    /// both see the same post-value and under-report the true count — this is
+    /// accepted because the warning is advisory, not enforcement).
+    ///
+    /// Levels:
+    /// - `near_cap`: `count >= NEAR_CAP_THRESHOLD` and `count < PROCEDURAL_RULE_LIMIT`
+    /// - `at_cap`: `count == PROCEDURAL_RULE_LIMIT` (project is exactly at the cap)
+    /// - `over_cap`: `count > PROCEDURAL_RULE_LIMIT` — `list_always_injected_rules`
+    ///   is `ORDER BY created_at ASC LIMIT N`, so the **newest** rules get
+    ///   shadowed in `get_active_context` until older ones are retired.
+    ///
+    /// DB errors fall through silently — the write already succeeded.
+    async fn always_inject_cap_warning(
+        pool: &sqlx::PgPool,
+        project_id: uuid::Uuid,
+    ) -> Option<serde_json::Value> {
+        match db::semantic::count_always_injected_rules(pool, project_id).await {
+            Ok(count) if count >= PROCEDURAL_NEAR_CAP_THRESHOLD => {
+                let level = match count.cmp(&PROCEDURAL_RULE_LIMIT) {
+                    std::cmp::Ordering::Less => "near_cap",
+                    std::cmp::Ordering::Equal => "at_cap",
+                    std::cmp::Ordering::Greater => "over_cap",
+                };
+                Some(serde_json::json!({
+                    "level": level,
+                    "count": count,
+                    "limit": PROCEDURAL_RULE_LIMIT,
+                }))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "always_inject cap probe failed — skipping warning");
+                None
+            }
+        }
+    }
+
+    fn cap_nudge(verb: &str, warning: Option<&serde_json::Value>) -> String {
+        match warning.and_then(|w| w.get("level").and_then(|l| l.as_str())) {
+            Some("over_cap") => format!(
+                "Rule {verb}. Over cap — `list_always_injected_rules` order is ASC, so this newer rule will be shadowed in get_active_context until an older rule is retired via forget_rule."
+            ),
+            Some("at_cap") => format!(
+                "Rule {verb}. At the always-inject cap — the next flagged write will push a rule out of get_active_context. Retire a stale rule via forget_rule."
+            ),
+            Some("near_cap") => format!(
+                "Rule {verb}. Approaching the always-inject cap — consider retiring a stale procedural rule."
+            ),
+            _ => format!("Rule {verb}. Continue with your current task."),
         }
     }
 
@@ -591,13 +650,17 @@ impl LoreServer {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RememberRuleParams {
     #[schemars(
-        description = "Rule category: preference, fact, constraint, lesson, or instruction"
+        description = "Rule category (taxonomy only — descriptive label): preference, fact, constraint, lesson, or instruction"
     )]
     pub category: String,
     #[schemars(description = "The rule content to remember")]
     pub content: String,
     #[schemars(description = "Optional tags for categorizing the rule")]
     pub tags: Option<Vec<String>>,
+    #[schemars(
+        description = "Behavioral switch: when true, this rule is prepended to every get_active_context response. Defaults to true when category = 'instruction', false otherwise. Capped at 20 active always-inject rules per project. NOTE: Only applies to new rules. Pre-existing `instruction` rules stored before this API landed remain at false — flip them explicitly via update_rule."
+    )]
+    pub always_inject: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -664,12 +727,18 @@ pub struct GetDuplicateRulesParams {
 pub struct UpdateRuleParams {
     #[schemars(description = "UUID of the rule to update")]
     pub rule_id: String,
-    #[schemars(description = "New category: preference, fact, constraint, lesson, or instruction")]
+    #[schemars(
+        description = "New category (taxonomy only): preference, fact, constraint, lesson, or instruction"
+    )]
     pub category: Option<String>,
     #[schemars(description = "New content for the rule")]
     pub content: Option<String>,
     #[schemars(description = "New tags for the rule (replaces existing tags)")]
     pub tags: Option<Vec<String>>,
+    #[schemars(
+        description = "Flip the always-inject behavioral switch. Orthogonal to category. Capped at 20 active always-inject rules per project."
+    )]
+    pub always_inject: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -968,6 +1037,7 @@ impl LoreServer {
             category,
             content,
             tags,
+            always_inject,
         }): Parameters<RememberRuleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let content = self.maybe_scrub(content);
@@ -1005,17 +1075,38 @@ impl LoreServer {
                 .map_err(Self::db_err)?;
 
         let tags_vec = tags.unwrap_or_default();
-        let id = db::semantic::create_rule(
+        // Default: flip always-inject on for the `instruction` category, off for
+        // anything else. Explicit `always_inject` on the call wins either way
+        // so callers can mark a constraint/fact as procedural without
+        // retagging its category.
+        let effective_inject =
+            always_inject.unwrap_or(matches!(cat, db::RuleCategory::Instruction));
+        let id = db::semantic::create_rule_with_flag(
             self.pool(),
             project_id,
             cat,
             &content,
             Some(&embedding),
             &tags_vec,
+            effective_inject,
         )
         .await
         .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
+
+        let cap_warning = if effective_inject {
+            Self::always_inject_cap_warning(self.pool(), project_id).await
+        } else {
+            None
+        };
+
+        let mut body = serde_json::json!({
+            "rule_id": id.to_string(),
+            "always_inject": effective_inject,
+        });
+        if let Some(w) = &cap_warning {
+            body["always_inject_cap_warning"] = w.clone();
+        }
 
         if !contradictions.is_empty() {
             let conflict_rules: Vec<serde_json::Value> = contradictions
@@ -1027,20 +1118,16 @@ impl LoreServer {
                     })
                 })
                 .collect();
+            body["contradiction_warning"] = serde_json::Value::Bool(true);
+            body["potentially_conflicting_rules"] = serde_json::Value::Array(conflict_rules);
             return Self::json_content_with_nudge(
-                &serde_json::json!({
-                    "rule_id": id.to_string(),
-                    "contradiction_warning": true,
-                    "potentially_conflicting_rules": conflict_rules,
-                }),
+                &body,
                 "Rule stored, but potentially conflicting rules found. Review them — use forget_rule or update_rule to resolve contradictions.",
             );
         }
 
-        Self::json_content_with_nudge(
-            &serde_json::json!({ "rule_id": id.to_string() }),
-            "Rule stored. Continue with your current task.",
-        )
+        let nudge = Self::cap_nudge("stored", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
     }
 
     #[tool(description = "Recall rules from memory using semantic search")]
@@ -1230,11 +1317,12 @@ impl LoreServer {
             category,
             content,
             tags,
+            always_inject,
         }): Parameters<UpdateRuleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if category.is_none() && content.is_none() && tags.is_none() {
+        if category.is_none() && content.is_none() && tags.is_none() && always_inject.is_none() {
             return Err(rmcp::ErrorData::invalid_params(
-                "Provide at least one of: category, content, tags",
+                "Provide at least one of: category, content, tags, always_inject",
                 None,
             ));
         }
@@ -1251,21 +1339,39 @@ impl LoreServer {
             Some(text) => Some(self.embed(text).await?),
             None => None,
         };
+        let project_id = self.project_id().await?;
         let updated = db::semantic::update_rule(
             self.pool(),
             id,
+            project_id,
             cat,
             content.as_deref(),
             embedding.as_deref(),
             tags.as_deref(),
+            always_inject,
         )
         .await
         .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
-        Self::json_content_with_nudge(
-            &serde_json::json!({ "updated": updated }),
-            "Rule updated. Continue with your current task.",
-        )
+
+        // Only check the cap when the caller is turning the flag on; flipping
+        // it off or leaving it untouched can't push the project over the cap.
+        let cap_warning = if always_inject == Some(true) && updated {
+            Self::always_inject_cap_warning(self.pool(), project_id).await
+        } else {
+            None
+        };
+
+        let mut body = serde_json::json!({ "updated": updated });
+        if let Some(flag) = always_inject {
+            body["always_inject"] = serde_json::Value::Bool(flag);
+        }
+        if let Some(w) = &cap_warning {
+            body["always_inject_cap_warning"] = w.clone();
+        }
+
+        let nudge = Self::cap_nudge("updated", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
     }
 
     // -- Ledger tools --

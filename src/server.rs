@@ -5,7 +5,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     service::RequestContext,
-    tool, tool_router, RoleServer, ServerHandler,
+    tool, tool_router, Peer, RoleServer, ServerHandler,
 };
 use sqlx::PgPool;
 use tokio::sync::RwLock;
@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
+use crate::elicit::{self, ConfirmOutcome};
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
 use crate::webhooks;
 
@@ -314,6 +315,41 @@ impl LoreServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    /// Map a [`ConfirmOutcome`] into either a short-circuit tool result (user
+    /// declined/cancelled/refused) or `Ok(None)` to proceed. Propagates
+    /// protocol-level errors.
+    fn handle_confirm(
+        outcome: ConfirmOutcome,
+        context: &'static str,
+    ) -> Result<Option<CallToolResult>, rmcp::ErrorData> {
+        match outcome {
+            ConfirmOutcome::Confirmed { .. } | ConfirmOutcome::NotSupported => Ok(None),
+            ConfirmOutcome::Refused { reason } => {
+                let body = serde_json::json!({
+                    "cancelled": true,
+                    "outcome": "refused",
+                    "reason": reason,
+                });
+                Self::json_content_with_nudge(&body, "User refused. No state was changed.")
+                    .map(Some)
+            }
+            ConfirmOutcome::Declined => Self::json_content_with_nudge(
+                &serde_json::json!({ "cancelled": true, "outcome": "declined" }),
+                "User declined. No state was changed.",
+            )
+            .map(Some),
+            ConfirmOutcome::Cancelled => Self::json_content_with_nudge(
+                &serde_json::json!({ "cancelled": true, "outcome": "cancelled" }),
+                "User dismissed the prompt. No state was changed.",
+            )
+            .map(Some),
+            ConfirmOutcome::Error(e) => Err(rmcp::ErrorData::internal_error(
+                format!("{context} elicitation failed: {e}"),
+                None,
+            )),
+        }
+    }
+
     fn json_content_with_nudge<T: serde::Serialize>(
         val: &T,
         next_step: &str,
@@ -505,6 +541,10 @@ pub struct ForgetRuleParams {
         description = "If true, mark rule as superseded instead of deleting (default false)"
     )]
     pub supersede: Option<bool>,
+    #[schemars(
+        description = "If true, skip the interactive elicitation confirmation prompt (default false). The server will still prompt unless the client does not support MCP elicitation."
+    )]
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -555,6 +595,10 @@ pub struct ProposeAttemptParams {
     pub approach_summary: String,
     #[schemars(description = "Optional agent identifier for multi-agent workflows")]
     pub agent_id: Option<String>,
+    #[schemars(
+        description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. Useful for high-stakes changes. Default false. Silently ignored when the client does not support elicitation."
+    )]
+    pub request_confirmation: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -988,7 +1032,32 @@ impl LoreServer {
     )]
     pub async fn forget_rule(
         &self,
-        Parameters(ForgetRuleParams { rule_id, supersede }): Parameters<ForgetRuleParams>,
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<ForgetRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.force.unwrap_or(false) {
+            let action = if params.supersede.unwrap_or(false) {
+                "supersede"
+            } else {
+                "delete"
+            };
+            let msg = format!(
+                "Confirm {action} of rule {}. This cannot be undone for deletions.",
+                params.rule_id
+            );
+            if let Some(early) = Self::handle_confirm(elicit::confirm(&peer, msg).await, "forget")?
+            {
+                return Ok(early);
+            }
+        }
+        self.forget_rule_impl(params).await
+    }
+
+    pub async fn forget_rule_impl(
+        &self,
+        ForgetRuleParams {
+            rule_id, supersede, ..
+        }: ForgetRuleParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let id = Self::parse_uuid(&rule_id)?;
         if supersede.unwrap_or(false) {
@@ -1138,11 +1207,31 @@ impl LoreServer {
     #[tool(description = "Propose an approach attempt for a task")]
     pub async fn propose_attempt(
         &self,
-        Parameters(ProposeAttemptParams {
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<ProposeAttemptParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.request_confirmation.unwrap_or(false) {
+            let msg = format!(
+                "Proposed approach:\n\n{}\n\nConfirm to proceed with code generation.",
+                params.approach_summary
+            );
+            if let Some(early) =
+                Self::handle_confirm(elicit::confirm(&peer, msg).await, "propose_attempt")?
+            {
+                return Ok(early);
+            }
+        }
+        self.propose_attempt_impl(params).await
+    }
+
+    pub async fn propose_attempt_impl(
+        &self,
+        ProposeAttemptParams {
             task_id,
             approach_summary,
             agent_id,
-        }): Parameters<ProposeAttemptParams>,
+            ..
+        }: ProposeAttemptParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let approach_summary = self.maybe_scrub(approach_summary);
         Self::validate_len("approach_summary", &approach_summary, 4096)?;

@@ -110,11 +110,12 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                     .ok_or_else(|| ReplayError::UnknownTaskRef(task_ref.clone()))?
                     .clone();
                 let res = server
-                    .propose_attempt(Parameters(ProposeAttemptParams {
+                    .propose_attempt_impl(ProposeAttemptParams {
                         task_id,
                         approach_summary: approach.clone(),
                         agent_id: None,
-                    }))
+                        request_confirmation: None,
+                    })
                     .await?;
                 let attempt_id = json_field(&res, "attempt_id")?;
                 let n = attempt_counter.entry(task_ref.clone()).or_insert(0);

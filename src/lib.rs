@@ -4,6 +4,7 @@ pub mod community;
 pub mod config;
 pub mod dashboard;
 pub mod db;
+pub mod elicit;
 pub mod embeddings;
 #[cfg(feature = "eval")]
 pub mod eval;

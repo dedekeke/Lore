@@ -162,6 +162,25 @@ Building with `--no-default-features` skips the `ort` runtime (smaller binary, f
 | `lore://protocol`       | Episodic memory protocol (text/plain).                |
 | `lore://active-context` | Active project, tasks, wipe count (JSON).             |
 
+### Elicitation (user confirmation)
+
+Lore uses MCP [elicitation](https://spec.modelcontextprotocol.io/specification/server/elicitation/) to ask the user to confirm high-stakes actions before they run. Confirmation is interactive — the client renders a small form with `confirmed: bool` and optional `reason: string`, and the server waits for the answer.
+
+| Tool              | Trigger                                             | Skip with                      |
+|-------------------|-----------------------------------------------------|--------------------------------|
+| `forget_rule`     | Always (destructive delete/supersede).              | `force: true`                  |
+| `propose_attempt` | Only when `request_confirmation: true` is supplied. | Omit `request_confirmation`.   |
+
+Outcome mapping (returned as `{"cancelled": true, "outcome": ...}` when the user declines):
+
+- `refused` — user submitted the form with `confirmed: false`. Includes `reason` if provided.
+- `declined` — user clicked the "Decline" dialog action.
+- `cancelled` — user dismissed the dialog.
+- `confirmed` — user submitted with `confirmed: true`. Tool proceeds normally.
+- `not_supported` — client does not advertise elicitation capability. Tool proceeds normally (backwards-compatible); supply `force: true` to be explicit.
+
+Clients that don't implement elicitation still work: when capability is not advertised, the prompt is skipped entirely and the tool proceeds as before. Use `force: true` on `forget_rule` to skip the prompt on clients that *do* support elicitation.
+
 ---
 
 ## Configuration

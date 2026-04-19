@@ -60,7 +60,14 @@ An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision 
 
 ### Metrics (P1-T3)
 
-`src/eval/metrics.rs` computes **precision@k**, **recall@k**, and **MRR** over `CaseRun`s. Means are taken across individual `RecallRun`s, so a case with more queries contributes proportionally to the aggregate. Labels that did not resolve to a UUID at replay time (near-duplicate short-circuit, or `task-*`/`attempt-*` references that `recall_rules` cannot return) stay in the recall denominator but can never enter the numerator — they score as misses. Negative cases (empty `expected_hits`) contribute to precision (1.0 when the server returned nothing, 0.0 otherwise) and are excluded from recall/MRR means, which are undefined without gold references.
+`src/eval/metrics.rs` computes **precision@k**, **recall@k**, and **MRR** over `CaseRun`s. Conventions:
+
+- **precision@k** = `|retrieved_top_k ∩ relevant| / min(k, |retrieved|)` (TREC — a short return is not penalised by empty slots).
+- **recall@k** = `|retrieved_top_k ∩ relevant| / |relevant|`.
+- **MRR** = reciprocal rank of the first relevant hit in top-k (0 if no hit).
+- Aggregate means are taken across individual `RecallRun`s, not cases — a case with more queries contributes proportionally.
+- Labels that did not resolve to a UUID at replay time (near-duplicate short-circuit, or `task-*`/`attempt-*` references that `recall_rules` cannot return) stay in recall's denominator but can never enter the numerator — they score as misses.
+- Negative cases (empty `expected_hits`, e.g. `mini-011`) have **undefined** precision/recall/MRR and are excluded from those means. They report a `negative_pass: bool` instead (`true` iff the server returned nothing), aggregated separately into `DatasetMetrics::negative_pass_rate`.
 
 ## Baseline update policy
 

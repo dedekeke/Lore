@@ -68,13 +68,25 @@ async fn mini_fixture_replays_without_error() {
         assert!(field.is_finite(), "aggregate metric NaN/inf");
         assert!((0.0..=1.0).contains(&field), "metric out of range: {field}");
     }
+    assert!(
+        (0.0..=1.0).contains(&metrics.negative_pass_rate),
+        "negative_pass_rate out of range: {}",
+        metrics.negative_pass_rate,
+    );
+    assert_eq!(
+        metrics.num_scored + metrics.num_negative,
+        metrics.num_recalls,
+        "scored + negative must partition all recalls"
+    );
     eprintln!(
         "mini aggregate @k=10: precision={:.3} recall={:.3} mrr={:.3} \
-         (cases={}, recalls={})",
+         neg_pass={:.3} (cases={}, scored={}, negative={})",
         metrics.mean_precision_at_k,
         metrics.mean_recall_at_k,
         metrics.mean_mrr,
+        metrics.negative_pass_rate,
         metrics.num_cases,
-        metrics.num_recalls,
+        metrics.num_scored,
+        metrics.num_negative,
     );
 }

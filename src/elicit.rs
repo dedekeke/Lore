@@ -76,7 +76,12 @@ pub async fn confirm(peer: &Peer<RoleServer>, message: impl Into<String>) -> Con
         Err(ElicitationError::ParseError { error, .. }) => {
             ConfirmOutcome::Error(format!("elicitation parse error: {error}"))
         }
-        Err(ElicitationError::NoContent) => ConfirmOutcome::Cancelled,
+        // Client responded with `action: accept` but an empty `content` payload.
+        // This is a malformed client response, not a user cancellation — surface
+        // it as an error so the agent doesn't loop retrying.
+        Err(ElicitationError::NoContent) => {
+            ConfirmOutcome::Error("elicitation: client accepted with no content".to_string())
+        }
         Err(ElicitationError::Service(ServiceError::Timeout { .. })) => {
             ConfirmOutcome::Error("elicitation timeout".to_string())
         }

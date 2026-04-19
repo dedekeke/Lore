@@ -318,12 +318,29 @@ impl LoreServer {
     /// Map a [`ConfirmOutcome`] into either a short-circuit tool result (user
     /// declined/cancelled/refused) or `Ok(None)` to proceed. Propagates
     /// protocol-level errors.
+    ///
+    /// `allow_not_supported` controls fallback on clients that do not
+    /// advertise elicitation capability:
+    /// - `true`  → proceed silently (safe for opt-in, non-destructive prompts).
+    /// - `false` → short-circuit with a structured response so destructive
+    ///   callers don't silently run on non-elicit clients. The caller can
+    ///   retry with `force: true` to confirm intent.
     fn handle_confirm(
         outcome: ConfirmOutcome,
-        context: &'static str,
+        context: &str,
+        allow_not_supported: bool,
     ) -> Result<Option<CallToolResult>, rmcp::ErrorData> {
         match outcome {
-            ConfirmOutcome::Confirmed { .. } | ConfirmOutcome::NotSupported => Ok(None),
+            ConfirmOutcome::Confirmed { .. } => Ok(None),
+            ConfirmOutcome::NotSupported if allow_not_supported => Ok(None),
+            ConfirmOutcome::NotSupported => Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "cancelled": true,
+                    "outcome": "not_supported",
+                }),
+                "Client does not support MCP elicitation. Re-invoke with force=true to proceed without user confirmation.",
+            )
+            .map(Some),
             ConfirmOutcome::Refused { reason } => {
                 let body = serde_json::json!({
                     "cancelled": true,
@@ -542,7 +559,7 @@ pub struct ForgetRuleParams {
     )]
     pub supersede: Option<bool>,
     #[schemars(
-        description = "If true, skip the interactive elicitation confirmation prompt (default false). The server will still prompt unless the client does not support MCP elicitation."
+        description = "If true, skip the interactive elicitation confirmation prompt and delete/supersede immediately (default false). Required on clients that do not support MCP elicitation — otherwise the tool returns a `not_supported` cancellation."
     )]
     pub force: Option<bool>,
 }
@@ -596,7 +613,7 @@ pub struct ProposeAttemptParams {
     #[schemars(description = "Optional agent identifier for multi-agent workflows")]
     pub agent_id: Option<String>,
     #[schemars(
-        description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. Useful for high-stakes changes. Default false. Silently ignored when the client does not support elicitation."
+        description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. This is an LLM-initiated review request — use it when you want an explicit human sign-off on your plan. Default false. Silently skipped when the client does not support elicitation."
     )]
     pub request_confirmation: Option<bool>,
 }
@@ -1036,16 +1053,20 @@ impl LoreServer {
         Parameters(params): Parameters<ForgetRuleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if !params.force.unwrap_or(false) {
-            let action = if params.supersede.unwrap_or(false) {
-                "supersede"
+            let msg = if params.supersede.unwrap_or(false) {
+                format!(
+                    "Confirm supersede of rule {}. The rule will be hidden from search but preserved in history.",
+                    params.rule_id
+                )
             } else {
-                "delete"
+                format!(
+                    "Confirm delete of rule {}. This cannot be undone.",
+                    params.rule_id
+                )
             };
-            let msg = format!(
-                "Confirm {action} of rule {}. This cannot be undone for deletions.",
-                params.rule_id
-            );
-            if let Some(early) = Self::handle_confirm(elicit::confirm(&peer, msg).await, "forget")?
+            let ctx = format!("forget_rule({})", params.rule_id);
+            if let Some(early) =
+                Self::handle_confirm(elicit::confirm(&peer, msg).await, &ctx, false)?
             {
                 return Ok(early);
             }
@@ -1215,8 +1236,10 @@ impl LoreServer {
                 "Proposed approach:\n\n{}\n\nConfirm to proceed with code generation.",
                 params.approach_summary
             );
+            // Non-destructive opt-in: fall through silently on clients that
+            // don't support elicitation.
             if let Some(early) =
-                Self::handle_confirm(elicit::confirm(&peer, msg).await, "propose_attempt")?
+                Self::handle_confirm(elicit::confirm(&peer, msg).await, "propose_attempt", true)?
             {
                 return Ok(early);
             }

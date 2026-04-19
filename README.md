@@ -176,10 +176,10 @@ Outcome mapping (returned as `{"cancelled": true, "outcome": ...}` when the user
 - `refused` — user submitted the form with `confirmed: false`. Includes `reason` if provided.
 - `declined` — user clicked the "Decline" dialog action.
 - `cancelled` — user dismissed the dialog.
+- `not_supported` — client does not advertise elicitation capability. `forget_rule` fails closed here (requires `force: true` to actually proceed). `propose_attempt` falls through silently since it is a non-destructive opt-in.
 - `confirmed` — user submitted with `confirmed: true`. Tool proceeds normally.
-- `not_supported` — client does not advertise elicitation capability. Tool proceeds normally (backwards-compatible); supply `force: true` to be explicit.
 
-Clients that don't implement elicitation still work: when capability is not advertised, the prompt is skipped entirely and the tool proceeds as before. Use `force: true` on `forget_rule` to skip the prompt on clients that *do* support elicitation.
+Destructive operations are fail-closed: `forget_rule` on a non-elicit client returns `not_supported` and will only proceed if the caller explicitly sets `force: true`. Opt-in prompts on non-destructive operations (`propose_attempt`) fall through silently when the client lacks the capability.
 
 ---
 

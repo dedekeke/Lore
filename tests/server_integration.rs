@@ -249,7 +249,7 @@ async fn test_forget_rule() {
         .forget_rule_impl(ForgetRuleParams {
             rule_id,
             supersede: None,
-            force: Some(true),
+            force: None,
         })
         .await
         .unwrap();

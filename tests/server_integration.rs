@@ -90,11 +90,12 @@ async fn test_full_task_lifecycle() {
         .to_string();
 
     let attempt_result = server
-        .propose_attempt(Parameters(ProposeAttemptParams {
+        .propose_attempt_impl(ProposeAttemptParams {
             task_id: task_id.clone(),
             approach_summary: "try approach A".into(),
             agent_id: None,
-        }))
+            request_confirmation: None,
+        })
         .await
         .unwrap();
     let attempt_id = extract_json(&attempt_result)["attempt_id"]
@@ -245,10 +246,11 @@ async fn test_forget_rule() {
         .to_string();
 
     server
-        .forget_rule(Parameters(ForgetRuleParams {
+        .forget_rule_impl(ForgetRuleParams {
             rule_id,
             supersede: None,
-        }))
+            force: None,
+        })
         .await
         .unwrap();
 
@@ -315,11 +317,12 @@ async fn test_get_task_stats() {
     let task_id = extract_json(&task)["task_id"].as_str().unwrap().to_string();
 
     let attempt = server
-        .propose_attempt(Parameters(ProposeAttemptParams {
+        .propose_attempt_impl(ProposeAttemptParams {
             task_id: task_id.clone(),
             approach_summary: "approach A".into(),
             agent_id: None,
-        }))
+            request_confirmation: None,
+        })
         .await
         .unwrap();
     let attempt_id = extract_json(&attempt)["attempt_id"]

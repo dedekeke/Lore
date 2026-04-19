@@ -162,6 +162,25 @@ Building with `--no-default-features` skips the `ort` runtime (smaller binary, f
 | `lore://protocol`       | Episodic memory protocol (text/plain).                |
 | `lore://active-context` | Active project, tasks, wipe count (JSON).             |
 
+### Elicitation (user confirmation)
+
+Lore uses MCP [elicitation](https://spec.modelcontextprotocol.io/specification/server/elicitation/) to ask the user to confirm high-stakes actions before they run. Confirmation is interactive — the client renders a small form with `confirmed: bool` and optional `reason: string`, and the server waits for the answer.
+
+| Tool              | Trigger                                             | Skip with                      |
+|-------------------|-----------------------------------------------------|--------------------------------|
+| `forget_rule`     | Always (destructive delete/supersede).              | `force: true`                  |
+| `propose_attempt` | Only when `request_confirmation: true` is supplied. | Omit `request_confirmation`.   |
+
+Outcome mapping (returned as `{"cancelled": true, "outcome": ...}` when the user declines):
+
+- `refused` — user submitted the form with `confirmed: false`. Includes `reason` if provided.
+- `declined` — user clicked the "Decline" dialog action.
+- `cancelled` — user dismissed the dialog.
+- `not_supported` — client does not advertise elicitation capability. `forget_rule` fails closed here (requires `force: true` to actually proceed). `propose_attempt` falls through silently since it is a non-destructive opt-in.
+- `confirmed` — user submitted with `confirmed: true`. Tool proceeds normally.
+
+Destructive operations are fail-closed: `forget_rule` on a non-elicit client returns `not_supported` and will only proceed if the caller explicitly sets `force: true`. Opt-in prompts on non-destructive operations (`propose_attempt`) fall through silently when the client lacks the capability.
+
 ---
 
 ## Configuration

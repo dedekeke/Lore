@@ -2,11 +2,27 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use lore::config::Config;
 use lore::embeddings::fake::FakeEmbeddingProvider;
 use lore::embeddings::AnyEmbeddingProvider;
-use lore::eval::{aggregate, load_mini, replay_case};
+use lore::eval::{
+    aggregate, compare, load_baseline, load_mini, replay_case, save_baseline, Baseline,
+    DatasetMetrics, DEFAULT_TOLERANCE,
+};
 use lore::server::LoreServer;
+
+const BASELINE_DATASET: &str = "mini";
+
+fn baseline_path() -> PathBuf {
+    // CARGO_MANIFEST_DIR points at the crate root; the baseline lives in
+    // `eval/baselines.json` next to the fixtures.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("eval")
+        .join("baselines.json")
+}
 
 /// End-to-end smoke: every case in the mini fixture replays against a real
 /// `LoreServer` + pgvector, every `expected_hit` label is accounted for
@@ -53,9 +69,8 @@ async fn mini_fixture_replays_without_error() {
         runs.push(run);
     }
 
-    // Aggregate metrics over the full mini set. Values aren't asserted against
-    // a baseline (P1-T4), but we do sanity-check the shape: metrics compute
-    // cleanly (no NaN), every recall was scored, and precision is in [0, 1].
+    // Aggregate metrics over the full mini set. Shape is checked here;
+    // numeric values are compared against `eval/baselines.json` further down.
     let metrics = aggregate(&runs, 10);
     assert_eq!(metrics.num_cases, runs.len());
     let total_recalls: usize = runs.iter().map(|r| r.recalls.len()).sum();
@@ -89,4 +104,31 @@ async fn mini_fixture_replays_without_error() {
         metrics.num_scored,
         metrics.num_negative,
     );
+
+    // Baseline gate. Regenerate with `EVAL_UPDATE_BASELINE=1 cargo test
+    // --features eval --test eval_replay`. Rationale for why the baseline
+    // changed MUST appear in the PR description — see eval/README.md.
+    let mut current: BTreeMap<String, DatasetMetrics> = BTreeMap::new();
+    current.insert(BASELINE_DATASET.to_string(), metrics);
+
+    let path = baseline_path();
+    if std::env::var_os("EVAL_UPDATE_BASELINE").is_some() {
+        let baseline = Baseline::new(current.clone())
+            .with_metadata("embedding_provider", "FakeEmbeddingProvider::hashed(384)")
+            .with_metadata("k", "10");
+        save_baseline(&path, &baseline).expect("write baselines.json");
+        eprintln!("wrote {}", path.display());
+        return;
+    }
+
+    let baseline = load_baseline(&path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load baseline from {}: {e}. \
+             Run with EVAL_UPDATE_BASELINE=1 to create/refresh it.",
+            path.display()
+        )
+    });
+    let report = compare(&baseline, &current, DEFAULT_TOLERANCE);
+    eprint!("{report}");
+    assert!(!report.has_regression(), "baseline regression:\n{report}");
 }

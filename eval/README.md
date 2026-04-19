@@ -11,7 +11,7 @@ This directory lands across five tasks (P1-T1..P1-T5). P1-T1 and P1-T2 are merge
 | P1-T1 ✅ | Types, loader trait, `fixtures/mini.json` (12 synthetic cases), unit test |
 | P1-T2 ✅ | `src/eval/harness.rs` replay runner + `tests/eval_replay.rs` |
 | P1-T3 ✅ | `src/eval/metrics.rs` (precision@k, recall@k, MRR) + smoke assertions |
-| P1-T4 | `eval/baselines.json` captured from develop HEAD |
+| P1-T4 ✅ | `src/eval/baseline.rs` + `eval/baselines.json` with regression gate |
 | P1-T5 | Nightly GitHub Actions workflow + PR delta bot |
 | Follow-up | Real dataset loaders: LoCoMo, LongMemEval, BEAM |
 
@@ -71,4 +71,12 @@ An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision 
 
 ## Baseline update policy
 
-`baselines.json` is the source of truth. Only update it in a review-gated PR that explicitly calls out why the delta is intended (model swap, schema change, scoring tweak). Accidental baseline drift from unrelated PRs must be reverted.
+`baselines.json` is the source of truth. The integration test `mini_fixture_replays_without_error` loads it and fails if any aggregate metric drops by more than `DEFAULT_TOLERANCE` (0.02) or if the shape (num_cases, num_recalls, etc.) drifts.
+
+Regenerate with:
+
+```bash
+EVAL_UPDATE_BASELINE=1 cargo test --features eval --test eval_replay -- --nocapture
+```
+
+Only update `baselines.json` in a review-gated PR that explicitly calls out why the delta is intended (model swap, schema change, scoring tweak). Accidental baseline drift from unrelated PRs must be reverted. Improvements (current > baseline) never fail the gate; only regressions outside tolerance do.

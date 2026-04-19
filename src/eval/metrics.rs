@@ -26,12 +26,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use super::harness::{CaseRun, RecallRun};
 
 /// Metrics for a single `RecallRules` event. All three ranking metrics are
 /// `Option` because a negative case (empty `expected_hits`) has no defined
 /// precision/recall/MRR — consult `negative_pass` instead.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct RecallMetrics {
     pub k: usize,
@@ -47,7 +49,7 @@ pub struct RecallMetrics {
 /// Metrics rolled up per case. Means are taken only over recalls whose
 /// metric is `Some(_)` — negative cases don't count toward the precision/
 /// recall/MRR means.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct CaseMetrics {
     pub case_id: String,
@@ -60,7 +62,7 @@ pub struct CaseMetrics {
 /// Dataset-level aggregate. Means are taken over individual `RecallRun`s
 /// (not cases), so a case with more queries contributes proportionally.
 /// Negative-case pass rate is tracked separately from the ranking metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct DatasetMetrics {
     pub k: usize,

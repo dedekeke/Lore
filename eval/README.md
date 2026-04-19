@@ -44,7 +44,9 @@ jq . /tmp/eval-out/report.json
 
 **Concurrency**: one run per PR ref. Rapid-fire pushes cancel the older run so the comment bot never races a double-post.
 
-**Artifact**: `eval-metrics-<event_name>-<sha>`, 14-day retention. The hard regression gate lives in the `mini_fixture_replays_without_error` integration test; the workflow surfaces the delta but never relaxes it.
+**Artifact**: `eval-metrics-<event_name>-<sha>`, 14-day retention. The hard regression gate lives in the `mini_fixture_replays_without_error` integration test; the workflow computes its own `has_regression` verdict from `report.json` only to colour the PR comment header — it never relaxes the gate.
+
+**Where to look**: PR comment for the headline table, the `replay` job's **run summary** for the full table plus any shape-drift details the comment omits.
 
 ## Artifact schemas
 

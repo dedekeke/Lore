@@ -18,8 +18,19 @@ async fn setup_server() -> (
     sqlx::PgPool,
     testcontainers::ContainerAsync<testcontainers::GenericImage>,
 ) {
+    setup_server_with(|_| {}).await
+}
+
+async fn setup_server_with<F: FnOnce(&mut Config)>(
+    tweak: F,
+) -> (
+    LoreServer,
+    sqlx::PgPool,
+    testcontainers::ContainerAsync<testcontainers::GenericImage>,
+) {
     let (pool, container) = common::setup_db().await;
-    let config = Config::from_env();
+    let mut config = Config::from_env();
+    tweak(&mut config);
     let embeddings = AnyEmbeddingProvider::Fake(FakeEmbeddingProvider::new(384));
     let server = LoreServer::new(pool.clone(), embeddings, config);
     (server, pool, container)
@@ -642,4 +653,93 @@ async fn test_get_protocol() {
         })
         .unwrap();
     assert!(text.contains("CRITICAL OPERATING PROTOCOL"));
+}
+
+async fn remember_then_flag_always_inject(
+    server: &LoreServer,
+    pool: &sqlx::PgPool,
+    content: &str,
+) -> String {
+    let res = server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "instruction".into(),
+            content: content.into(),
+            tags: None,
+        }))
+        .await
+        .unwrap();
+    let rule_id = extract_json(&res)["rule_id"]
+        .as_str()
+        .expect("remember_rule returned no rule_id (dedup guard fired?)")
+        .to_string();
+    sqlx::query("UPDATE ai_memory.semantic_rules SET is_always_injected = true WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&rule_id).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    rule_id
+}
+
+#[tokio::test]
+async fn test_get_active_context_procedural_block_surfaces_with_flag() {
+    let (server, pool, _c) = setup_server_with(|cfg| cfg.procedural_memory = true).await;
+    server
+        .switch_project(switch_params("procedural-on", "/tmp/procedural-on"))
+        .await
+        .unwrap();
+    let id =
+        remember_then_flag_always_inject(&server, &pool, "prefer explicit error handling").await;
+
+    let ctx = server.get_active_context().await.unwrap();
+    let json = extract_json(&ctx);
+    let block = json["procedural"].as_object().expect("procedural block");
+    assert_eq!(block["truncated"], false);
+    assert_eq!(block["limit"], 20);
+    assert_eq!(block["char_budget"], 2000);
+    let rules = block["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0]["id"], id);
+    assert_eq!(rules[0]["content"], "prefer explicit error handling");
+}
+
+#[tokio::test]
+async fn test_get_active_context_procedural_block_absent_without_flag() {
+    let (server, pool, _c) = setup_server_with(|cfg| cfg.procedural_memory = false).await;
+    server
+        .switch_project(switch_params("procedural-off", "/tmp/procedural-off"))
+        .await
+        .unwrap();
+    let _ = remember_then_flag_always_inject(&server, &pool, "always run fmt before commit").await;
+
+    let ctx = server.get_active_context().await.unwrap();
+    let json = extract_json(&ctx);
+    assert!(
+        json.get("procedural").is_none(),
+        "procedural block must be absent when LORE_PROCEDURAL_MEMORY is off"
+    );
+}
+
+#[tokio::test]
+async fn test_get_active_context_procedural_excludes_non_always_inject() {
+    let (server, _pool, _c) = setup_server_with(|cfg| cfg.procedural_memory = true).await;
+    server
+        .switch_project(switch_params("procedural-filter", "/tmp/procedural-filter"))
+        .await
+        .unwrap();
+    server
+        .remember_rule(Parameters(RememberRuleParams {
+            category: "preference".into(),
+            content: "don't flag this one".into(),
+            tags: None,
+        }))
+        .await
+        .unwrap();
+
+    let ctx = server.get_active_context().await.unwrap();
+    let json = extract_json(&ctx);
+    let block = json["procedural"].as_object().expect("procedural block");
+    assert!(
+        block["rules"].as_array().unwrap().is_empty(),
+        "non-always-inject rules must not surface in procedural block"
+    );
 }

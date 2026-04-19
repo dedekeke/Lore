@@ -98,6 +98,30 @@ pub async fn count_rules_by_category(
     Ok(row.0)
 }
 
+/// Fetch active rules flagged `is_always_injected = true` for a project.
+/// Used by `get_active_context` to prepend procedural memory without a
+/// similarity search. Caller enforces the char-budget cap.
+pub async fn list_always_injected_rules(
+    pool: &PgPool,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SemanticRule>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.id, s.project_id, s.category, s.content, s.embedding, s.source_task_id, s.created_at, s.expires_at, s.hit_count, s.last_used_at, s.weight, s.task_type_affinity, s.tags, s.valid_from, s.valid_until, s.is_always_injected, p.name AS project_name \
+         FROM ai_memory.semantic_rules s LEFT JOIN ai_memory.projects p ON p.id = s.project_id \
+         WHERE s.project_id = $1 \
+           AND s.is_always_injected = true \
+           AND s.valid_until IS NULL \
+           AND (s.expires_at IS NULL OR s.expires_at > NOW()) \
+         ORDER BY s.created_at ASC \
+         LIMIT $2",
+    )
+    .bind(project_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn list_rules(
     pool: &PgPool,
     project_id: Uuid,

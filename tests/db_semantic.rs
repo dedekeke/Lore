@@ -511,3 +511,118 @@ async fn test_find_duplicate_clusters() {
     assert_eq!(pairs.len(), 1);
     assert!(pairs[0].similarity >= 0.88);
 }
+
+async fn flag_always_inject(pool: &sqlx::PgPool, id: uuid::Uuid) {
+    sqlx::query("UPDATE ai_memory.semantic_rules SET is_always_injected = true WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_list_always_injected_filters_flag_and_scope() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    let flagged_a =
+        semantic::create_rule(&pool, pa, RuleCategory::Instruction, "flag me", None, &[])
+            .await
+            .unwrap();
+    let _unflagged_a =
+        semantic::create_rule(&pool, pa, RuleCategory::Instruction, "skip me", None, &[])
+            .await
+            .unwrap();
+    let flagged_b = semantic::create_rule(
+        &pool,
+        pb,
+        RuleCategory::Instruction,
+        "other proj",
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    flag_always_inject(&pool, flagged_a).await;
+    flag_always_inject(&pool, flagged_b).await;
+
+    let rows = semantic::list_always_injected_rules(&pool, pa, 20)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, flagged_a);
+    assert!(rows[0].is_always_injected);
+}
+
+#[tokio::test]
+async fn test_list_always_injected_respects_limit() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    for i in 0..5 {
+        let id = semantic::create_rule(
+            &pool,
+            pid,
+            RuleCategory::Instruction,
+            &format!("rule-{i}"),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        flag_always_inject(&pool, id).await;
+    }
+    let rows = semantic::list_always_injected_rules(&pool, pid, 3)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn test_list_always_injected_excludes_superseded() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Instruction, "live", None, &[])
+        .await
+        .unwrap();
+    flag_always_inject(&pool, id).await;
+    assert_eq!(
+        semantic::list_always_injected_rules(&pool, pid, 20)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    semantic::supersede_rule(&pool, id).await.unwrap();
+    assert_eq!(
+        semantic::list_always_injected_rules(&pool, pid, 20)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_list_always_injected_excludes_expired() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Instruction, "timed", None, &[])
+        .await
+        .unwrap();
+    flag_always_inject(&pool, id).await;
+    sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        semantic::list_always_injected_rules(&pool, pid, 20)
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}

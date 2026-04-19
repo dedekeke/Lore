@@ -81,6 +81,50 @@ pub struct LoreServerInner {
     pub tool_router: ToolRouter<LoreServer>,
 }
 
+/// Hard cap on procedural rules surfaced by `get_active_context`. Prevents
+/// always-inject bloat if a project accumulates many standing instructions.
+const PROCEDURAL_RULE_LIMIT: i64 = 20;
+
+/// Combined content-char budget across procedural rules in one response.
+/// Rules past the budget are dropped and `truncated: true` is set.
+const PROCEDURAL_CHAR_BUDGET: usize = 2000;
+
+fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json::Value {
+    let total_candidates = rules.len();
+    let mut included: Vec<&db::semantic::SemanticRule> = Vec::new();
+    let mut used = 0usize;
+    for r in &rules {
+        let next = used.saturating_add(r.content.len());
+        if next > PROCEDURAL_CHAR_BUDGET && !included.is_empty() {
+            break;
+        }
+        included.push(r);
+        used = next;
+        if used >= PROCEDURAL_CHAR_BUDGET {
+            break;
+        }
+    }
+    let truncated = included.len() < total_candidates;
+    let projected: Vec<serde_json::Value> = included
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id.to_string(),
+                "category": r.category,
+                "content": r.content,
+                "tags": r.tags,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "rules": projected,
+        "total_chars": used,
+        "truncated": truncated,
+        "limit": PROCEDURAL_RULE_LIMIT,
+        "char_budget": PROCEDURAL_CHAR_BUDGET,
+    })
+}
+
 impl LoreServer {
     pub fn new(pool: PgPool, embeddings: AnyEmbeddingProvider, config: Config) -> Self {
         let http_client = reqwest::Client::builder()
@@ -1886,6 +1930,24 @@ impl LoreServer {
             0
         };
 
+        let procedural = if self.config().procedural_memory {
+            match db::semantic::list_always_injected_rules(
+                self.pool(),
+                project_id,
+                PROCEDURAL_RULE_LIMIT,
+            )
+            .await
+            {
+                Ok(rules) => Some(build_procedural_block(rules)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "procedural rule fetch failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Proactive retrieval: auto-surface relevant rules and similar failures
         // based on the active task's description embedding.
         let proactive_enabled = self.config().proactive_context;
@@ -1945,6 +2007,9 @@ impl LoreServer {
         });
         if let Some(p) = proactive {
             body["proactively_retrieved"] = p;
+        }
+        if let Some(pm) = procedural {
+            body["procedural"] = pm;
         }
         Self::json_content_with_nudge(&body, nudge)
     }
@@ -3351,6 +3416,63 @@ mod tests {
     #[test]
     fn test_parse_rule_category_invalid() {
         assert!(LoreServer::parse_rule_category("garbage").is_err());
+    }
+
+    fn fake_rule(content: &str) -> db::semantic::SemanticRule {
+        let now = chrono::Utc::now();
+        db::semantic::SemanticRule {
+            id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            category: db::semantic::RuleCategory::Instruction,
+            content: content.to_string(),
+            embedding: None,
+            source_task_id: None,
+            created_at: now,
+            expires_at: None,
+            hit_count: 0,
+            last_used_at: None,
+            weight: None,
+            task_type_affinity: None,
+            tags: vec![],
+            valid_from: now,
+            valid_until: None,
+            is_always_injected: true,
+            project_name: None,
+        }
+    }
+
+    #[test]
+    fn test_procedural_block_under_budget() {
+        let rules = vec![fake_rule("short one"), fake_rule("another short")];
+        let v = build_procedural_block(rules);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 2);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["limit"], PROCEDURAL_RULE_LIMIT);
+        assert_eq!(v["char_budget"], PROCEDURAL_CHAR_BUDGET);
+    }
+
+    #[test]
+    fn test_procedural_block_truncates_over_budget() {
+        let big = "x".repeat(PROCEDURAL_CHAR_BUDGET - 10);
+        let tail = "y".repeat(500);
+        let rules = vec![fake_rule(&big), fake_rule(&tail), fake_rule("never")];
+        let v = build_procedural_block(rules);
+        let included = v["rules"].as_array().unwrap();
+        assert!(included.len() <= 2, "third rule must be dropped");
+        assert_eq!(v["truncated"], true);
+        assert!(v["total_chars"].as_u64().unwrap() >= (PROCEDURAL_CHAR_BUDGET - 10) as u64);
+    }
+
+    #[test]
+    fn test_procedural_block_single_oversize_included() {
+        let big = "x".repeat(PROCEDURAL_CHAR_BUDGET + 500);
+        let v = build_procedural_block(vec![fake_rule(&big)]);
+        assert_eq!(
+            v["rules"].as_array().unwrap().len(),
+            1,
+            "a single oversize rule still surfaces (fail-open on first item)"
+        );
+        assert_eq!(v["truncated"], false);
     }
 
     #[test]

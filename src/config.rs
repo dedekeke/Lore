@@ -49,6 +49,7 @@ pub struct Config {
     pub capture_git_ref: bool,
     pub codebase_behavior_version: i32,
     pub proactive_context: bool,
+    pub procedural_memory: bool,
     pub scrub_secrets: bool,
 }
 
@@ -129,6 +130,10 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
                 == "true",
+            procedural_memory: env::var("LORE_PROCEDURAL_MEMORY")
+                .unwrap_or_else(|_| "false".into())
+                .to_lowercase()
+                == "true",
             scrub_secrets: env::var("LORE_SCRUB_SECRETS")
                 .unwrap_or_else(|_| "true".into())
                 .to_lowercase()
@@ -190,6 +195,7 @@ mod tests {
             "CAPTURE_GIT_REF",
             "CODEBASE_BEHAVIOR_VERSION",
             "LORE_PROACTIVE_CONTEXT",
+            "LORE_PROCEDURAL_MEMORY",
             "LORE_SCRUB_SECRETS",
         ] {
             std::env::remove_var(key);
@@ -210,6 +216,20 @@ mod tests {
         assert!(cfg.disabled_tools.is_empty());
         assert!(!cfg.capture_git_ref);
         assert!(cfg.scrub_secrets);
+        assert!(!cfg.procedural_memory);
+    }
+
+    #[test]
+    fn test_procedural_memory_env_toggle() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        std::env::set_var("LORE_PROCEDURAL_MEMORY", "true");
+        assert!(Config::from_env().procedural_memory);
+        std::env::set_var("LORE_PROCEDURAL_MEMORY", "TRUE");
+        assert!(Config::from_env().procedural_memory);
+        std::env::set_var("LORE_PROCEDURAL_MEMORY", "on");
+        assert!(!Config::from_env().procedural_memory);
+        clear_env();
     }
 
     #[test]

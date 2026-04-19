@@ -1,0 +1,202 @@
+{
+  "version": 1,
+  "metadata": {
+    "embedding_provider": "FakeEmbeddingProvider::hashed(384)",
+    "k": "10"
+  },
+  "datasets": {
+    "mini": {
+      "k": 10,
+      "num_cases": 12,
+      "num_recalls": 12,
+      "num_scored": 11,
+      "num_negative": 1,
+      "negative_pass_rate": 0.0,
+      "mean_precision_at_k": 0.36363636363636365,
+      "mean_recall_at_k": 0.5454545454545454,
+      "mean_mrr": 0.45454545454545453,
+      "per_case": [
+        {
+          "case_id": "mini-001-recall-coding-style",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.5,
+              "recall_at_k": 1.0,
+              "mrr": 1.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.5,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 1.0
+        },
+        {
+          "case_id": "mini-002-attempt-ledger",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.0,
+              "recall_at_k": 0.0,
+              "mrr": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.0,
+          "mean_recall_at_k": 0.0,
+          "mean_mrr": 0.0
+        },
+        {
+          "case_id": "mini-003-lesson-consolidation",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 1.0,
+              "recall_at_k": 1.0,
+              "mrr": 1.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 1.0,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 1.0
+        },
+        {
+          "case_id": "mini-004-cross-task-link",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.0,
+              "recall_at_k": 0.0,
+              "mrr": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.0,
+          "mean_recall_at_k": 0.0,
+          "mean_mrr": 0.0
+        },
+        {
+          "case_id": "mini-005-contradiction-detection",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.5,
+              "recall_at_k": 1.0,
+              "mrr": 1.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.5,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 1.0
+        },
+        {
+          "case_id": "mini-006-temporal-validity",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.5,
+              "recall_at_k": 1.0,
+              "mrr": 0.5,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.5,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 0.5
+        },
+        {
+          "case_id": "mini-007-failure-search",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.0,
+              "recall_at_k": 0.0,
+              "mrr": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.0,
+          "mean_recall_at_k": 0.0,
+          "mean_mrr": 0.0
+        },
+        {
+          "case_id": "mini-008-multi-hit-recall",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 1.0,
+              "recall_at_k": 1.0,
+              "mrr": 1.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 1.0,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 1.0
+        },
+        {
+          "case_id": "mini-009-task-completion",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.0,
+              "recall_at_k": 0.0,
+              "mrr": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.0,
+          "mean_recall_at_k": 0.0,
+          "mean_mrr": 0.0
+        },
+        {
+          "case_id": "mini-010-irrelevant-noise",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.5,
+              "recall_at_k": 1.0,
+              "mrr": 0.5,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.5,
+          "mean_recall_at_k": 1.0,
+          "mean_mrr": 0.5
+        },
+        {
+          "case_id": "mini-011-zero-hit-precision",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": null,
+              "recall_at_k": null,
+              "mrr": null,
+              "negative_pass": false
+            }
+          ],
+          "mean_precision_at_k": null,
+          "mean_recall_at_k": null,
+          "mean_mrr": null
+        },
+        {
+          "case_id": "mini-012-incomplete-workflow",
+          "per_recall": [
+            {
+              "k": 10,
+              "precision_at_k": 0.0,
+              "recall_at_k": 0.0,
+              "mrr": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_precision_at_k": 0.0,
+          "mean_recall_at_k": 0.0,
+          "mean_mrr": 0.0
+        }
+      ]
+    }
+  }
+}

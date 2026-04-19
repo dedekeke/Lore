@@ -130,5 +130,31 @@ async fn mini_fixture_replays_without_error() {
     });
     let report = compare(&baseline, &current, DEFAULT_TOLERANCE);
     eprint!("{report}");
+
+    // CI delta bot (P1-T5): when `EVAL_EXPORT_JSON=<dir>` is set, dump the
+    // current metrics + compare report as JSON for the workflow to pick up.
+    // No-op locally; kept out of the hot path on developer machines.
+    if let Some(dir) = std::env::var_os("EVAL_EXPORT_JSON") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("create EVAL_EXPORT_JSON dir");
+        let current_path = dir.join("current.json");
+        let report_path = dir.join("report.json");
+        std::fs::write(
+            &current_path,
+            serde_json::to_vec_pretty(&current).expect("serialize current metrics"),
+        )
+        .expect("write current.json");
+        std::fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&report).expect("serialize compare report"),
+        )
+        .expect("write report.json");
+        eprintln!(
+            "wrote {} and {}",
+            current_path.display(),
+            report_path.display()
+        );
+    }
+
     assert!(!report.has_regression(), "baseline regression:\n{report}");
 }

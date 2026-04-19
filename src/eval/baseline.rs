@@ -95,7 +95,7 @@ pub fn save_baseline(path: &Path, baseline: &Baseline) -> Result<(), BaselineErr
 }
 
 /// Per-metric diff. Positive `delta` = current improved over baseline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MetricDelta {
     /// Metric name, e.g. `"mean_precision_at_k"`. Static so diff output
     /// can cite it directly in CI logs without allocation.
@@ -110,7 +110,7 @@ pub struct MetricDelta {
 }
 
 /// Report for a single dataset in the baseline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DatasetReport {
     /// Dataset name matching a key in `Baseline::datasets`.
     pub name: String,
@@ -131,8 +131,8 @@ impl DatasetReport {
 
 /// Top-level diff of current-run metrics vs stored baseline. Suitable for
 /// direct consumption by the P1-T5 CI delta bot — `Display` produces a
-/// human-readable summary; the structured fields support machine output.
-#[derive(Debug, Clone, PartialEq)]
+/// human-readable summary; `Serialize` produces structured JSON for bots.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompareReport {
     pub tolerance: f64,
     pub datasets: Vec<DatasetReport>,

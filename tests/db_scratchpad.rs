@@ -122,6 +122,36 @@ async fn test_list_newest_first_and_limit() {
 }
 
 #[tokio::test]
+async fn test_expired_then_upsert_without_ttl_resets_expiry() {
+    let (pool, _container) = common::setup_db().await;
+    let pid = make_project(&pool, "scratch-p7", "/tmp/scratch-p7").await;
+
+    scratchpad::write_scratch(&pool, pid, None, "revive", "stale", Some(1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE ai_memory.scratchpad SET expires_at = NOW() - INTERVAL '1 second' WHERE project_id = $1 AND key = 'revive'")
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(scratchpad::read_scratch(&pool, pid, None, "revive")
+        .await
+        .unwrap()
+        .is_none());
+
+    let refreshed = scratchpad::write_scratch(&pool, pid, None, "revive", "fresh", None)
+        .await
+        .unwrap();
+    assert!(refreshed.expires_at.is_none(), "TTL=None must clear expiry");
+
+    let got = scratchpad::read_scratch(&pool, pid, None, "revive")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.value, "fresh");
+}
+
+#[tokio::test]
 async fn test_delete_scratch() {
     let (pool, _container) = common::setup_db().await;
     let pid = make_project(&pool, "scratch-p6", "/tmp/scratch-p6").await;

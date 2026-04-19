@@ -1240,4 +1240,61 @@ async fn test_scratchpad_invalid_ttl_rejected() {
         }))
         .await;
     assert!(err.is_err(), "ttl_secs=0 must be rejected");
+
+    let neg = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "k".into(),
+            value: "v".into(),
+            task_id: None,
+            ttl_secs: Some(-1),
+        }))
+        .await;
+    assert!(neg.is_err(), "negative ttl_secs must be rejected");
+
+    let huge = server
+        .write_scratch(Parameters(WriteScratchParams {
+            key: "k".into(),
+            value: "v".into(),
+            task_id: None,
+            ttl_secs: Some(i64::MAX),
+        }))
+        .await;
+    assert!(huge.is_err(), "overflow-class ttl_secs must be rejected");
+}
+
+#[tokio::test]
+async fn test_scratchpad_blank_key_rejected() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("scratch-blank", "/tmp/scratch-blank"))
+        .await
+        .unwrap();
+
+    for k in ["", "   ", "\t\n"] {
+        let err = server
+            .write_scratch(Parameters(WriteScratchParams {
+                key: k.into(),
+                value: "v".into(),
+                task_id: None,
+                ttl_secs: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on write");
+
+        let err = server
+            .read_scratch(Parameters(ReadScratchParams {
+                key: k.into(),
+                task_id: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on read");
+
+        let err = server
+            .delete_scratch(Parameters(DeleteScratchParams {
+                key: k.into(),
+                task_id: None,
+            }))
+            .await;
+        assert!(err.is_err(), "blank key '{k:?}' must be rejected on delete");
+    }
 }

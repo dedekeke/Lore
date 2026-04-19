@@ -85,7 +85,7 @@ pub async fn list_scratch(
          WHERE project_id = $1 \
            AND task_id IS NOT DISTINCT FROM $2 \
            AND (expires_at IS NULL OR expires_at > NOW()) \
-         ORDER BY updated_at DESC \
+         ORDER BY updated_at DESC, id DESC \
          LIMIT $3"
     );
     sqlx::query_as(&sql)

@@ -366,6 +366,16 @@ impl LoreServer {
         Ok(())
     }
 
+    fn validate_nonblank(field: &str, val: &str) -> Result<(), rmcp::ErrorData> {
+        if val.trim().is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("{field} must not be blank"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn db_err(e: sqlx::Error) -> rmcp::ErrorData {
         rmcp::ErrorData::internal_error(format!("Database error: {e}"), None)
     }
@@ -1428,13 +1438,17 @@ impl LoreServer {
             ttl_secs,
         }): Parameters<WriteScratchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
         Self::validate_len("key", &key, 256)?;
         let value = self.maybe_scrub(value);
         Self::validate_len("value", &value, 4096)?;
+        // Upper bound chosen to avoid chrono::Duration::seconds overflow and
+        // keep expires_at within reasonable calendar range (~10 years).
+        const MAX_TTL_SECS: i64 = 315_360_000;
         if let Some(t) = ttl_secs {
-            if t <= 0 {
+            if !(1..=MAX_TTL_SECS).contains(&t) {
                 return Err(rmcp::ErrorData::invalid_params(
-                    "ttl_secs must be > 0",
+                    format!("ttl_secs must be in range [1, {MAX_TTL_SECS}]"),
                     None,
                 ));
             }
@@ -1458,6 +1472,7 @@ impl LoreServer {
         &self,
         Parameters(ReadScratchParams { key, task_id }): Parameters<ReadScratchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
         Self::validate_len("key", &key, 256)?;
         let project_id = self.project_id().await?;
         let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
@@ -1494,6 +1509,7 @@ impl LoreServer {
         &self,
         Parameters(DeleteScratchParams { key, task_id }): Parameters<DeleteScratchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
         Self::validate_len("key", &key, 256)?;
         let project_id = self.project_id().await?;
         let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;

@@ -2,28 +2,34 @@
 
 Deterministic replay harness that measures retrieval precision, recall, and task-completion accuracy against canned case files. Every PR that touches retrieval (`src/embeddings/**`, `src/db/semantic.rs`, `src/tools/search.rs`) should report a delta vs `baselines.json`.
 
-This directory lands across four tasks — this PR (P1-T1) ships the scaffold only.
+This directory lands across five tasks (P1-T1..P1-T5). P1-T1 and P1-T2 are merged; metrics, baselines, and CI wiring follow.
 
 ## Status
 
 | Task | Ships |
 |------|-------|
-| P1-T1 | Types, loader trait, `fixtures/mini.json` (10 synthetic cases), unit test |
-| P1-T2 | `src/eval/harness.rs` replay runner + `tests/eval_replay.rs` |
+| P1-T1 ✅ | Types, loader trait, `fixtures/mini.json` (12 synthetic cases), unit test |
+| P1-T2 ✅ | `src/eval/harness.rs` replay runner + `tests/eval_replay.rs` |
 | P1-T3 | `src/eval/metrics.rs` (precision@k, recall@k, MRR, task accuracy) |
 | P1-T4 | `eval/baselines.json` captured from develop HEAD |
 | P1-T5 | Nightly GitHub Actions workflow + PR delta bot |
 | Follow-up | Real dataset loaders: LoCoMo, LongMemEval, BEAM |
 
-## Run locally (once P1-T2 lands)
+## Run locally
 
 ```bash
 cargo test --features eval --test eval_replay -- --nocapture
 ```
 
+Requires Docker (testcontainers spins up a fresh pgvector/pg17 per run).
+
+## Embedding provider in the harness
+
+P1-T2 uses `FakeEmbeddingProvider::hashed(384)` — deterministic sha256-seeded vectors that are distinct per text. The older `FakeEmbeddingProvider::new(384)` returns a constant vector, which collapses every rule under the 0.95 cosine dedup threshold; do not use it for multi-rule replays. When real datasets (P1-T5) run on CI, swap to `LocalEmbeddingProvider` and pin ORT thread count to 1 for determinism.
+
 ## Fixtures
 
-- `fixtures/mini.json` — 10 hand-crafted synthetic cases committed in-tree. Used for CI smoke tests and to let P1-T2 iterate without pulling real datasets. < 5 KB.
+- `fixtures/mini.json` — 12 hand-crafted synthetic cases committed in-tree. Used for CI smoke tests. < 10 KB.
 - Real datasets (LoCoMo, LongMemEval, BEAM) are downloaded at first run into `~/.cache/lore/eval/` and sha256-verified via the `fetch_cached` helper. They are **never** committed.
 
 ## Dataset licensing (planned loaders)
@@ -40,15 +46,17 @@ Each loader must declare `sha256` and `license` on `DatasetSource` before being 
 
 See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) plus an `ExpectedOutcome` (expected recall hits, optional task completion). The replay runner (P1-T2) stands up a fresh `LoreServer`, executes the events against the real MCP surface, and grades the recall output against `expected.recall_hit_ids`.
 
-### ID resolution (for P1-T2)
+### ID resolution (implemented in P1-T2)
 
-`expected_hits` and `recall_hit_ids` are **human-readable labels**, not real DB IDs. Inserted rules/attempts get UUIDs at runtime that the fixture author cannot predict. The replay runner resolves labels like this:
+`expected_hits` and `recall_hit_ids` are **case-local labels**, not real DB IDs. Inserted rules/tasks/attempts get UUIDs at runtime. The replay runner builds a per-case `label → UUID` map as events fire:
 
-1. As each `remember_rule` / `propose_attempt` / `start_task` event fires, record the returned real ID plus the label the fixture author would naturally assign (e.g. first rule in `mini-001` → `rule-go-tabs`). Labels are derived by a deterministic slug of the event's content/approach prefix, scoped to the case.
-2. When a `recall_rules` event resolves, map each returned UUID back to its label via that per-case table.
-3. Grade by label-set equality (or top-K rank) against `expected_hits`.
+- `StartTask { task_ref }` → `task-{task_ref}` → task UUID
+- `ProposeAttempt { task_ref }` → `attempt-{task_ref}-a{N}` (N = 1-based index of attempts for that task) → attempt UUID
+- `RememberRule { label }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection)
 
-An empty `expected_hits` / `recall_hit_ids` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip.
+P1-T3 grades by mapping the UUIDs returned by `recall_rules` back to labels via this map and comparing to `expected_hits`.
+
+An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip. Cases whose `expected_hits` reference `task-*` or `attempt-*` labels (e.g. `mini-002`, `mini-004`, `mini-007`, `mini-009`, `mini-012`) will score zero against the current `recall_rules` implementation because that tool searches `semantic_rules` only; a dedicated `FindSimilarFailures` event type is a planned follow-up.
 
 ## Baseline update policy
 

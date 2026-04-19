@@ -27,6 +27,10 @@ pub enum EvalEvent {
     RememberRule {
         content: String,
         category: String,
+        /// Case-local label (e.g. "rule-go-tabs"). Referenced by a later
+        /// `RecallRules.expected_hits` entry. Required so the harness can
+        /// resolve expected labels to real rule UUIDs after insertion.
+        label: String,
     },
     RecallRules {
         query: String,

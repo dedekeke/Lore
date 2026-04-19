@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = ["local-embeddings"]
 local-embeddings = ["dep:ort", "dep:tokenizers", "dep:ndarray"]
+eval = []
 
 [dependencies]
 rmcp = { version = "0.1", features = ["server", "transport-io", "transport-sse-server", "macros"] }

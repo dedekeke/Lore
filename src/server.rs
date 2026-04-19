@@ -181,9 +181,10 @@ impl LoreServer {
             "fact" => Ok(db::RuleCategory::Fact),
             "constraint" => Ok(db::RuleCategory::Constraint),
             "lesson" => Ok(db::RuleCategory::Lesson),
+            "instruction" => Ok(db::RuleCategory::Instruction),
             other => Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson"
+                    "Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson, instruction"
                 ),
                 None,
             )),
@@ -516,7 +517,9 @@ impl LoreServer {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RememberRuleParams {
-    #[schemars(description = "Rule category: preference, fact, constraint, or lesson")]
+    #[schemars(
+        description = "Rule category: preference, fact, constraint, lesson, or instruction"
+    )]
     pub category: String,
     #[schemars(description = "The rule content to remember")]
     pub content: String,
@@ -530,7 +533,9 @@ pub struct RecallRulesParams {
     pub query: String,
     #[schemars(description = "Max results (default 10)")]
     pub limit: Option<i64>,
-    #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
+    #[schemars(
+        description = "Filter by category: preference, fact, constraint, lesson, or instruction"
+    )]
     pub category: Option<String>,
     #[schemars(
         description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
@@ -566,7 +571,9 @@ pub struct ForgetRuleParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListRulesParams {
-    #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
+    #[schemars(
+        description = "Filter by category: preference, fact, constraint, lesson, or instruction"
+    )]
     pub category: Option<String>,
     #[schemars(
         description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
@@ -584,7 +591,7 @@ pub struct GetDuplicateRulesParams {
 pub struct UpdateRuleParams {
     #[schemars(description = "UUID of the rule to update")]
     pub rule_id: String,
-    #[schemars(description = "New category: preference, fact, constraint, or lesson")]
+    #[schemars(description = "New category: preference, fact, constraint, lesson, or instruction")]
     pub category: Option<String>,
     #[schemars(description = "New content for the rule")]
     pub content: Option<String>,
@@ -3337,6 +3344,8 @@ mod tests {
         assert!(LoreServer::parse_rule_category("Fact").is_ok());
         assert!(LoreServer::parse_rule_category("CONSTRAINT").is_ok());
         assert!(LoreServer::parse_rule_category("lesson").is_ok());
+        assert!(LoreServer::parse_rule_category("instruction").is_ok());
+        assert!(LoreServer::parse_rule_category("Instruction").is_ok());
     }
 
     #[test]

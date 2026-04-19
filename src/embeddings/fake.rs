@@ -73,7 +73,9 @@ mod tests {
 
     #[tokio::test]
     async fn hashed_is_distinct_per_text() {
-        let p = FakeEmbeddingProvider::hashed(16);
+        // Use production dim (384) so the dedup-threshold guarantee is
+        // validated at the same shape the eval harness actually runs with.
+        let p = FakeEmbeddingProvider::hashed(384);
         let a = p.embed("foo").await.unwrap();
         let b = p.embed("bar").await.unwrap();
         assert_ne!(a, b);

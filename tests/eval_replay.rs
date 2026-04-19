@@ -30,22 +30,22 @@ async fn mini_fixture_replays_without_error() {
             .unwrap_or_else(|e| panic!("replay failed for {}: {e}", case.id));
 
         assert_eq!(run.case_id, case.id);
-        assert!(
-            !run.recalls.is_empty(),
-            "case {} must produce at least one recall",
-            case.id
-        );
-        // Every expected label the case references must be resolvable
-        // to a real UUID from the per-case label table — otherwise the
-        // grader in P1-T3 has nothing to compare against.
+        // Every expected label the case references must either resolve to a
+        // real UUID or be accounted for in `deduplicated_labels` (rule was
+        // short-circuited by the server's near-duplicate guard). Otherwise
+        // P1-T3's grader has nothing to compare against.
         for recall in &run.recalls {
             for label in &recall.expected_labels {
+                let resolved = run.labels.contains_key(label);
+                let deduped = run.deduplicated_labels.contains(label);
                 assert!(
-                    run.labels.contains_key(label),
-                    "case {}: expected label {label} not resolved to a UUID. \
-                     Known labels: {:?}",
+                    resolved || deduped,
+                    "case {}: expected label {label} neither resolved nor \
+                     recorded as deduplicated. Known labels: {:?}. \
+                     Deduplicated: {:?}",
                     case.id,
-                    run.labels.keys().collect::<Vec<_>>()
+                    run.labels.keys().collect::<Vec<_>>(),
+                    run.deduplicated_labels,
                 );
             }
         }

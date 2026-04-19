@@ -19,6 +19,10 @@ pub enum EvalEvent {
         task_ref: String,
         approach: String,
     },
+    /// `attempt_ref` MUST equal `"{task_ref}-a{N}"` where N is the 1-based
+    /// index of the referenced `ProposeAttempt` within the case (first
+    /// attempt for `t1` is `t1-a1`, second is `t1-a2`). The harness errors
+    /// with `ReplayError::UnknownAttemptRef` if the ref does not resolve.
     LogOutcome {
         attempt_ref: String,
         outcome: OutcomeKind,

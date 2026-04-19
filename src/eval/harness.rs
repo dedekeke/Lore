@@ -54,6 +54,11 @@ pub struct CaseRun {
     /// -> real UUID assigned by the server at insertion time.
     pub labels: HashMap<String, String>,
     pub recalls: Vec<RecallRun>,
+    /// RememberRule labels whose rule was short-circuited by the server's
+    /// near-duplicate guard (cosine >= 0.95). The rule was not stored, so
+    /// the label cannot be resolved to a UUID. Surfaced here so P1-T3 can
+    /// score them as misses without the test asserting a panic.
+    pub deduplicated_labels: Vec<String>,
 }
 
 /// Replay a single case against `server`. The case gets its own project
@@ -72,6 +77,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
     let mut attempt_uuids: HashMap<String, String> = HashMap::new();
     let mut attempt_counter: HashMap<String, usize> = HashMap::new();
     let mut recalls: Vec<RecallRun> = Vec::new();
+    let mut deduplicated_labels: Vec<String> = Vec::new();
 
     for event in &case.events {
         match event {
@@ -133,11 +139,18 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                 let res = server
                     .remember_rule(category.clone(), content.clone(), None)
                     .await?;
-                // `rule_id` is absent when the server short-circuited on a
-                // duplicate_warning. Skip labelling in that case — the rule
-                // was not stored and cannot be recalled.
+                // `rule_id` absent when server short-circuits on duplicate_warning
+                // (cosine >= 0.95). Surface via `deduplicated_labels` so P1-T3
+                // can score as miss without the harness asserting a panic.
                 if let Ok(rule_id) = json_field(&res, "rule_id") {
                     labels.insert(label.clone(), rule_id);
+                } else {
+                    tracing::warn!(
+                        case_id = %case.id,
+                        label = %label,
+                        "remember_rule short-circuited on dedup guard; label unresolved"
+                    );
+                    deduplicated_labels.push(label.clone());
                 }
             }
             EvalEvent::RecallRules {
@@ -161,6 +174,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
         case_id: case.id.clone(),
         labels,
         recalls,
+        deduplicated_labels,
     })
 }
 
@@ -186,6 +200,8 @@ fn json_field(res: &CallToolResult, field: &'static str) -> Result<String, Repla
 }
 
 /// `recall_rules(compact=true)` returns a JSON array of `{id, score, ...}`.
+/// Format defined by the compact branch in `src/server.rs` (recall_rules
+/// handler ~L437-456). If that schema changes, update this parser in lockstep.
 fn parse_compact_ids(res: &CallToolResult) -> Result<Vec<String>, ReplayError> {
     let text = tool_text(res)?;
     let v: serde_json::Value = serde_json::from_str(text)?;

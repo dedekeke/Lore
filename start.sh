@@ -21,10 +21,15 @@ mkdir -p "$RUN_DIR"
 
 [[ -f .env ]] && { set -a; source .env; set +a; }
 
-# Daemon always runs SSE — it's pointless otherwise. Override anything .env set.
-# Users who want stdio should invoke the binary directly.
+# Daemon always runs SSE — it's pointless otherwise. Warn before overriding .env.
+if [[ "${MCP_TRANSPORT:-}" == "stdio" ]]; then
+    printf '[lore] WARN: .env sets MCP_TRANSPORT=stdio; start.sh forces sse. Run the binary directly for stdio.\n' >&2
+fi
 export MCP_TRANSPORT=sse
-export MCP_SSE_PORT="${LORE_SSE_PORT:-3101}"
+# LORE_SSE_PORT (shell) > MCP_SSE_PORT (.env) > 3101 (default)
+export MCP_SSE_PORT="${LORE_SSE_PORT:-${MCP_SSE_PORT:-3101}}"
+: "${MCP_SSE_BIND:=127.0.0.1}"
+export MCP_SSE_BIND
 : "${DATABASE_URL:=postgres://lore:password@localhost:${DB_PORT}/ai_memory}"
 export DATABASE_URL
 
@@ -102,15 +107,26 @@ cmd_start() {
     ensure_postgres
     build_if_needed
     preflight
-    log "Starting Lore daemon on http://localhost:${MCP_SSE_PORT}/sse"
+    log "Starting Lore daemon on http://${MCP_SSE_BIND}:${MCP_SSE_PORT}/sse"
     nohup "$BIN_PATH" >>"$LOG_FILE" 2>&1 &
-    echo $! >"$PID_FILE"
-    sleep 2
-    if ! is_running; then
-        rm -f "$PID_FILE"
-        die "Lore failed to start — tail $LOG_FILE for details"
+    local child=$!
+    # Don't write PID until the child is actually listening on the port;
+    # otherwise a fast crash leaves a stale PID that kill -0 false-positives on.
+    local ready=0
+    for _ in $(seq 1 15); do
+        if ! kill -0 "$child" 2>/dev/null; then break; fi
+        if command -v lsof >/dev/null 2>&1 \
+           && lsof -iTCP:"$MCP_SSE_PORT" -sTCP:LISTEN -p "$child" -n -P >/dev/null 2>&1; then
+            ready=1; break
+        fi
+        sleep 0.5
+    done
+    if [[ "$ready" -ne 1 ]]; then
+        kill "$child" 2>/dev/null || true
+        die "Lore failed to become ready — tail $LOG_FILE for details"
     fi
-    log "Started (pid $(cat "$PID_FILE")). MCP client config: {\"mcpServers\":{\"lore\":{\"url\":\"http://localhost:${MCP_SSE_PORT}/sse\"}}}"
+    echo "$child" >"$PID_FILE"
+    log "Started (pid $child). MCP client config: {\"mcpServers\":{\"lore\":{\"url\":\"http://localhost:${MCP_SSE_PORT}/sse\"}}}"
 }
 
 cmd_stop() {
@@ -145,7 +161,8 @@ cmd_logs() { tail -f "$LOG_FILE"; }
 cmd_foreground() {
     ensure_postgres
     build_if_needed
-    log "Running in foreground on http://localhost:${MCP_SSE_PORT}/sse"
+    preflight
+    log "Running in foreground on http://${MCP_SSE_BIND}:${MCP_SSE_PORT}/sse"
     exec "$BIN_PATH"
 }
 
@@ -155,7 +172,7 @@ ACTION="${1:-start}"
 case "$ACTION" in
     start)      cmd_start ;;
     stop)       cmd_stop ;;
-    restart)    cmd_stop; cmd_start ;;
+    restart)    cmd_stop; sleep 1; cmd_start ;;
     status)     cmd_status ;;
     logs)       cmd_logs ;;
     foreground|fg) cmd_foreground ;;

@@ -56,6 +56,8 @@ Then point any MCP client at it (same config works in every project — no per-p
 
 That's it. `./start.sh` also supports `stop`, `restart`, `status`, `logs`, `foreground`. PID and logs live in `./run/`.
 
+**Scope:** this is a local, single-user daemon. It binds `127.0.0.1:3101` by default (no auth). To expose it on the network, set `MCP_SSE_BIND=0.0.0.0` in `.env` — understand the tool surface is unauthenticated before you do.
+
 Requires Rust 1.75+, Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
 
 ### Stdio mode (legacy)
@@ -175,6 +177,7 @@ All via environment variables (see `.env.example`):
 | `EMBEDDING_DIMENSIONS`               | `384`                                               | Must match model and DB schema                                 |
 | `MCP_TRANSPORT`                      | `stdio`                                             | `stdio` or `sse`                                               |
 | `MCP_SSE_PORT`                       | `3101`                                              | SSE port                                                       |
+| `MCP_SSE_BIND`                       | `127.0.0.1`                                         | SSE bind address (set `0.0.0.0` to expose on the network)      |
 | `LOG_LEVEL`                          | `warn`                                              | Tracing filter (adds `ort=warn` automatically)                 |
 | `RETENTION_ATTEMPTS_DAYS`            | `30`                                                | Auto-delete attempts older than N days                         |
 | `RETENTION_SNAPSHOTS_DAYS`           | `7`                                                 | Auto-delete context snapshots older than N days                |

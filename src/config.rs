@@ -28,6 +28,7 @@ pub struct Config {
 
     pub mcp_transport: McpTransport,
     pub mcp_sse_port: u16,
+    pub mcp_sse_bind: String,
     pub log_level: String,
 
     pub retention_attempts_days: u32,
@@ -81,6 +82,7 @@ impl Config {
 
             mcp_transport,
             mcp_sse_port: parse_warn_or("MCP_SSE_PORT", 3101),
+            mcp_sse_bind: env::var("MCP_SSE_BIND").unwrap_or_else(|_| "127.0.0.1".into()),
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into()),
 
             retention_attempts_days: parse_warn_or("RETENTION_ATTEMPTS_DAYS", 30),
@@ -169,6 +171,7 @@ mod tests {
             "EMBEDDING_DIMENSIONS",
             "MCP_TRANSPORT",
             "MCP_SSE_PORT",
+            "MCP_SSE_BIND",
             "LOG_LEVEL",
             "RETENTION_ATTEMPTS_DAYS",
             "RETENTION_SNAPSHOTS_DAYS",

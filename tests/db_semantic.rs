@@ -651,3 +651,143 @@ async fn test_list_always_injected_excludes_expired() {
         0
     );
 }
+
+#[tokio::test]
+async fn test_create_rule_with_flag_persists_is_always_injected() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    let id = semantic::create_rule_with_flag(
+        &pool,
+        pid,
+        RuleCategory::Constraint,
+        "no mocks in integration tests",
+        None,
+        &[],
+        true,
+    )
+    .await
+    .unwrap();
+    let fetched = semantic::get_rule(&pool, id).await.unwrap().unwrap();
+    assert!(fetched.is_always_injected);
+}
+
+#[tokio::test]
+async fn test_count_always_injected_rules_scope_and_temporal_filters() {
+    let (pool, _c) = common::setup_db().await;
+    let pa = projects::create_project(&pool, "pa", "/a").await.unwrap();
+    let pb = projects::create_project(&pool, "pb", "/b").await.unwrap();
+
+    // 3 flagged in pa (one expired, one future-dated, one live).
+    let live = semantic::create_rule_with_flag(
+        &pool,
+        pa,
+        RuleCategory::Instruction,
+        "live",
+        None,
+        &[],
+        true,
+    )
+    .await
+    .unwrap();
+    let expired = semantic::create_rule_with_flag(
+        &pool,
+        pa,
+        RuleCategory::Instruction,
+        "expired",
+        None,
+        &[],
+        true,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(expired)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let future = semantic::create_rule_with_flag(
+        &pool,
+        pa,
+        RuleCategory::Instruction,
+        "future",
+        None,
+        &[],
+        true,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE ai_memory.semantic_rules SET valid_from = NOW() + INTERVAL '1 day' WHERE id = $1",
+    )
+    .bind(future)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Unflagged in pa (must not count).
+    semantic::create_rule_with_flag(&pool, pa, RuleCategory::Fact, "plain", None, &[], false)
+        .await
+        .unwrap();
+    // Flagged in pb (different project — must not count for pa).
+    semantic::create_rule_with_flag(
+        &pool,
+        pb,
+        RuleCategory::Instruction,
+        "other",
+        None,
+        &[],
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        semantic::count_always_injected_rules(&pool, pa)
+            .await
+            .unwrap(),
+        1,
+        "only the one live flagged rule in pa counts"
+    );
+    // sanity: the live rule should still be retrievable
+    let fetched = semantic::get_rule(&pool, live).await.unwrap().unwrap();
+    assert!(fetched.is_always_injected);
+}
+
+#[tokio::test]
+async fn test_update_rule_toggles_is_always_injected() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+    let id = semantic::create_rule(&pool, pid, RuleCategory::Fact, "plain", None, &[])
+        .await
+        .unwrap();
+    assert!(
+        !semantic::get_rule(&pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_always_injected
+    );
+
+    // Turn the flag on; leave every other field untouched.
+    let updated = semantic::update_rule(&pool, id, None, None, None, None, Some(true))
+        .await
+        .unwrap();
+    assert!(updated);
+    assert!(
+        semantic::get_rule(&pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_always_injected
+    );
+
+    // None preserves the existing value (no regression when flag is absent).
+    semantic::update_rule(&pool, id, None, Some("renamed"), None, None, None)
+        .await
+        .unwrap();
+    let after = semantic::get_rule(&pool, id).await.unwrap().unwrap();
+    assert!(after.is_always_injected, "None must not clear the flag");
+    assert_eq!(after.content, "renamed");
+}

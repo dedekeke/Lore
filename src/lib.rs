@@ -1,10 +1,16 @@
 pub mod batch_embed;
 pub mod cache;
+pub mod community;
 pub mod config;
 pub mod dashboard;
 pub mod db;
+pub mod elicit;
 pub mod embeddings;
+#[cfg(feature = "eval")]
+pub mod eval;
 pub mod indexer;
+pub mod scrubber;
 pub mod server;
 pub mod tools;
+pub mod tree_sitter_chunker;
 pub mod webhooks;

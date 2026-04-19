@@ -24,12 +24,12 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
     let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
     loop {
         interval.tick().await;
-        tracing::info!("Running retention cleanup");
+        tracing::debug!("Running retention cleanup");
 
         match escalate_stale_pending(&pool, config.retention_pending_escalation_hours).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Escalated stale pending attempts to unknown")
+                    tracing::debug!(rows = n, "Escalated stale pending attempts to unknown")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to escalate stale pending attempts"),
@@ -37,7 +37,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_unknown_attempts(&pool, config.retention_unknown_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned unknown attempts")
+                    tracing::debug!(rows = n, "Pruned unknown attempts")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune unknown attempts"),
@@ -45,7 +45,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_old_attempts(&pool, config.retention_attempts_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned old attempts")
+                    tracing::debug!(rows = n, "Pruned old attempts")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune old attempts"),
@@ -53,7 +53,7 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match prune_old_snapshots(&pool, config.retention_snapshots_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Pruned old snapshots")
+                    tracing::debug!(rows = n, "Pruned old snapshots")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to prune old snapshots"),
@@ -61,17 +61,25 @@ pub async fn run_retention_loop(pool: PgPool, config: Config) {
         match purge_completed_tasks(&pool, config.retention_tasks_archive_days).await {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(rows = n, "Purged completed tasks")
+                    tracing::debug!(rows = n, "Purged completed tasks")
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Failed to purge completed tasks"),
+        }
+        match prune_expired_scratchpad(&pool).await {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::debug!(rows = n, "Pruned expired scratchpad entries")
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to prune expired scratchpad entries"),
         }
         match consolidate_old_attempts(&pool, config.decay_after_days, config.decay_min_accepted)
             .await
         {
             Ok(n) => {
                 if n > 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         lessons = n,
                         "Consolidated old accepted attempts into lessons"
                     )
@@ -236,6 +244,18 @@ pub async fn consolidate_old_attempts(
         created += 1;
     }
     Ok(created)
+}
+
+/// Physically delete scratchpad rows whose `expires_at` has passed. Reads
+/// already filter these out; this reclaims storage.
+pub async fn prune_expired_scratchpad(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM ai_memory.scratchpad \
+         WHERE expires_at IS NOT NULL AND expires_at <= NOW()",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 // TODO: implement proper archival (move to archive table) — deferred to post-MVP

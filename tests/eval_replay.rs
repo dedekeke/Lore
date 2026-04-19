@@ -1,0 +1,160 @@
+#![cfg(feature = "eval")]
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use lore::config::Config;
+use lore::embeddings::fake::FakeEmbeddingProvider;
+use lore::embeddings::AnyEmbeddingProvider;
+use lore::eval::{
+    aggregate, compare, load_baseline, load_mini, replay_case, save_baseline, Baseline,
+    DatasetMetrics, DEFAULT_TOLERANCE,
+};
+use lore::server::LoreServer;
+
+const BASELINE_DATASET: &str = "mini";
+
+fn baseline_path() -> PathBuf {
+    // CARGO_MANIFEST_DIR points at the crate root; the baseline lives in
+    // `eval/baselines.json` next to the fixtures.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("eval")
+        .join("baselines.json")
+}
+
+/// End-to-end smoke: every case in the mini fixture replays against a real
+/// `LoreServer` + pgvector, every `expected_hit` label is accounted for
+/// (resolved or deduplicated), and the aggregate metrics compute cleanly
+/// over all cases.
+#[tokio::test]
+async fn mini_fixture_replays_without_error() {
+    let (pool, _container) = common::setup_db().await;
+    let config = Config::from_env();
+    let embeddings = AnyEmbeddingProvider::Fake(FakeEmbeddingProvider::hashed(384));
+    let server = LoreServer::new(pool, embeddings, config);
+
+    let cases = load_mini().expect("mini fixture loads");
+    assert!(!cases.is_empty(), "mini fixture must be non-empty");
+
+    let mut runs = Vec::with_capacity(cases.len());
+
+    for case in &cases {
+        let run = replay_case(&server, case)
+            .await
+            .unwrap_or_else(|e| panic!("replay failed for {}: {e}", case.id));
+
+        assert_eq!(run.case_id, case.id);
+        // Every expected label the case references must either resolve to a
+        // real UUID or be accounted for in `deduplicated_labels` (rule was
+        // short-circuited by the server's near-duplicate guard). Otherwise
+        // P1-T3's grader has nothing to compare against.
+        for recall in &run.recalls {
+            for label in &recall.expected_labels {
+                let resolved = run.labels.contains_key(label);
+                let deduped = run.deduplicated_labels.contains(label);
+                assert!(
+                    resolved || deduped,
+                    "case {}: expected label {label} neither resolved nor \
+                     recorded as deduplicated. Known labels: {:?}. \
+                     Deduplicated: {:?}",
+                    case.id,
+                    run.labels.keys().collect::<Vec<_>>(),
+                    run.deduplicated_labels,
+                );
+            }
+        }
+
+        runs.push(run);
+    }
+
+    // Aggregate metrics over the full mini set. Shape is checked here;
+    // numeric values are compared against `eval/baselines.json` further down.
+    let metrics = aggregate(&runs, 10);
+    assert_eq!(metrics.num_cases, runs.len());
+    let total_recalls: usize = runs.iter().map(|r| r.recalls.len()).sum();
+    assert_eq!(metrics.num_recalls, total_recalls);
+    for field in [
+        metrics.mean_precision_at_k,
+        metrics.mean_recall_at_k,
+        metrics.mean_mrr,
+    ] {
+        assert!(field.is_finite(), "aggregate metric NaN/inf");
+        assert!((0.0..=1.0).contains(&field), "metric out of range: {field}");
+    }
+    assert!(
+        (0.0..=1.0).contains(&metrics.negative_pass_rate),
+        "negative_pass_rate out of range: {}",
+        metrics.negative_pass_rate,
+    );
+    assert_eq!(
+        metrics.num_scored + metrics.num_negative,
+        metrics.num_recalls,
+        "scored + negative must partition all recalls"
+    );
+    eprintln!(
+        "mini aggregate @k=10: precision={:.3} recall={:.3} mrr={:.3} \
+         neg_pass={:.3} (cases={}, scored={}, negative={})",
+        metrics.mean_precision_at_k,
+        metrics.mean_recall_at_k,
+        metrics.mean_mrr,
+        metrics.negative_pass_rate,
+        metrics.num_cases,
+        metrics.num_scored,
+        metrics.num_negative,
+    );
+
+    // Baseline gate. Regenerate with `EVAL_UPDATE_BASELINE=1 cargo test
+    // --features eval --test eval_replay`. Rationale for why the baseline
+    // changed MUST appear in the PR description — see eval/README.md.
+    let mut current: BTreeMap<String, DatasetMetrics> = BTreeMap::new();
+    current.insert(BASELINE_DATASET.to_string(), metrics);
+
+    let path = baseline_path();
+    if std::env::var_os("EVAL_UPDATE_BASELINE").is_some() {
+        let baseline = Baseline::new(current.clone())
+            .with_metadata("embedding_provider", "FakeEmbeddingProvider::hashed(384)")
+            .with_metadata("k", "10");
+        save_baseline(&path, &baseline).expect("write baselines.json");
+        eprintln!("wrote {}", path.display());
+        return;
+    }
+
+    let baseline = load_baseline(&path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load baseline from {}: {e}. \
+             Run with EVAL_UPDATE_BASELINE=1 to create/refresh it.",
+            path.display()
+        )
+    });
+    let report = compare(&baseline, &current, DEFAULT_TOLERANCE);
+    eprint!("{report}");
+
+    // CI delta bot (P1-T5): when `EVAL_EXPORT_JSON=<dir>` is set, dump the
+    // current metrics + compare report as JSON for the workflow to pick up.
+    // No-op locally; kept out of the hot path on developer machines.
+    if let Some(dir) = std::env::var_os("EVAL_EXPORT_JSON") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("create EVAL_EXPORT_JSON dir");
+        let current_path = dir.join("current.json");
+        let report_path = dir.join("report.json");
+        std::fs::write(
+            &current_path,
+            serde_json::to_vec_pretty(&current).expect("serialize current metrics"),
+        )
+        .expect("write current.json");
+        std::fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&report).expect("serialize compare report"),
+        )
+        .expect("write report.json");
+        eprintln!(
+            "wrote {} and {}",
+            current_path.display(),
+            report_path.display()
+        );
+    }
+
+    assert!(!report.has_regression(), "baseline regression:\n{report}");
+}

@@ -1,7 +1,7 @@
 mod common;
 
 use lore::db::semantic::RuleCategory;
-use lore::db::{attempts, projects, retention, semantic, tasks, AttemptOutcome};
+use lore::db::{attempts, projects, retention, scratchpad, semantic, tasks, AttemptOutcome};
 
 #[tokio::test]
 async fn test_prune_old_attempts() {
@@ -190,4 +190,38 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .await
         .unwrap();
     assert!(lessons.is_empty());
+}
+
+#[tokio::test]
+async fn test_prune_expired_scratchpad() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "ret-scratch", "/tmp/ret-scratch")
+        .await
+        .unwrap();
+
+    scratchpad::write_scratch(&pool, pid, None, "stale", "v", Some(1))
+        .await
+        .unwrap();
+    scratchpad::write_scratch(&pool, pid, None, "fresh", "v", Some(3600))
+        .await
+        .unwrap();
+    scratchpad::write_scratch(&pool, pid, None, "forever", "v", None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE ai_memory.scratchpad SET expires_at = NOW() - INTERVAL '1 minute' WHERE project_id = $1 AND key = 'stale'",
+    )
+    .bind(pid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let pruned = retention::prune_expired_scratchpad(&pool).await.unwrap();
+    assert_eq!(pruned, 1);
+
+    let remaining = scratchpad::list_scratch(&pool, pid, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().all(|e| e.key != "stale"));
 }

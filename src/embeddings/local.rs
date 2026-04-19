@@ -205,10 +205,10 @@ fn model_cache_dir(model_name: &str) -> PathBuf {
 
 fn download_file(url: &str, dest: &PathBuf) -> Result<(), EmbeddingError> {
     let response = reqwest::blocking::get(url)
-        .map_err(|e| EmbeddingError::Api(format!("Download failed for {url}: {e}")))?;
+        .map_err(|e| EmbeddingError::Model(format!("Download failed for {url}: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(EmbeddingError::Api(format!(
+        return Err(EmbeddingError::Model(format!(
             "Download failed for {url}: HTTP {}",
             response.status()
         )));
@@ -216,7 +216,7 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<(), EmbeddingError> {
 
     let bytes = response
         .bytes()
-        .map_err(|e| EmbeddingError::Api(format!("Failed to read response body: {e}")))?;
+        .map_err(|e| EmbeddingError::Model(format!("Failed to read response body: {e}")))?;
 
     // Atomic write by creating a temporary file first
     let tmp_dest = dest.with_extension("tmp");

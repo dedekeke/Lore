@@ -1,7 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use rmcp::{model::*, service::RequestContext, tool, RoleServer, ServerHandler};
+use rmcp::{
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    service::RequestContext,
+    tool, tool_router, Peer, RoleServer, ServerHandler,
+};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -9,8 +14,56 @@ use uuid::Uuid;
 use crate::cache::LoreCache;
 use crate::config::Config;
 use crate::db;
+use crate::elicit::{self, ConfirmOutcome};
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
 use crate::webhooks;
+
+struct PromptArg {
+    name: &'static str,
+    description: &'static str,
+    required: bool,
+}
+
+struct PromptDef {
+    name: &'static str,
+    description: &'static str,
+    arguments: &'static [PromptArg],
+    render: fn(&serde_json::Map<String, serde_json::Value>) -> String,
+}
+
+impl PromptDef {
+    fn to_prompt(&self) -> Prompt {
+        let args: Vec<PromptArgument> = self
+            .arguments
+            .iter()
+            .map(|a| PromptArgument {
+                name: a.name.to_string(),
+                title: None,
+                description: Some(a.description.to_string()),
+                required: Some(a.required),
+            })
+            .collect();
+        Prompt::new::<&str, String>(
+            self.name,
+            Some(self.description.to_string()),
+            if args.is_empty() { None } else { Some(args) },
+        )
+    }
+
+    fn render(&self, args: &serde_json::Map<String, serde_json::Value>) -> String {
+        (self.render)(args)
+    }
+}
+
+fn arg_str(args: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    args.get(key)
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| Some(v.to_string()))
+        })
+        .unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub struct LoreServer {
@@ -25,6 +78,85 @@ pub struct LoreServerInner {
     pub cache: LoreCache,
     pub tool_call_count: AtomicU64,
     pub http_client: reqwest::Client,
+    pub tool_router: ToolRouter<LoreServer>,
+}
+
+/// Hard cap on procedural rules surfaced by `get_active_context`. Prevents
+/// always-inject bloat if a project accumulates many standing instructions.
+const PROCEDURAL_RULE_LIMIT: i64 = 20;
+
+/// Soft threshold (90% of the hard cap) for surfacing a near-cap warning
+/// in `remember_rule` / `update_rule` responses. Agents learn about the
+/// cap before they hit it — gives them a chance to retire a stale rule.
+const PROCEDURAL_NEAR_CAP_THRESHOLD: i64 = 18;
+
+/// Combined content-byte budget across procedural rules in one response.
+/// Rules past the budget are dropped and `truncated: true` is set. Budget is
+/// measured in UTF-8 bytes (via `str::len`), not chars — multi-byte content
+/// counts more. The response field is named `total_bytes` to match.
+const PROCEDURAL_CHAR_BUDGET: usize = 2000;
+
+/// Builds the `procedural` JSON block for `get_active_context`.
+///
+/// Contract:
+/// - Called only when `cfg.procedural_memory` is on. If the caller sees NO
+///   `procedural` key on the response, either the flag is off or the DB
+///   fetch failed (we log+skip rather than failing the whole tool call).
+/// - If the flag is on and the project has zero active always-inject rules,
+///   an empty `{rules: [], truncated: false, ...}` block IS emitted so
+///   consumers can distinguish "feature on, nothing to show" from "feature
+///   off / upstream error".
+/// - `truncated: true` means the response does not faithfully represent
+///   every active always-inject rule for the project — either a rule was
+///   dropped past the byte budget, or a single included rule exceeded it.
+fn build_procedural_block(rules: Vec<db::semantic::SemanticRule>) -> serde_json::Value {
+    let total_candidates = rules.len();
+    let mut included: Vec<&db::semantic::SemanticRule> = Vec::new();
+    let mut used = 0usize;
+    for r in &rules {
+        let next = used.saturating_add(r.content.len());
+        // Fail-open on the FIRST rule: even if it alone exceeds the byte
+        // budget, surface it so a critical standing instruction is never
+        // silently dropped. Subsequent rules that overshoot are dropped.
+        if next > PROCEDURAL_CHAR_BUDGET && !included.is_empty() {
+            break;
+        }
+        included.push(r);
+        used = next;
+        // Stop scanning immediately once the budget is met — no further
+        // rules are evaluated.
+        if used >= PROCEDURAL_CHAR_BUDGET {
+            break;
+        }
+    }
+    let over_budget = used > PROCEDURAL_CHAR_BUDGET;
+    if over_budget {
+        tracing::warn!(
+            total_bytes = used,
+            budget = PROCEDURAL_CHAR_BUDGET,
+            included = included.len(),
+            "procedural block exceeds byte budget — a single always-inject rule is oversize"
+        );
+    }
+    let truncated = included.len() < total_candidates || over_budget;
+    let projected: Vec<serde_json::Value> = included
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id.to_string(),
+                "category": r.category,
+                "content": r.content,
+                "tags": r.tags,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "rules": projected,
+        "total_bytes": used,
+        "truncated": truncated,
+        "limit": PROCEDURAL_RULE_LIMIT,
+        "byte_budget": PROCEDURAL_CHAR_BUDGET,
+    })
 }
 
 impl LoreServer {
@@ -43,6 +175,7 @@ impl LoreServer {
                 cache: LoreCache::new(1000, 500),
                 tool_call_count: AtomicU64::new(0),
                 http_client,
+                tool_router: Self::tool_router(),
             }),
         }
     }
@@ -59,14 +192,14 @@ impl LoreServer {
         &self.inner.config
     }
 
-    pub async fn project_id(&self) -> Result<Uuid, rmcp::Error> {
+    pub async fn project_id(&self) -> Result<Uuid, rmcp::ErrorData> {
         if let Some(id) = *self.inner.current_project_id.read().await {
             return Ok(id);
         }
         // Auto-detect from cwd
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
-            .map_err(|e| rmcp::Error::internal_error(format!("Cannot read cwd: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("Cannot read cwd: {e}"), None))?;
         let (id, _name) = db::projects::get_or_create_project_by_path(self.pool(), &cwd)
             .await
             .map_err(Self::db_err)?;
@@ -78,16 +211,15 @@ impl LoreServer {
         *self.inner.current_project_id.write().await = Some(id);
     }
 
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::Error> {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, rmcp::ErrorData> {
         let key = text.to_string();
         if let Some(cached) = self.inner.cache.embeddings.get(&key).await {
             return Ok((*cached).clone());
         }
-        let result = self
-            .embeddings()
-            .embed(text)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(format!("Embedding error: {e}"), None))?;
+        let result =
+            self.embeddings().embed(text).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Embedding error: {e}"), None)
+            })?;
         self.inner
             .cache
             .embeddings
@@ -121,28 +253,83 @@ impl LoreServer {
         }
     }
 
-    fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::Error> {
+    /// Emit a response-side warning after an always-inject write.
+    ///
+    /// `count` is read **after** the write (TOCTOU: two concurrent writes can
+    /// both see the same post-value and under-report the true count — this is
+    /// accepted because the warning is advisory, not enforcement).
+    ///
+    /// Levels:
+    /// - `near_cap`: `count >= NEAR_CAP_THRESHOLD` and `count < PROCEDURAL_RULE_LIMIT`
+    /// - `at_cap`: `count == PROCEDURAL_RULE_LIMIT` (project is exactly at the cap)
+    /// - `over_cap`: `count > PROCEDURAL_RULE_LIMIT` — `list_always_injected_rules`
+    ///   is `ORDER BY created_at ASC LIMIT N`, so the **newest** rules get
+    ///   shadowed in `get_active_context` until older ones are retired.
+    ///
+    /// DB errors fall through silently — the write already succeeded.
+    async fn always_inject_cap_warning(
+        pool: &sqlx::PgPool,
+        project_id: uuid::Uuid,
+    ) -> Option<serde_json::Value> {
+        match db::semantic::count_always_injected_rules(pool, project_id).await {
+            Ok(count) if count >= PROCEDURAL_NEAR_CAP_THRESHOLD => {
+                let level = match count.cmp(&PROCEDURAL_RULE_LIMIT) {
+                    std::cmp::Ordering::Less => "near_cap",
+                    std::cmp::Ordering::Equal => "at_cap",
+                    std::cmp::Ordering::Greater => "over_cap",
+                };
+                Some(serde_json::json!({
+                    "level": level,
+                    "count": count,
+                    "limit": PROCEDURAL_RULE_LIMIT,
+                }))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "always_inject cap probe failed — skipping warning");
+                None
+            }
+        }
+    }
+
+    fn cap_nudge(verb: &str, warning: Option<&serde_json::Value>) -> String {
+        match warning.and_then(|w| w.get("level").and_then(|l| l.as_str())) {
+            Some("over_cap") => format!(
+                "Rule {verb}. Over cap — `list_always_injected_rules` order is ASC, so this newer rule will be shadowed in get_active_context until an older rule is retired via forget_rule."
+            ),
+            Some("at_cap") => format!(
+                "Rule {verb}. At the always-inject cap — the next flagged write will push a rule out of get_active_context. Retire a stale rule via forget_rule."
+            ),
+            Some("near_cap") => format!(
+                "Rule {verb}. Approaching the always-inject cap — consider retiring a stale procedural rule."
+            ),
+            _ => format!("Rule {verb}. Continue with your current task."),
+        }
+    }
+
+    fn parse_rule_category(s: &str) -> Result<db::RuleCategory, rmcp::ErrorData> {
         match s.to_lowercase().as_str() {
             "preference" => Ok(db::RuleCategory::Preference),
             "fact" => Ok(db::RuleCategory::Fact),
             "constraint" => Ok(db::RuleCategory::Constraint),
             "lesson" => Ok(db::RuleCategory::Lesson),
-            other => Err(rmcp::Error::invalid_params(
+            "instruction" => Ok(db::RuleCategory::Instruction),
+            other => Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson"
+                    "Invalid rule category: '{other}'. Valid: preference, fact, constraint, lesson, instruction"
                 ),
                 None,
             )),
         }
     }
 
-    fn parse_task_status(s: &str) -> Result<db::TaskStatus, rmcp::Error> {
+    fn parse_task_status(s: &str) -> Result<db::TaskStatus, rmcp::ErrorData> {
         match s.to_lowercase().as_str() {
             "active" => Ok(db::TaskStatus::Active),
             "completed" => Ok(db::TaskStatus::Completed),
             "abandoned" => Ok(db::TaskStatus::Abandoned),
             "blocked" => Ok(db::TaskStatus::Blocked),
-            other => Err(rmcp::Error::invalid_params(
+            other => Err(rmcp::ErrorData::invalid_params(
                 format!(
                     "Invalid task status: '{other}'. Valid: active, completed, abandoned, blocked"
                 ),
@@ -151,27 +338,27 @@ impl LoreServer {
         }
     }
 
-    fn parse_attempt_outcome(s: &str) -> Result<db::AttemptOutcome, rmcp::Error> {
+    fn parse_attempt_outcome(s: &str) -> Result<db::AttemptOutcome, rmcp::ErrorData> {
         match s.to_lowercase().as_str() {
             "pending" => Ok(db::AttemptOutcome::Pending),
             "accepted" => Ok(db::AttemptOutcome::Accepted),
             "rejected" => Ok(db::AttemptOutcome::Rejected),
             "unknown" => Ok(db::AttemptOutcome::Unknown),
-            other => Err(rmcp::Error::invalid_params(
+            other => Err(rmcp::ErrorData::invalid_params(
                 format!("Invalid outcome: '{other}'. Valid: pending, accepted, rejected, unknown"),
                 None,
             )),
         }
     }
 
-    fn parse_uuid(s: &str) -> Result<Uuid, rmcp::Error> {
+    fn parse_uuid(s: &str) -> Result<Uuid, rmcp::ErrorData> {
         s.parse::<Uuid>()
-            .map_err(|e| rmcp::Error::invalid_params(format!("Invalid UUID '{s}': {e}"), None))
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid UUID '{s}': {e}"), None))
     }
 
-    fn validate_len(field: &str, val: &str, max: usize) -> Result<(), rmcp::Error> {
+    fn validate_len(field: &str, val: &str, max: usize) -> Result<(), rmcp::ErrorData> {
         if val.len() > max {
-            return Err(rmcp::Error::invalid_params(
+            return Err(rmcp::ErrorData::invalid_params(
                 format!("{field} exceeds max length ({} > {max} bytes)", val.len()),
                 None,
             ));
@@ -179,8 +366,26 @@ impl LoreServer {
         Ok(())
     }
 
-    fn db_err(e: sqlx::Error) -> rmcp::Error {
-        rmcp::Error::internal_error(format!("Database error: {e}"), None)
+    fn validate_nonblank(field: &str, val: &str) -> Result<(), rmcp::ErrorData> {
+        if val.trim().is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("{field} must not be blank"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    fn db_err(e: sqlx::Error) -> rmcp::ErrorData {
+        rmcp::ErrorData::internal_error(format!("Database error: {e}"), None)
+    }
+
+    fn maybe_scrub(&self, input: String) -> String {
+        if self.config().scrub_secrets {
+            crate::scrubber::scrub(&input)
+        } else {
+            input
+        }
     }
 
     async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
@@ -209,27 +414,229 @@ impl LoreServer {
         self.inner.tool_call_count.store(0, Ordering::Relaxed);
     }
 
-    fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::Error> {
-        let json = serde_json::to_string_pretty(val)
-            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
+    /// Urgency score: base_priority + rejection_penalty + staleness.
+    /// Returns (score, human-readable explanation).
+    fn score_task(
+        summary: &db::tasks::TaskSummary,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (f64, String) {
+        let base = match summary.priority.as_deref() {
+            Some("P1") => 4.0,
+            Some("P2") => 3.0,
+            Some("P3") => 2.0,
+            Some("P4") => 1.0,
+            _ => 1.0,
+        };
+        let rejection_penalty = summary.rejected_attempts as f64 * 0.3;
+        let staleness_days = (now - summary.created_at).num_hours() as f64 / 24.0;
+        let staleness_score = staleness_days * 0.1;
+        // blocked_dependents deferred until task_links table exists
+        let total = base + rejection_penalty + staleness_score;
+
+        let mut parts = Vec::new();
+        if let Some(p) = &summary.priority {
+            parts.push(format!("{p}={base:.1}"));
+        }
+        if summary.rejected_attempts > 0 {
+            parts.push(format!("rejections={rejection_penalty:.1}"));
+        }
+        if staleness_days >= 1.0 {
+            parts.push(format!("stale={staleness_score:.1}"));
+        }
+        let explanation = if parts.is_empty() {
+            "base".to_string()
+        } else {
+            parts.join("+")
+        };
+        (total, explanation)
+    }
+
+    fn json_content<T: serde::Serialize>(val: &T) -> Result<CallToolResult, rmcp::ErrorData> {
+        let json = serde_json::to_string_pretty(val).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Serialization error: {e}"), None)
+        })?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Map a [`ConfirmOutcome`] into either a short-circuit tool result (user
+    /// declined/cancelled/refused) or `Ok(None)` to proceed. Propagates
+    /// protocol-level errors.
+    ///
+    /// `allow_not_supported` controls fallback on clients that do not
+    /// advertise elicitation capability:
+    /// - `true`  → proceed silently (safe for opt-in, non-destructive prompts).
+    /// - `false` → short-circuit with a structured response so destructive
+    ///   callers don't silently run on non-elicit clients. The caller can
+    ///   retry with `force: true` to confirm intent.
+    fn handle_confirm(
+        outcome: ConfirmOutcome,
+        context: &str,
+        allow_not_supported: bool,
+    ) -> Result<Option<CallToolResult>, rmcp::ErrorData> {
+        match outcome {
+            ConfirmOutcome::Confirmed { .. } => Ok(None),
+            ConfirmOutcome::NotSupported if allow_not_supported => Ok(None),
+            ConfirmOutcome::NotSupported => Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "cancelled": true,
+                    "outcome": "not_supported",
+                }),
+                "Client does not support MCP elicitation. Re-invoke with force=true to proceed without user confirmation.",
+            )
+            .map(Some),
+            ConfirmOutcome::Refused { reason } => {
+                let body = serde_json::json!({
+                    "cancelled": true,
+                    "outcome": "refused",
+                    "reason": reason,
+                });
+                Self::json_content_with_nudge(&body, "User refused. No state was changed.")
+                    .map(Some)
+            }
+            ConfirmOutcome::Declined => Self::json_content_with_nudge(
+                &serde_json::json!({ "cancelled": true, "outcome": "declined" }),
+                "User declined. No state was changed.",
+            )
+            .map(Some),
+            ConfirmOutcome::Cancelled => Self::json_content_with_nudge(
+                &serde_json::json!({ "cancelled": true, "outcome": "cancelled" }),
+                "User dismissed the prompt. No state was changed.",
+            )
+            .map(Some),
+            ConfirmOutcome::Error(e) => Err(rmcp::ErrorData::internal_error(
+                format!("{context} elicitation failed: {e}"),
+                None,
+            )),
+        }
     }
 
     fn json_content_with_nudge<T: serde::Serialize>(
         val: &T,
         next_step: &str,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let mut obj = serde_json::to_value(val)
-            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut obj = serde_json::to_value(val).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Serialization error: {e}"), None)
+        })?;
         if let Some(map) = obj.as_object_mut() {
             map.insert(
                 "_next_step".into(),
                 serde_json::Value::String(next_step.into()),
             );
         }
-        let json = serde_json::to_string_pretty(&obj)
-            .map_err(|e| rmcp::Error::internal_error(format!("Serialization error: {e}"), None))?;
+        let json = serde_json::to_string_pretty(&obj).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Serialization error: {e}"), None)
+        })?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    fn prompt_catalog() -> Vec<PromptDef> {
+        vec![
+            PromptDef {
+                name: "plan_task",
+                description:
+                    "Decompose a goal into a parent task plus subtasks following the Lore protocol.",
+                arguments: &[PromptArg {
+                    name: "goal",
+                    description: "What the user wants to accomplish.",
+                    required: true,
+                }],
+                render: |args| {
+                    let goal = arg_str(args, "goal");
+                    format!(
+                        "New goal: {goal}\n\n\
+                         Follow Lore protocol:\n\
+                         1. Call start_task(description=\"{goal}\") first.\n\
+                         2. If this involves 3+ distinct steps, decompose into subtasks via start_task(..., parent_task_id=<id>).\n\
+                         3. For each subtask, call propose_attempt BEFORE writing code.\n\
+                         4. Set priority (P1-P4) and task_type (Bug/Feature/Security/Refactor) where appropriate."
+                    )
+                },
+            },
+            PromptDef {
+                name: "resume_work",
+                description: "Cold-start briefing: pick the top pending task and continue.",
+                arguments: &[],
+                render: |_args| {
+                    "Resuming session. Steps:\n\
+                     1. Call get_next_steps() for the scored action list.\n\
+                     2. Select the top-scored active task.\n\
+                     3. Call review_ledger(task_id) if it has rejected attempts.\n\
+                     4. Call propose_attempt(task_id, approach) before writing code."
+                        .to_string()
+                },
+            },
+            PromptDef {
+                name: "review_ledger",
+                description: "Inspect prior attempts for a task before proposing a new approach.",
+                arguments: &[PromptArg {
+                    name: "task_id",
+                    description: "UUID of the task to review.",
+                    required: true,
+                }],
+                render: |args| {
+                    let task_id = arg_str(args, "task_id");
+                    format!(
+                        "Call review_ledger(task_id=\"{task_id}\") and analyse:\n\
+                         - Rejected attempts: why did each fail? Identify the pattern.\n\
+                         - Pending attempts: is any awaiting user confirmation?\n\
+                         - Do NOT repeat an approach that was already rejected.\n\
+                         Then call propose_attempt with a genuinely different strategy."
+                    )
+                },
+            },
+            PromptDef {
+                name: "diagnose_failure",
+                description: "Log a failed attempt and propose a corrective fix.",
+                arguments: &[
+                    PromptArg {
+                        name: "task_id",
+                        description: "UUID of the task.",
+                        required: true,
+                    },
+                    PromptArg {
+                        name: "error",
+                        description: "Error message or failure description.",
+                        required: true,
+                    },
+                ],
+                render: |args| {
+                    let task_id = arg_str(args, "task_id");
+                    let error = arg_str(args, "error");
+                    format!(
+                        "Failure reported on task {task_id}.\n\
+                         Error: {error}\n\n\
+                         Protocol:\n\
+                         1. Call log_outcome(attempt_id=<last_pending>, outcome=\"rejected\", reasoning=\"{error}\", code_snippet=<failing code>).\n\
+                         2. Call review_ledger(task_id=\"{task_id}\") to cross-check prior failures.\n\
+                         3. Call propose_attempt with a fix that addresses the root cause, not the symptom."
+                    )
+                },
+            },
+            PromptDef {
+                name: "record_lesson",
+                description: "Store a reusable lesson learned from a completed task.",
+                arguments: &[
+                    PromptArg {
+                        name: "topic",
+                        description: "Short topic tag for the lesson.",
+                        required: true,
+                    },
+                    PromptArg {
+                        name: "insight",
+                        description: "What was learned and why it matters.",
+                        required: true,
+                    },
+                ],
+                render: |args| {
+                    let topic = arg_str(args, "topic");
+                    let insight = arg_str(args, "insight");
+                    format!(
+                        "Call remember_rule(category=\"lesson\", content=\"[{topic}] {insight}\"). \
+                         Make the content self-contained: future sessions will retrieve it without surrounding context, so include the trigger condition and the corrective action."
+                    )
+                },
+            },
+        ]
     }
 
     pub fn protocol_text() -> &'static str {
@@ -248,31 +655,456 @@ impl LoreServer {
     }
 }
 
+// -- Tool parameter structs (rmcp 0.10 Parameters wrapper) --
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RememberRuleParams {
+    #[schemars(
+        description = "Rule category (taxonomy only — descriptive label): preference, fact, constraint, lesson, or instruction"
+    )]
+    pub category: String,
+    #[schemars(description = "The rule content to remember")]
+    pub content: String,
+    #[schemars(description = "Optional tags for categorizing the rule")]
+    pub tags: Option<Vec<String>>,
+    #[schemars(
+        description = "Behavioral switch: when true, this rule is prepended to every get_active_context response. Defaults to true when category = 'instruction', false otherwise. Capped at 20 active always-inject rules per project. NOTE: Only applies to new rules. Pre-existing `instruction` rules stored before this API landed remain at false — flip them explicitly via update_rule."
+    )]
+    pub always_inject: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RecallRulesParams {
+    #[schemars(description = "Search query")]
+    pub query: String,
+    #[schemars(description = "Max results (default 10)")]
+    pub limit: Option<i64>,
+    #[schemars(
+        description = "Filter by category: preference, fact, constraint, lesson, or instruction"
+    )]
+    pub category: Option<String>,
+    #[schemars(
+        description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+    )]
+    pub tags: Option<Vec<String>>,
+    #[schemars(description = "Search across all projects (default false)")]
+    pub cross_project: Option<bool>,
+    #[schemars(
+        description = "If true, return compact previews (id, category, first 80 chars, score, tags, hit_count, last_used_at) instead of full content. Use get_rule(id) to fetch full details."
+    )]
+    pub compact: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRuleParams {
+    #[schemars(description = "UUID of the rule to fetch")]
+    pub rule_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetRuleParams {
+    #[schemars(description = "UUID of the rule to delete or supersede")]
+    pub rule_id: String,
+    #[schemars(
+        description = "If true, mark rule as superseded instead of deleting (default false)"
+    )]
+    pub supersede: Option<bool>,
+    #[schemars(
+        description = "If true, skip the interactive elicitation confirmation prompt and delete/supersede immediately (default false). Required on clients that do not support MCP elicitation — otherwise the tool returns a `not_supported` cancellation."
+    )]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRulesParams {
+    #[schemars(
+        description = "Filter by category: preference, fact, constraint, lesson, or instruction"
+    )]
+    pub category: Option<String>,
+    #[schemars(
+        description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
+    )]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetDuplicateRulesParams {
+    #[schemars(description = "Max pairs to return (default 20)")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateRuleParams {
+    #[schemars(description = "UUID of the rule to update")]
+    pub rule_id: String,
+    #[schemars(
+        description = "New category (taxonomy only): preference, fact, constraint, lesson, or instruction"
+    )]
+    pub category: Option<String>,
+    #[schemars(description = "New content for the rule")]
+    pub content: Option<String>,
+    #[schemars(description = "New tags for the rule (replaces existing tags)")]
+    pub tags: Option<Vec<String>>,
+    #[schemars(
+        description = "Flip the always-inject behavioral switch. Orthogonal to category. Capped at 20 active always-inject rules per project."
+    )]
+    pub always_inject: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WriteScratchParams {
+    #[schemars(description = "Scratchpad key (unique within project/task scope)")]
+    pub key: String,
+    #[schemars(description = "Value to store (max 4096 chars, scrubbed for secrets)")]
+    pub value: String,
+    #[schemars(
+        description = "Optional task UUID to scope the entry to a task. If omitted, entry is project-scoped."
+    )]
+    pub task_id: Option<String>,
+    #[schemars(
+        description = "Optional time-to-live in seconds. If set, expires_at = NOW() + ttl_secs. Expired entries are filtered from reads."
+    )]
+    pub ttl_secs: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadScratchParams {
+    #[schemars(description = "Scratchpad key")]
+    pub key: String,
+    #[schemars(description = "Optional task UUID. If omitted, reads the project-scoped entry.")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListScratchParams {
+    #[schemars(description = "Optional task UUID. If omitted, lists the project-scoped entries.")]
+    pub task_id: Option<String>,
+    #[schemars(description = "Max entries to return (default 50, max 500)")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteScratchParams {
+    #[schemars(description = "Scratchpad key")]
+    pub key: String,
+    #[schemars(description = "Optional task UUID. If omitted, deletes the project-scoped entry.")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StartTaskParams {
+    #[schemars(description = "Description of the task")]
+    pub description: String,
+    #[schemars(description = "UUID of parent task, if this is a subtask")]
+    pub parent_task_id: Option<String>,
+    #[schemars(description = "Priority level: P1, P2, P3, or P4")]
+    pub priority: Option<String>,
+    #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
+    pub task_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProposeAttemptParams {
+    #[schemars(description = "UUID of the task")]
+    pub task_id: String,
+    #[schemars(description = "Summary of the approach being attempted")]
+    pub approach_summary: String,
+    #[schemars(description = "Optional agent identifier for multi-agent workflows")]
+    pub agent_id: Option<String>,
+    #[schemars(
+        description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. This is an LLM-initiated review request — use it when you want an explicit human sign-off on your plan. Default false. Silently skipped when the client does not support elicitation."
+    )]
+    pub request_confirmation: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LogOutcomeParams {
+    #[schemars(description = "UUID of the attempt")]
+    pub attempt_id: String,
+    #[schemars(
+        description = "Outcome: pending (awaiting user confirmation), accepted (user confirmed), rejected (user reported failure), or unknown (stale/abandoned)"
+    )]
+    pub outcome: String,
+    #[schemars(description = "Reasoning for the outcome")]
+    pub reasoning: String,
+    #[schemars(description = "Optional git reference (commit hash, branch)")]
+    pub git_ref: Option<String>,
+    #[schemars(
+        description = "Optional code snippet — include the actual code that was written for this attempt"
+    )]
+    pub code_snippet: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReviewLedgerParams {
+    #[schemars(description = "UUID of the task")]
+    pub task_id: String,
+    #[schemars(description = "Filter by outcome: pending, accepted, rejected, or unknown")]
+    pub outcome_filter: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkTasksParams {
+    #[schemars(description = "UUID of the source task")]
+    pub source_task_id: String,
+    #[schemars(description = "UUID of the target task")]
+    pub target_task_id: String,
+    #[schemars(description = "Link type: blocks, related_to, caused_by, or duplicate_of")]
+    pub link_type: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddEdgeParams {
+    #[schemars(description = "Source entity name")]
+    pub source_entity: String,
+    #[schemars(description = "Target entity name")]
+    pub target_entity: String,
+    #[schemars(description = "Relationship type (e.g. depends_on, uses, related_to)")]
+    pub edge_type: String,
+    #[schemars(description = "Confidence score 0.0-1.0 (default 1.0)")]
+    pub confidence: Option<f64>,
+    #[schemars(description = "UUID of the task that produced this edge")]
+    pub source_task_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct QueryNeighborsParams {
+    #[schemars(description = "Entity name to find neighbors of")]
+    pub entity: String,
+    #[schemars(description = "Filter by edge type")]
+    pub edge_type: Option<String>,
+    #[schemars(description = "Traversal depth (default 1, max 5)")]
+    pub depth: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindPathParams {
+    #[schemars(description = "Starting entity name")]
+    pub from_entity: String,
+    #[schemars(description = "Target entity name")]
+    pub to_entity: String,
+    #[schemars(description = "Max traversal depth (default 5, max 10)")]
+    pub max_depth: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateTaskParams {
+    #[schemars(description = "UUID of the task to update")]
+    pub task_id: String,
+    #[schemars(description = "Priority level: P1, P2, P3, or P4. Empty string clears it.")]
+    pub priority: Option<String>,
+    #[schemars(description = "New task type (e.g. Bug, Feature). Empty string clears it.")]
+    pub task_type: Option<String>,
+    #[schemars(description = "New description text")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CompleteTaskParams {
+    #[schemars(description = "UUID of the task")]
+    pub task_id: String,
+    #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
+    pub lesson: Option<String>,
+    #[schemars(
+        description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
+    )]
+    pub resolved_attempt_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AbandonTaskParams {
+    #[schemars(description = "UUID of the task to abandon")]
+    pub task_id: String,
+    #[schemars(description = "Why this task is being abandoned")]
+    pub reason: String,
+    #[schemars(description = "If true, save the reason as a Lesson rule")]
+    pub save_lesson: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListTasksParams {
+    #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListSubtasksParams {
+    #[schemars(description = "UUID of the parent task")]
+    pub parent_task_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetTaskStatsParams {
+    #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindSimilarFailuresParams {
+    #[schemars(description = "Description of the error or failure")]
+    pub error_description: String,
+    #[schemars(description = "Max results (default 5)")]
+    pub limit: Option<i64>,
+    #[schemars(description = "Search across all projects (default false)")]
+    pub cross_project: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LogContextWipeParams {
+    #[schemars(description = "UUID of the active task")]
+    pub task_id: String,
+    #[schemars(description = "Approximate token count before the wipe")]
+    pub token_count: i32,
+    #[schemars(description = "UUID of the last attempt before the wipe")]
+    pub last_attempt_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SwitchProjectParams {
+    #[schemars(description = "Project name")]
+    pub name: Option<String>,
+    #[schemars(description = "Project root filesystem path")]
+    pub root_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExportMemoryParams {
+    #[schemars(description = "Export format: json or markdown")]
+    pub format: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetNextStepsParams {
+    #[schemars(description = "Context tier: L0 (minimal ~100 tokens), L1 (full, default)")]
+    pub tier: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GenerateHandoffParams {
+    #[schemars(description = "Approximate token count consumed in current session")]
+    pub token_count: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GenerateSessionSummaryParams {
+    #[schemars(description = "Max tasks to include (default 10, max 25)")]
+    pub max_tasks: Option<i64>,
+    #[schemars(description = "Max attempts per task to include (default 5, max 10)")]
+    pub max_attempts_per_task: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct IndexCodebaseParams {
+    #[schemars(description = "Root path of the project to index (defaults to project root_path)")]
+    pub root_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchCodebaseParams {
+    #[schemars(description = "Natural language query describing what code you're looking for")]
+    pub query: String,
+    #[schemars(description = "Max results to return (default 5)")]
+    pub limit: Option<i64>,
+    #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
+    pub file_pattern: Option<String>,
+    #[schemars(
+        description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)"
+    )]
+    pub diversity: Option<f32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRulesForFileParams {
+    #[schemars(description = "File path to look up (must match indexed code_chunks file_path)")]
+    pub file_path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListChunksNeedingSummaryParams {
+    #[schemars(description = "Max chunks to return per call (default 20, min 1, max 100)")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SubmitChunkSummariesParams {
+    #[schemars(description = "Chunk UUIDs from list_chunks_needing_summary. Max 100.")]
+    pub ids: Vec<String>,
+    #[schemars(description = "One-sentence summaries, aligned 1:1 with `ids`.")]
+    pub summaries: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindCallersParams {
+    #[schemars(description = "Function or method name to find callers of")]
+    pub entity: String,
+    #[schemars(description = "Edge type filter (default: 'calls')")]
+    pub edge_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindCalleesParams {
+    #[schemars(description = "Function or method name to find callees of")]
+    pub entity: String,
+    #[schemars(description = "Edge type filter (default: 'calls')")]
+    pub edge_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ShortestCodePathParams {
+    #[schemars(description = "Starting entity (function/method name)")]
+    pub from: String,
+    #[schemars(description = "Target entity (function/method name)")]
+    pub to: String,
+    #[schemars(description = "Max traversal depth (default 5, max 10)")]
+    pub max_depth: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetCommunityMembersParams {
+    #[schemars(description = "Community ID to inspect")]
+    pub community_id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DetectCrossCommunityChangesParams {
+    #[schemars(description = "File paths that were changed (relative to project root)")]
+    pub file_paths: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetFileContextParams {
+    #[schemars(description = "File path (must match indexed code_chunks file_path)")]
+    pub file_path: String,
+}
+
 // -- Memory tools --
-#[tool(tool_box)]
+#[tool_router]
 impl LoreServer {
     #[tool(description = "Store a long-term rule/preference/fact/lesson in memory")]
     pub async fn remember_rule(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Rule category: preference, fact, constraint, or lesson")]
-        category: String,
-        #[tool(param)]
-        #[schemars(description = "The rule content to remember")]
-        content: String,
-        #[tool(param)]
-        #[schemars(description = "Optional tags for categorizing the rule")]
-        tags: Option<Vec<String>>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(RememberRuleParams {
+            category,
+            content,
+            tags,
+            always_inject,
+        }): Parameters<RememberRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let content = self.maybe_scrub(content);
         Self::validate_len("content", &content, 4096)?;
         let project_id = self.project_id().await?;
         let cat = Self::parse_rule_category(&category)?;
         let embedding = self.embed(&content).await?;
 
         // Check for near-duplicates (cosine similarity >= 0.95)
-        let duplicates = db::semantic::find_duplicates(self.pool(), project_id, &embedding, 0.95)
-            .await
-            .map_err(Self::db_err)?;
+        let duplicates = db::semantic::find_duplicates(
+            self.pool(),
+            project_id,
+            &embedding,
+            db::semantic::SIMILARITY_DEDUP_THRESHOLD,
+        )
+        .await
+        .map_err(Self::db_err)?;
         if !duplicates.is_empty() {
             let dup_ids: Vec<String> = duplicates.iter().map(|r| r.id.to_string()).collect();
             let dup_preview: String = duplicates[0].content.chars().take(100).collect();
@@ -286,45 +1118,80 @@ impl LoreServer {
             );
         }
 
+        // Check for potential contradictions (CONTRADICTION_FLOOR..DEDUP_THRESHOLD band)
+        let contradictions =
+            db::semantic::find_potential_contradictions(self.pool(), project_id, &embedding)
+                .await
+                .map_err(Self::db_err)?;
+
         let tags_vec = tags.unwrap_or_default();
-        let id = db::semantic::create_rule(
+        // Default: flip always-inject on for the `instruction` category, off for
+        // anything else. Explicit `always_inject` on the call wins either way
+        // so callers can mark a constraint/fact as procedural without
+        // retagging its category.
+        let effective_inject =
+            always_inject.unwrap_or(matches!(cat, db::RuleCategory::Instruction));
+        let id = db::semantic::create_rule_with_flag(
             self.pool(),
             project_id,
             cat,
             &content,
             Some(&embedding),
             &tags_vec,
+            effective_inject,
         )
         .await
         .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
-        Self::json_content_with_nudge(
-            &serde_json::json!({ "rule_id": id.to_string() }),
-            "Rule stored. Continue with your current task.",
-        )
+
+        let cap_warning = if effective_inject {
+            Self::always_inject_cap_warning(self.pool(), project_id).await
+        } else {
+            None
+        };
+
+        let mut body = serde_json::json!({
+            "rule_id": id.to_string(),
+            "always_inject": effective_inject,
+        });
+        if let Some(w) = &cap_warning {
+            body["always_inject_cap_warning"] = w.clone();
+        }
+
+        if !contradictions.is_empty() {
+            let conflict_rules: Vec<serde_json::Value> = contradictions
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id.to_string(),
+                        "content": r.content.chars().take(150).collect::<String>(),
+                    })
+                })
+                .collect();
+            body["contradiction_warning"] = serde_json::Value::Bool(true);
+            body["potentially_conflicting_rules"] = serde_json::Value::Array(conflict_rules);
+            return Self::json_content_with_nudge(
+                &body,
+                "Rule stored, but potentially conflicting rules found. Review them — use forget_rule or update_rule to resolve contradictions.",
+            );
+        }
+
+        let nudge = Self::cap_nudge("stored", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
     }
 
     #[tool(description = "Recall rules from memory using semantic search")]
     pub async fn recall_rules(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Search query")]
-        query: String,
-        #[tool(param)]
-        #[schemars(description = "Max results (default 10)")]
-        limit: Option<i64>,
-        #[tool(param)]
-        #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
-        category: Option<String>,
-        #[tool(param)]
-        #[schemars(
-            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
-        )]
-        tags: Option<Vec<String>>,
-        #[tool(param)]
-        #[schemars(description = "Search across all projects (default false)")]
-        cross_project: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(RecallRulesParams {
+            query,
+            limit,
+            category,
+            tags,
+            cross_project,
+            compact,
+        }): Parameters<RecallRulesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         Self::validate_len("query", &query, 2048)?;
         let current_project_id = self.project_id().await?;
         let project_id = if cross_project.unwrap_or(false) {
@@ -337,7 +1204,7 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_rule_category)
             .transpose()?;
-        let rules = db::semantic::search_rules_hybrid(
+        let scored_rules = db::semantic::search_rules_hybrid(
             self.pool(),
             project_id,
             current_project_id,
@@ -350,39 +1217,113 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        Self::json_content_with_nudge(&rules, "Apply these rules to your current task.")
+
+        if compact.unwrap_or(false) {
+            let compact_results: Vec<serde_json::Value> = scored_rules
+                .iter()
+                .map(|sr| {
+                    let preview: String = sr.rule.content.chars().take(80).collect();
+                    serde_json::json!({
+                        "id": sr.rule.id.to_string(),
+                        "category": serde_json::to_value(&sr.rule.category).unwrap_or_default(),
+                        "preview": preview,
+                        "score": sr.score,
+                        "tags": sr.rule.tags,
+                        "hit_count": sr.rule.hit_count,
+                        "last_used_at": sr.rule.last_used_at,
+                    })
+                })
+                .collect();
+            return Self::json_content_with_nudge(
+                &compact_results,
+                "Use get_rule(id) to fetch full content for specific rules.",
+            );
+        }
+
+        Self::json_content_with_nudge(&scored_rules, "Apply these rules to your current task.")
     }
 
-    #[tool(description = "Delete a rule from memory")]
+    #[tool(
+        description = "Fetch a single rule by ID with full content. Also increments its hit count. Use after recall_rules(compact=true) to drill into specific rules."
+    )]
+    pub async fn get_rule(
+        &self,
+        Parameters(GetRuleParams { rule_id }): Parameters<GetRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let id = Self::parse_uuid(&rule_id)?;
+        let rule = db::semantic::get_rule(self.pool(), id)
+            .await
+            .map_err(Self::db_err)?
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(format!("Rule not found: {rule_id}"), None)
+            })?;
+        db::semantic::increment_hit_counts(self.pool(), &[id]);
+        Self::json_content_with_nudge(&rule, "Apply this rule to your current task.")
+    }
+
+    #[tool(
+        description = "Delete or supersede a rule. If supersede=true, marks rule as superseded (sets valid_until) instead of deleting — preserving history."
+    )]
     pub async fn forget_rule(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the rule to delete")]
-        rule_id: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<ForgetRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !params.force.unwrap_or(false) {
+            let msg = if params.supersede.unwrap_or(false) {
+                format!(
+                    "Confirm supersede of rule {}. The rule will be hidden from search but preserved in history.",
+                    params.rule_id
+                )
+            } else {
+                format!(
+                    "Confirm delete of rule {}. This cannot be undone.",
+                    params.rule_id
+                )
+            };
+            let ctx = format!("forget_rule({})", params.rule_id);
+            if let Some(early) =
+                Self::handle_confirm(elicit::confirm(&peer, msg).await, &ctx, false)?
+            {
+                return Ok(early);
+            }
+        }
+        self.forget_rule_impl(params).await
+    }
+
+    pub async fn forget_rule_impl(
+        &self,
+        ForgetRuleParams {
+            rule_id, supersede, ..
+        }: ForgetRuleParams,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let id = Self::parse_uuid(&rule_id)?;
-        let deleted = db::semantic::delete_rule(self.pool(), id)
-            .await
-            .map_err(Self::db_err)?;
-        self.inner.cache.invalidate_search();
-        Self::json_content_with_nudge(
-            &serde_json::json!({ "deleted": deleted }),
-            "Rule removed. Continue with your current task.",
-        )
+        if supersede.unwrap_or(false) {
+            let superseded = db::semantic::supersede_rule(self.pool(), id)
+                .await
+                .map_err(Self::db_err)?;
+            self.inner.cache.invalidate_search();
+            Self::json_content_with_nudge(
+                &serde_json::json!({ "superseded": superseded }),
+                "Rule superseded (valid_until set). It will no longer appear in searches.",
+            )
+        } else {
+            let deleted = db::semantic::delete_rule(self.pool(), id)
+                .await
+                .map_err(Self::db_err)?;
+            self.inner.cache.invalidate_search();
+            Self::json_content_with_nudge(
+                &serde_json::json!({ "deleted": deleted }),
+                "Rule removed. Continue with your current task.",
+            )
+        }
     }
 
     #[tool(description = "List all rules, optionally filtered by category")]
     pub async fn list_rules(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Filter by category: preference, fact, constraint, or lesson")]
-        category: Option<String>,
-        #[tool(param)]
-        #[schemars(
-            description = "Filter by tags (AND semantics — rules must have ALL specified tags)"
-        )]
-        tags: Option<Vec<String>>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(ListRulesParams { category, tags }): Parameters<ListRulesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let cat = category
             .as_deref()
@@ -394,28 +1335,48 @@ impl LoreServer {
         Self::json_content(&rules)
     }
 
+    #[tool(
+        description = "Find near-duplicate rules (cosine >= 0.88). Review the pairs and use forget_rule or update_rule to resolve."
+    )]
+    pub async fn get_duplicate_rules(
+        &self,
+        Parameters(GetDuplicateRulesParams { limit }): Parameters<GetDuplicateRulesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let pairs =
+            db::semantic::find_duplicate_clusters(self.pool(), project_id, limit.unwrap_or(20))
+                .await
+                .map_err(Self::db_err)?;
+        if pairs.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "duplicate_pairs": [] }),
+                "No near-duplicate rules found.",
+            );
+        }
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "duplicate_pairs": pairs }),
+            "Review these pairs. Use forget_rule(supersede=true) to retire duplicates, or update_rule to merge content.",
+        )
+    }
+
     #[tool(description = "Update an existing semantic rule's category and/or content")]
     pub async fn update_rule(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the rule to update")]
-        rule_id: String,
-        #[tool(param)]
-        #[schemars(description = "New category: preference, fact, constraint, or lesson")]
-        category: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "New content for the rule")]
-        content: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "New tags for the rule (replaces existing tags)")]
-        tags: Option<Vec<String>>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        if category.is_none() && content.is_none() && tags.is_none() {
-            return Err(rmcp::Error::invalid_params(
-                "Provide at least one of: category, content, tags",
+        Parameters(UpdateRuleParams {
+            rule_id,
+            category,
+            content,
+            tags,
+            always_inject,
+        }): Parameters<UpdateRuleParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if category.is_none() && content.is_none() && tags.is_none() && always_inject.is_none() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "Provide at least one of: category, content, tags, always_inject",
                 None,
             ));
         }
+        let content = content.map(|c| self.maybe_scrub(c));
         if let Some(ref c) = content {
             Self::validate_len("content", c, 4096)?;
         }
@@ -428,20 +1389,140 @@ impl LoreServer {
             Some(text) => Some(self.embed(text).await?),
             None => None,
         };
+        let project_id = self.project_id().await?;
         let updated = db::semantic::update_rule(
             self.pool(),
             id,
+            project_id,
             cat,
             content.as_deref(),
             embedding.as_deref(),
             tags.as_deref(),
+            always_inject,
         )
         .await
         .map_err(Self::db_err)?;
         self.inner.cache.invalidate_search();
+
+        // Only check the cap when the caller is turning the flag on; flipping
+        // it off or leaving it untouched can't push the project over the cap.
+        let cap_warning = if always_inject == Some(true) && updated {
+            Self::always_inject_cap_warning(self.pool(), project_id).await
+        } else {
+            None
+        };
+
+        let mut body = serde_json::json!({ "updated": updated });
+        if let Some(flag) = always_inject {
+            body["always_inject"] = serde_json::Value::Bool(flag);
+        }
+        if let Some(w) = &cap_warning {
+            body["always_inject_cap_warning"] = w.clone();
+        }
+
+        let nudge = Self::cap_nudge("updated", cap_warning.as_ref());
+        Self::json_content_with_nudge(&body, &nudge)
+    }
+
+    // -- Scratchpad tools --
+
+    #[tool(
+        description = "Write a short-term scratchpad entry (upsert by project/task/key). Optional TTL expires the entry."
+    )]
+    pub async fn write_scratch(
+        &self,
+        Parameters(WriteScratchParams {
+            key,
+            value,
+            task_id,
+            ttl_secs,
+        }): Parameters<WriteScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
+        Self::validate_len("key", &key, 256)?;
+        let value = self.maybe_scrub(value);
+        Self::validate_len("value", &value, 4096)?;
+        // Upper bound chosen to avoid chrono::Duration::seconds overflow and
+        // keep expires_at within reasonable calendar range (~10 years).
+        const MAX_TTL_SECS: i64 = 315_360_000;
+        if let Some(t) = ttl_secs {
+            if !(1..=MAX_TTL_SECS).contains(&t) {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!("ttl_secs must be in range [1, {MAX_TTL_SECS}]"),
+                    None,
+                ));
+            }
+        }
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entry =
+            db::scratchpad::write_scratch(self.pool(), project_id, task, &key, &value, ttl_secs)
+                .await
+                .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
-            &serde_json::json!({ "updated": updated }),
-            "Rule updated. Continue with your current task.",
+            &entry,
+            "Scratch entry written. Read it back with read_scratch(key, task_id).",
+        )
+    }
+
+    #[tool(
+        description = "Read a scratchpad entry by key within the current project/task scope. Expired entries are hidden."
+    )]
+    pub async fn read_scratch(
+        &self,
+        Parameters(ReadScratchParams { key, task_id }): Parameters<ReadScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
+        Self::validate_len("key", &key, 256)?;
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entry = db::scratchpad::read_scratch(self.pool(), project_id, task, &key)
+            .await
+            .map_err(Self::db_err)?;
+        match entry {
+            Some(e) => Self::json_content_with_nudge(&e, "Use this entry in your current task."),
+            None => Self::json_content_with_nudge(
+                &serde_json::json!({ "entry": null }),
+                "No entry found (or expired). Write one with write_scratch.",
+            ),
+        }
+    }
+
+    #[tool(
+        description = "List non-expired scratchpad entries for the current project/task scope, newest-first."
+    )]
+    pub async fn list_scratch(
+        &self,
+        Parameters(ListScratchParams { task_id, limit }): Parameters<ListScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let limit = limit.unwrap_or(50).clamp(1, 500);
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let entries = db::scratchpad::list_scratch(self.pool(), project_id, task, limit)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&entries)
+    }
+
+    #[tool(description = "Delete a scratchpad entry by key within the current project/task scope.")]
+    pub async fn delete_scratch(
+        &self,
+        Parameters(DeleteScratchParams { key, task_id }): Parameters<DeleteScratchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_nonblank("key", &key)?;
+        Self::validate_len("key", &key, 256)?;
+        let project_id = self.project_id().await?;
+        let task = task_id.as_deref().map(Self::parse_uuid).transpose()?;
+        let deleted = db::scratchpad::delete_scratch(self.pool(), project_id, task, &key)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "deleted": deleted }),
+            if deleted {
+                "Entry deleted."
+            } else {
+                "No matching entry."
+            },
         )
     }
 
@@ -450,19 +1531,14 @@ impl LoreServer {
     #[tool(description = "Start a new task in the episodic ledger")]
     pub async fn start_task(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Description of the task")]
-        description: String,
-        #[tool(param)]
-        #[schemars(description = "UUID of parent task, if this is a subtask")]
-        parent_task_id: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "Priority level: P1, P2, P3, or P4")]
-        priority: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
-        task_type: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(StartTaskParams {
+            description,
+            parent_task_id,
+            priority,
+            task_type,
+        }): Parameters<StartTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let description = self.maybe_scrub(description);
         Self::validate_len("description", &description, 4096)?;
         let project_id = self.project_id().await?;
         let parent = parent_task_id
@@ -490,16 +1566,35 @@ impl LoreServer {
     #[tool(description = "Propose an approach attempt for a task")]
     pub async fn propose_attempt(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the task")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Summary of the approach being attempted")]
-        approach_summary: String,
-        #[tool(param)]
-        #[schemars(description = "Optional agent identifier for multi-agent workflows")]
-        agent_id: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        peer: Peer<RoleServer>,
+        Parameters(params): Parameters<ProposeAttemptParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.request_confirmation.unwrap_or(false) {
+            let msg = format!(
+                "Proposed approach:\n\n{}\n\nConfirm to proceed with code generation.",
+                params.approach_summary
+            );
+            // Non-destructive opt-in: fall through silently on clients that
+            // don't support elicitation.
+            if let Some(early) =
+                Self::handle_confirm(elicit::confirm(&peer, msg).await, "propose_attempt", true)?
+            {
+                return Ok(early);
+            }
+        }
+        self.propose_attempt_impl(params).await
+    }
+
+    pub async fn propose_attempt_impl(
+        &self,
+        ProposeAttemptParams {
+            task_id,
+            approach_summary,
+            agent_id,
+            ..
+        }: ProposeAttemptParams,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let approach_summary = self.maybe_scrub(approach_summary);
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
         let git_ref = self.capture_git_ref().await;
@@ -527,26 +1622,16 @@ impl LoreServer {
     )]
     pub async fn log_outcome(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the attempt")]
-        attempt_id: String,
-        #[tool(param)]
-        #[schemars(
-            description = "Outcome: pending (awaiting user confirmation), accepted (user confirmed), rejected (user reported failure), or unknown (stale/abandoned)"
-        )]
-        outcome: String,
-        #[tool(param)]
-        #[schemars(description = "Reasoning for the outcome")]
-        reasoning: String,
-        #[tool(param)]
-        #[schemars(description = "Optional git reference (commit hash, branch)")]
-        git_ref: Option<String>,
-        #[tool(param)]
-        #[schemars(
-            description = "Optional code snippet — include the actual code that was written for this attempt"
-        )]
-        code_snippet: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(LogOutcomeParams {
+            attempt_id,
+            outcome,
+            reasoning,
+            git_ref,
+            code_snippet,
+        }): Parameters<LogOutcomeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let reasoning = self.maybe_scrub(reasoning);
+        let code_snippet = code_snippet.map(|cs| self.maybe_scrub(cs));
         Self::validate_len("reasoning", &reasoning, 4096)?;
         if let Some(ref code) = code_snippet {
             Self::validate_len("code_snippet", code, 32768)?;
@@ -590,6 +1675,44 @@ impl LoreServer {
             }
         }
 
+        // Auto-link rules to code chunks on accepted outcomes (best-effort)
+        if out == db::AttemptOutcome::Accepted {
+            if let Some(ref code) = code_snippet {
+                if let Ok(Some(attempt)) = db::attempts::get_attempt(self.pool(), aid).await {
+                    match self.embed(code).await {
+                        Ok(code_emb) => {
+                            if let Ok(project_id) = self.project_id().await {
+                                let pool = self.pool().clone();
+                                let task_id = attempt.task_id;
+                                tokio::spawn(async move {
+                                    match db::rule_chunk_links::link_rules_from_code(
+                                        &pool, task_id, &code_emb, project_id, 0.80,
+                                    )
+                                    .await
+                                    {
+                                        Ok(n) => {
+                                            if n > 0 {
+                                                tracing::info!(
+                                                    links = n,
+                                                    "Auto-linked rules to code chunks"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Failed to auto-link rules to code chunks");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to embed code snippet for auto-linking");
+                        }
+                    }
+                }
+            }
+        }
+
         let nudge = match out {
             db::AttemptOutcome::Rejected => {
                 "Outcome logged. Next: call review_ledger(task_id) to review all past failures, then propose_attempt with a new approach."
@@ -606,13 +1729,11 @@ impl LoreServer {
     #[tool(description = "Review the ledger of attempts for a task")]
     pub async fn review_ledger(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the task")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Filter by outcome: pending, accepted, rejected, or unknown")]
-        outcome_filter: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(ReviewLedgerParams {
+            task_id,
+            outcome_filter,
+        }): Parameters<ReviewLedgerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let tid = Self::parse_uuid(&task_id)?;
         let filter = outcome_filter
             .as_deref()
@@ -621,28 +1742,174 @@ impl LoreServer {
         let attempts = db::attempts::list_attempts(self.pool(), tid, filter)
             .await
             .map_err(Self::db_err)?;
+        let links = db::task_links::get_links_for_task(self.pool(), tid)
+            .await
+            .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
-            &attempts,
+            &serde_json::json!({
+                "attempts": attempts,
+                "task_links": links,
+            }),
             "Use the above failures to avoid repeating mistakes. Call propose_attempt with a new approach.",
         )
+    }
+
+    #[tool(
+        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of."
+    )]
+    pub async fn link_tasks(
+        &self,
+        Parameters(LinkTasksParams {
+            source_task_id,
+            target_task_id,
+            link_type,
+        }): Parameters<LinkTasksParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let source = Self::parse_uuid(&source_task_id)?;
+        let target = Self::parse_uuid(&target_task_id)?;
+        let valid_types = ["blocks", "related_to", "caused_by", "duplicate_of"];
+        let lt = link_type.to_lowercase();
+        if !valid_types.contains(&lt.as_str()) {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Invalid link_type '{lt}'. Must be one of: {}",
+                    valid_types.join(", ")
+                ),
+                None,
+            ));
+        }
+        if source == target {
+            return Err(rmcp::ErrorData::invalid_params(
+                "Cannot link a task to itself",
+                None,
+            ));
+        }
+        let id = db::task_links::create_link(self.pool(), source, target, &lt)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "link_id": id.to_string() }),
+            "Link created. Continue with your current task.",
+        )
+    }
+
+    // -- Knowledge graph tools --
+
+    #[tool(
+        description = "Add an edge to the knowledge graph between two entities (e.g. concepts, files, modules)"
+    )]
+    pub async fn add_edge(
+        &self,
+        Parameters(AddEdgeParams {
+            source_entity,
+            target_entity,
+            edge_type,
+            confidence,
+            source_task_id,
+        }): Parameters<AddEdgeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("source_entity", &source_entity, 512)?;
+        Self::validate_len("target_entity", &target_entity, 512)?;
+        Self::validate_len("edge_type", &edge_type, 128)?;
+        if let Some(c) = confidence {
+            if !(0.0..=1.0).contains(&c) {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "confidence must be between 0.0 and 1.0",
+                    None,
+                ));
+            }
+        }
+        let project_id = self.project_id().await?;
+        let task_id = source_task_id
+            .as_deref()
+            .map(Self::parse_uuid)
+            .transpose()?;
+        let id = db::knowledge_edges::create_edge(
+            self.pool(),
+            project_id,
+            &source_entity,
+            &target_entity,
+            &edge_type,
+            confidence,
+            task_id,
+        )
+        .await
+        .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "edge_id": id.to_string() }),
+            "Edge added to knowledge graph. Continue with your current task.",
+        )
+    }
+
+    #[tool(
+        description = "Query neighbors of an entity in the knowledge graph. Supports multi-hop traversal via depth parameter."
+    )]
+    pub async fn query_neighbors(
+        &self,
+        Parameters(QueryNeighborsParams {
+            entity,
+            edge_type,
+            depth,
+        }): Parameters<QueryNeighborsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("entity", &entity, 512)?;
+        let d = depth.unwrap_or(1).min(5);
+        let project_id = self.project_id().await?;
+        let edges = db::knowledge_edges::query_neighbors_bfs(
+            self.pool(),
+            project_id,
+            &entity,
+            edge_type.as_deref(),
+            d,
+        )
+        .await
+        .map_err(Self::db_err)?;
+        Self::json_content(&edges)
+    }
+
+    #[tool(
+        description = "Find the shortest path between two entities in the knowledge graph using BFS"
+    )]
+    pub async fn find_path(
+        &self,
+        Parameters(FindPathParams {
+            from_entity,
+            to_entity,
+            max_depth,
+        }): Parameters<FindPathParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("from_entity", &from_entity, 512)?;
+        Self::validate_len("to_entity", &to_entity, 512)?;
+        let d = max_depth.unwrap_or(5).min(10);
+        let project_id = self.project_id().await?;
+        let path =
+            db::knowledge_edges::find_path(self.pool(), project_id, &from_entity, &to_entity, d)
+                .await
+                .map_err(Self::db_err)?;
+        if path.is_empty() {
+            Self::json_content(&serde_json::json!({
+                "path": [],
+                "message": "No path found between entities"
+            }))
+        } else {
+            Self::json_content(&serde_json::json!({
+                "path": path,
+                "hop_count": path.len()
+            }))
+        }
     }
 
     #[tool(description = "Update an existing task's priority, task_type, or description")]
     pub async fn update_task(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the task to update")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Priority level: P1, P2, P3, or P4. Empty string clears it.")]
-        priority: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "New task type (e.g. Bug, Feature). Empty string clears it.")]
-        task_type: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "New description text")]
-        description: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(UpdateTaskParams {
+            task_id,
+            priority,
+            task_type,
+            description,
+        }): Parameters<UpdateTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let description = description.map(|d| self.maybe_scrub(d));
         if let Some(ref d) = description {
             Self::validate_len("description", d, 4096)?;
         }
@@ -701,18 +1968,13 @@ impl LoreServer {
     #[tool(description = "Mark a task as completed, optionally recording a lesson learned")]
     pub async fn complete_task(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the task")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Lesson learned from this task (saved as a Lesson rule)")]
-        lesson: Option<String>,
-        #[tool(param)]
-        #[schemars(
-            description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
-        )]
-        resolved_attempt_id: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(CompleteTaskParams {
+            task_id,
+            lesson,
+            resolved_attempt_id,
+        }): Parameters<CompleteTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let lesson = lesson.map(|l| self.maybe_scrub(l));
         if let Some(ref l) = lesson {
             Self::validate_len("lesson", l, 4096)?;
         }
@@ -771,16 +2033,13 @@ impl LoreServer {
     #[tool(description = "Abandon a task with a reason. Optionally saves the reason as a lesson.")]
     pub async fn abandon_task(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the task to abandon")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Why this task is being abandoned")]
-        reason: String,
-        #[tool(param)]
-        #[schemars(description = "If true, save the reason as a Lesson rule")]
-        save_lesson: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(AbandonTaskParams {
+            task_id,
+            reason,
+            save_lesson,
+        }): Parameters<AbandonTaskParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let reason = self.maybe_scrub(reason);
         Self::validate_len("reason", &reason, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
         let success = db::tasks::abandon_task(self.pool(), tid)
@@ -825,10 +2084,8 @@ impl LoreServer {
     #[tool(description = "List tasks for the current project, optionally filtered by status")]
     pub async fn list_tasks(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
-        status: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(ListTasksParams { status }): Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let st = status.as_deref().map(Self::parse_task_status).transpose()?;
         let tasks = db::tasks::list_tasks(self.pool(), project_id, st)
@@ -840,10 +2097,8 @@ impl LoreServer {
     #[tool(description = "List subtasks of a parent task")]
     pub async fn list_subtasks(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the parent task")]
-        parent_task_id: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(ListSubtasksParams { parent_task_id }): Parameters<ListSubtasksParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let pid = Self::parse_uuid(&parent_task_id)?;
         let subtasks = db::tasks::list_subtasks(self.pool(), pid)
             .await
@@ -856,10 +2111,8 @@ impl LoreServer {
     )]
     pub async fn get_task_stats(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
-        status: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(GetTaskStatsParams { status }): Parameters<GetTaskStatsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let st = status.as_deref().map(Self::parse_task_status).transpose()?;
         let stats = db::tasks::get_task_stats(self.pool(), project_id, st)
@@ -902,16 +2155,12 @@ impl LoreServer {
     #[tool(description = "Find similar past failures using semantic search on rejection reasoning")]
     pub async fn find_similar_failures(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Description of the error or failure")]
-        error_description: String,
-        #[tool(param)]
-        #[schemars(description = "Max results (default 5)")]
-        limit: Option<i64>,
-        #[tool(param)]
-        #[schemars(description = "Search across all projects (default false)")]
-        cross_project: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(FindSimilarFailuresParams {
+            error_description,
+            limit,
+            cross_project,
+        }): Parameters<FindSimilarFailuresParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         Self::validate_len("error_description", &error_description, 2048)?;
         let project_id = if cross_project.unwrap_or(false) {
             None
@@ -938,7 +2187,7 @@ impl LoreServer {
     #[tool(
         description = "Get the current active context: project, active task, and recent attempts"
     )]
-    pub async fn get_active_context(&self) -> Result<CallToolResult, rmcp::Error> {
+    pub async fn get_active_context(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
             .await
@@ -966,6 +2215,24 @@ impl LoreServer {
                 .map_err(Self::db_err)?
         } else {
             0
+        };
+
+        let procedural = if self.config().procedural_memory {
+            match db::semantic::list_always_injected_rules(
+                self.pool(),
+                project_id,
+                PROCEDURAL_RULE_LIMIT,
+            )
+            .await
+            {
+                Ok(rules) => Some(build_procedural_block(rules)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "procedural rule fetch failed");
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         // Proactive retrieval: auto-surface relevant rules and similar failures
@@ -1028,6 +2295,9 @@ impl LoreServer {
         if let Some(p) = proactive {
             body["proactively_retrieved"] = p;
         }
+        if let Some(pm) = procedural {
+            body["procedural"] = pm;
+        }
         Self::json_content_with_nudge(&body, nudge)
     }
 
@@ -1036,16 +2306,12 @@ impl LoreServer {
     )]
     pub async fn log_context_wipe(
         &self,
-        #[tool(param)]
-        #[schemars(description = "UUID of the active task")]
-        task_id: String,
-        #[tool(param)]
-        #[schemars(description = "Approximate token count before the wipe")]
-        token_count: i32,
-        #[tool(param)]
-        #[schemars(description = "UUID of the last attempt before the wipe")]
-        last_attempt_id: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(LogContextWipeParams {
+            task_id,
+            token_count,
+            last_attempt_id,
+        }): Parameters<LogContextWipeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let tid = Self::parse_uuid(&task_id)?;
         let aid = last_attempt_id
             .as_deref()
@@ -1063,13 +2329,8 @@ impl LoreServer {
     #[tool(description = "Switch to a project by name (creates it if it doesn't exist)")]
     pub async fn switch_project(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Project name")]
-        name: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "Project root filesystem path")]
-        root_path: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(SwitchProjectParams { name, root_path }): Parameters<SwitchProjectParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_name = name.unwrap_or_else(|| self.config().default_project_name.clone());
         let path = root_path.unwrap_or_else(|| {
             std::env::current_dir()
@@ -1148,13 +2409,11 @@ impl LoreServer {
     #[tool(description = "Export all memory (rules, tasks, attempts) for the current project")]
     pub async fn export_memory(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Export format: json or markdown")]
-        format: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(ExportMemoryParams { format }): Parameters<ExportMemoryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let fmt = format.to_lowercase();
         if fmt != "json" && fmt != "markdown" {
-            return Err(rmcp::Error::invalid_params(
+            return Err(rmcp::ErrorData::invalid_params(
                 "Supported formats: json, markdown",
                 None,
             ));
@@ -1200,10 +2459,8 @@ impl LoreServer {
     )]
     pub async fn get_next_steps(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Context tier: L0 (minimal ~100 tokens), L1 (full, default)")]
-        tier: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(GetNextStepsParams { tier }): Parameters<GetNextStepsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
             .await
@@ -1253,33 +2510,44 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
-        // Only show most recent 5 lessons
         let recent_lessons: Vec<_> = lessons.into_iter().rev().take(5).collect();
 
-        // Build action items
+        // Score and rank tasks by urgency
+        let now = chrono::Utc::now();
+        let mut scored: Vec<_> = summaries
+            .iter()
+            .map(|s| {
+                let (score, explanation) = Self::score_task(s, now);
+                (s, score, explanation)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Build action items from scored order
         let mut actions: Vec<String> = Vec::new();
-        for s in &summaries {
-            match s.status {
+        for (s, score, explanation) in &scored {
+            let action = match s.status {
                 db::TaskStatus::Active if s.pending_attempts > 0 => {
-                    actions.push(format!(
-                        "Task '{}' has {} pending attempt(s) awaiting outcome resolution",
+                    format!(
+                        "[score={score:.2}] Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
                         s.description, s.pending_attempts
-                    ));
+                    )
                 }
                 db::TaskStatus::Active => {
-                    actions.push(format!(
-                        "Task '{}' is active ({} attempts, {} rejected) — propose next approach",
+                    format!(
+                        "[score={score:.2}] Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
                         s.description, s.total_attempts, s.rejected_attempts
-                    ));
+                    )
                 }
                 db::TaskStatus::Blocked => {
-                    actions.push(format!(
-                        "Task '{}' is BLOCKED — needs unblocking before progress",
+                    format!(
+                        "[score={score:.2}] Task '{}' is BLOCKED — needs unblocking ({explanation})",
                         s.description
-                    ));
+                    )
                 }
-                _ => {}
-            }
+                _ => continue,
+            };
+            actions.push(action);
         }
         if actions.is_empty() {
             actions.push(
@@ -1314,7 +2582,7 @@ impl LoreServer {
     #[tool(
         description = "Re-read the mandatory episodic memory protocol. Call this if you are unsure what Lore tool to use next."
     )]
-    pub async fn get_protocol(&self) -> Result<CallToolResult, rmcp::Error> {
+    pub async fn get_protocol(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         Ok(CallToolResult::success(vec![Content::text(
             Self::protocol_text(),
         )]))
@@ -1325,10 +2593,8 @@ impl LoreServer {
     )]
     pub async fn generate_handoff(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Approximate token count consumed in current session")]
-        token_count: Option<i32>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(GenerateHandoffParams { token_count }): Parameters<GenerateHandoffParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         use std::fmt::Write;
         let project_id = self.project_id().await?;
         let project = db::projects::get_project(self.pool(), project_id)
@@ -1434,35 +2700,128 @@ impl LoreServer {
     }
 
     #[tool(
+        description = "Fetch a structured session briefing: active + blocked tasks with recent attempts, plus recent lessons. Returns raw data plus a `client_prompt` and JSON schema so the MCP client LLM can synthesize the summary itself (no external LLM needed). If the client wants to persist the distilled lessons, it should call `remember_rule` with category='lesson' afterward."
+    )]
+    pub async fn generate_session_summary(
+        &self,
+        Parameters(GenerateSessionSummaryParams {
+            max_tasks,
+            max_attempts_per_task,
+        }): Parameters<GenerateSessionSummaryParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let max_tasks = max_tasks.unwrap_or(10).clamp(1, 25);
+        let max_attempts = max_attempts_per_task.unwrap_or(5).clamp(1, 10);
+
+        let active_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
+                .await
+                .map_err(Self::db_err)?;
+        let blocked_tasks =
+            db::tasks::list_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
+                .await
+                .map_err(Self::db_err)?;
+
+        let mut task_contexts: Vec<TaskContext> = Vec::new();
+        for task in active_tasks
+            .iter()
+            .chain(blocked_tasks.iter())
+            .take(max_tasks as usize)
+        {
+            let attempts = db::attempts::list_attempts(self.pool(), task.id, None)
+                .await
+                .unwrap_or_default();
+            let recent: Vec<AttemptSnippet> = attempts
+                .iter()
+                .rev()
+                .take(max_attempts as usize)
+                .rev()
+                .map(|a| AttemptSnippet {
+                    outcome: format!("{:?}", a.outcome).to_lowercase(),
+                    approach: a.approach_summary.clone(),
+                    reasoning: a.reasoning.clone(),
+                })
+                .collect();
+            task_contexts.push(TaskContext {
+                description: task.description.clone(),
+                status: format!("{:?}", task.status).to_lowercase(),
+                priority: task.priority.clone(),
+                attempts: recent,
+            });
+        }
+
+        let lessons = db::semantic::list_rules(
+            self.pool(),
+            project_id,
+            Some(db::RuleCategory::Lesson),
+            None,
+        )
+        .await
+        .unwrap_or_default();
+        let recent_lessons: Vec<String> = lessons
+            .iter()
+            .rev()
+            .take(5)
+            .map(|l| l.content.chars().take(240).collect::<String>())
+            .collect();
+
+        let tasks_json: Vec<serde_json::Value> = task_contexts
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "description": t.description,
+                    "status": t.status,
+                    "priority": t.priority,
+                    "recent_attempts": t.attempts.iter().map(|a| serde_json::json!({
+                        "outcome": a.outcome,
+                        "approach": a.approach,
+                        "reasoning": a.reasoning,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let client_prompt = build_session_summary_client_prompt();
+        let schema = session_summary_schema();
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "tasks": tasks_json,
+                "recent_lessons": recent_lessons,
+                "tasks_considered": task_contexts.len(),
+                "client_prompt": client_prompt,
+                "schema": schema,
+            }),
+            "Synthesize the summary yourself following `client_prompt` and `schema`. Optionally persist the distilled learnings via `remember_rule(category='lesson', content=...)`.",
+        )
+    }
+
+    #[tool(
         description = "Index a project's codebase into vector storage for semantic code search. Scans files respecting .gitignore, chunks by language-aware boundaries, embeds via ONNX, stores in pgvector. Incremental: only re-indexes changed files (SHA-256 fingerprinting). Call at session start for fast code retrieval."
     )]
     pub async fn index_codebase(
         &self,
-        #[tool(param)]
-        #[schemars(
-            description = "Root path of the project to index (defaults to project root_path)"
-        )]
-        root_path: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(IndexCodebaseParams { root_path }): Parameters<IndexCodebaseParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
 
         let project = db::projects::get_project(self.pool(), project_id)
             .await
             .map_err(Self::db_err)?
-            .ok_or_else(|| rmcp::Error::internal_error("Project not found", None))?;
+            .ok_or_else(|| rmcp::ErrorData::internal_error("Project not found", None))?;
 
         let path = if let Some(ref p) = root_path {
             // Restrict to subdirectories of the project's registered root
             let canonical = std::path::Path::new(p)
                 .canonicalize()
-                .map_err(|e| rmcp::Error::internal_error(format!("Invalid path: {e}"), None))?;
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("Invalid path: {e}"), None))?;
             let project_root = std::path::Path::new(&project.root_path)
                 .canonicalize()
                 .map_err(|e| {
-                    rmcp::Error::internal_error(format!("Invalid project root: {e}"), None)
+                    rmcp::ErrorData::internal_error(format!("Invalid project root: {e}"), None)
                 })?;
             if !canonical.starts_with(&project_root) {
-                return Err(rmcp::Error::internal_error(
+                return Err(rmcp::ErrorData::internal_error(
                     "root_path must be within the project directory",
                     None,
                 ));
@@ -1481,7 +2840,7 @@ impl LoreServer {
             self.config().codebase_behavior_version,
         )
         .await
-        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+        .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
         Self::json_content_with_nudge(
             &result,
@@ -1494,21 +2853,13 @@ impl LoreServer {
     )]
     pub async fn search_codebase(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Natural language query describing what code you're looking for")]
-        query: String,
-        #[tool(param)]
-        #[schemars(description = "Max results to return (default 5)")]
-        limit: Option<i64>,
-        #[tool(param)]
-        #[schemars(description = "Optional file path pattern filter (SQL LIKE, e.g. 'src/%.rs')")]
-        file_pattern: Option<String>,
-        #[tool(param)]
-        #[schemars(
-            description = "Result diversity via MMR re-ranking: 0.0=pure relevance, 1.0=max diversity (default 0.3)"
-        )]
-        diversity: Option<f32>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(SearchCodebaseParams {
+            query,
+            limit,
+            file_pattern,
+            diversity,
+        }): Parameters<SearchCodebaseParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         Self::validate_len("query", &query, 2048)?;
         let project_id = self.project_id().await?;
         let embedding = self.embed(&query).await?;
@@ -1551,7 +2902,7 @@ impl LoreServer {
     #[tool(
         description = "Get statistics about the indexed codebase: file count, chunk count, last indexed time, summary coverage."
     )]
-    pub async fn get_index_status(&self) -> Result<CallToolResult, rmcp::Error> {
+    pub async fn get_index_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let project_id = self.project_id().await?;
         let stats = db::codebase::get_index_stats(self.pool(), project_id)
             .await
@@ -1560,54 +2911,111 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Generate LLM summaries for indexed code chunks that lack them. Calls Gemini to produce 1-sentence descriptions per function/class. Run after index_codebase to improve high-level search queries."
+        description = "Get semantic rules linked to code chunks in a given file. Returns rules that were auto-linked via embedding similarity when code was accepted."
     )]
-    pub async fn generate_summaries(
+    pub async fn get_rules_for_file(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Max chunks to summarize per call (default 50, max 100)")]
-        limit: Option<i64>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(GetRulesForFileParams { file_path }): Parameters<GetRulesForFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("file_path", &file_path, 1024)?;
         let project_id = self.project_id().await?;
-        let limit = limit.unwrap_or(50).min(100);
+        let rules = db::rule_chunk_links::get_rules_for_file(self.pool(), &file_path, project_id)
+            .await
+            .map_err(Self::db_err)?;
+        if rules.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "rules": [], "file_path": file_path }),
+                "No rules linked to this file. Index the codebase and accept attempts with code snippets to build links.",
+            );
+        }
+        Self::json_content_with_nudge(
+            &serde_json::json!({ "rules": rules, "file_path": file_path }),
+            "Apply these rules when modifying this file.",
+        )
+    }
+
+    #[tool(
+        description = "Return up to `limit` indexed code chunks that don't yet have a 1-sentence summary. The client LLM is expected to summarize each chunk and write the results back via `submit_chunk_summaries`. The response includes `returned` (size of this batch) and `remaining_after` (chunks still needing a summary after this call) — loop until `remaining_after` is 0."
+    )]
+    pub async fn list_chunks_needing_summary(
+        &self,
+        Parameters(ListChunksNeedingSummaryParams { limit }): Parameters<
+            ListChunksNeedingSummaryParams,
+        >,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let limit = limit.unwrap_or(20).clamp(1, 100);
 
         let chunks = db::codebase::get_chunks_needing_summary(self.pool(), project_id, limit)
             .await
             .map_err(Self::db_err)?;
+        let total_pending = db::codebase::count_chunks_needing_summary(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+        let returned = chunks.len() as i64;
+        let remaining_after = (total_pending - returned).max(0);
 
-        if chunks.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "All chunks already have summaries.",
-            )]));
+        let payload: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.to_string(),
+                    "language": c.language,
+                    "file_path": c.file_path,
+                    "chunk_name": c.chunk_name,
+                    "start_line": c.start_line,
+                    "end_line": c.end_line,
+                    "content": c.content,
+                })
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "chunks": payload,
+                "returned": returned,
+                "remaining_after": remaining_after,
+                "client_prompt": "For each chunk, write exactly ONE short sentence (max 15 words) describing what the code does. Then call `submit_chunk_summaries` with two aligned arrays: `ids` (the chunk UUIDs you saw) and `summaries` (your sentences).",
+            }),
+            "Call submit_chunk_summaries, then call list_chunks_needing_summary again until `remaining_after` is 0.",
+        )
+    }
+
+    #[tool(
+        description = "Persist LLM-generated 1-sentence summaries for indexed code chunks. Pass two parallel arrays: `ids` (chunk UUIDs from `list_chunks_needing_summary`) and `summaries` (one sentence each, max 512 chars). Arrays must be the same length; max 100 pairs per call."
+    )]
+    pub async fn submit_chunk_summaries(
+        &self,
+        Parameters(SubmitChunkSummariesParams { ids, summaries }): Parameters<
+            SubmitChunkSummariesParams,
+        >,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if ids.is_empty() {
+            return Self::json_content_with_nudge(
+                &serde_json::json!({ "updated": 0 }),
+                "No summaries submitted.",
+            );
+        }
+        if ids.len() != summaries.len() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "`ids` and `summaries` must have the same length.",
+                None,
+            ));
+        }
+        if ids.len() > 100 {
+            return Err(rmcp::ErrorData::invalid_params(
+                "Too many summaries in one call (max 100).",
+                None,
+            ));
         }
 
-        let api_key = self
-            .config()
-            .gemini_api_key
-            .as_deref()
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| {
-                rmcp::Error::internal_error("GEMINI_API_KEY required for generate_summaries", None)
-            })?;
-
-        let mut updates: Vec<(Uuid, String)> = Vec::new();
-        let mut errors = 0u64;
-
-        // Batch chunks into groups of 10 for efficient LLM calls
-        for batch in chunks.chunks(10) {
-            let prompt = build_summary_prompt(batch);
-            match call_gemini_for_summaries(&self.inner.http_client, api_key, &prompt).await {
-                Ok(summaries) => {
-                    for (chunk, summary) in batch.iter().zip(summaries) {
-                        if !summary.is_empty() {
-                            updates.push((chunk.id, summary));
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "LLM summary batch failed");
-                    errors += batch.len() as u64;
-                }
+        let mut updates: Vec<(Uuid, String)> = Vec::with_capacity(ids.len());
+        for (raw_id, raw_summary) in ids.iter().zip(summaries.iter()) {
+            Self::validate_len("summary", raw_summary, 512)?;
+            let id = Self::parse_uuid(raw_id)?;
+            let summary = self.maybe_scrub(raw_summary.trim().to_string());
+            if !summary.is_empty() {
+                updates.push((id, summary));
             }
         }
 
@@ -1617,89 +3025,351 @@ impl LoreServer {
 
         Self::json_content_with_nudge(
             &serde_json::json!({
-                "summaries_generated": updated,
-                "errors": errors,
-                "remaining": chunks.len() as u64 - updated - errors,
+                "updated": updated,
+                "submitted": ids.len(),
             }),
-            "Summaries improve search quality for high-level queries.",
+            "Run `list_chunks_needing_summary` again to keep filling coverage.",
+        )
+    }
+
+    // -- Codebase edge tools --
+
+    #[tool(
+        description = "Find all callers of a function/method in the codebase edge graph. Returns entities that call (or reference) the given entity, with source file info."
+    )]
+    pub async fn find_callers(
+        &self,
+        Parameters(FindCallersParams { entity, edge_type }): Parameters<FindCallersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("entity", &entity, 512)?;
+        let project_id = self.project_id().await?;
+        let _edge_type = edge_type.unwrap_or_else(|| "calls".to_string());
+        let edges = db::codebase_edges::get_callers(self.pool(), project_id, &entity)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "entity": entity,
+                "callers": edges.iter().map(|e| serde_json::json!({
+                    "caller": e.source_entity,
+                    "edge_type": e.edge_type,
+                    "source_file": e.source_file,
+                })).collect::<Vec<_>>(),
+                "count": edges.len(),
+            }),
+            "Use find_callees to see what this entity calls.",
+        )
+    }
+
+    #[tool(
+        description = "Find all callees of a function/method in the codebase edge graph. Returns entities that the given entity calls (or references), with target file info."
+    )]
+    pub async fn find_callees(
+        &self,
+        Parameters(FindCalleesParams { entity, edge_type }): Parameters<FindCalleesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("entity", &entity, 512)?;
+        let project_id = self.project_id().await?;
+        let _edge_type = edge_type.unwrap_or_else(|| "calls".to_string());
+        let edges = db::codebase_edges::get_callees(self.pool(), project_id, &entity)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "entity": entity,
+                "callees": edges.iter().map(|e| serde_json::json!({
+                    "callee": e.target_entity,
+                    "edge_type": e.edge_type,
+                    "target_file": e.target_file,
+                })).collect::<Vec<_>>(),
+                "count": edges.len(),
+            }),
+            "Use find_callers to see what calls this entity.",
+        )
+    }
+
+    #[tool(
+        description = "Find the shortest path between two entities in the codebase edge graph using BFS. Useful for understanding how two functions/modules are connected through call chains."
+    )]
+    pub async fn shortest_code_path(
+        &self,
+        Parameters(ShortestCodePathParams {
+            from,
+            to,
+            max_depth,
+        }): Parameters<ShortestCodePathParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("from", &from, 512)?;
+        Self::validate_len("to", &to, 512)?;
+        let depth = max_depth.unwrap_or(5).min(10);
+        let project_id = self.project_id().await?;
+        let path =
+            db::codebase_edges::find_shortest_path(self.pool(), project_id, &from, &to, depth)
+                .await
+                .map_err(Self::db_err)?;
+        if path.is_empty() {
+            Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "path": [],
+                    "message": "No path found between these entities within the depth limit"
+                }),
+                "Use find_callers/find_callees to explore individual nodes.",
+            )
+        } else {
+            Self::json_content_with_nudge(
+                &serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "path": path.iter().map(|e| serde_json::json!({
+                        "source": e.source_entity,
+                        "target": e.target_entity,
+                        "edge_type": e.edge_type,
+                        "source_file": e.source_file,
+                        "target_file": e.target_file,
+                    })).collect::<Vec<_>>(),
+                    "hop_count": path.len(),
+                }),
+                "Use find_callers/find_callees to explore individual nodes.",
+            )
+        }
+    }
+
+    #[tool(
+        description = "Run Louvain community detection on codebase edges to identify module clusters. Assigns community_id to code_chunks based on call/import graph structure. Run after index_codebase to detect module boundaries."
+    )]
+    pub async fn detect_communities(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let result = crate::community::detect_communities(self.pool(), project_id)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let communities = db::communities::get_communities(self.pool(), project_id)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "num_communities": result.num_communities,
+                "num_assigned": result.num_assigned,
+                "modularity": result.modularity,
+                "communities": communities,
+            }),
+            "Use get_community_members(community_id) to inspect a specific community.",
+        )
+    }
+
+    #[tool(
+        description = "Get all code chunks belonging to a specific community. Returns chunk names, file paths, and line ranges."
+    )]
+    pub async fn get_community_members(
+        &self,
+        Parameters(GetCommunityMembersParams { community_id }): Parameters<
+            GetCommunityMembersParams,
+        >,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let members = db::communities::get_community_members(self.pool(), project_id, community_id)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "community_id": community_id,
+                "members": members,
+                "count": members.len(),
+            }),
+            "Use detect_cross_community_changes to find impact across modules.",
+        )
+    }
+
+    #[tool(
+        description = "Detect which communities are affected by changes to given files. Returns affected community IDs with member counts. Changes spanning multiple communities may need cross-module review."
+    )]
+    pub async fn detect_cross_community_changes(
+        &self,
+        Parameters(DetectCrossCommunityChangesParams { file_paths }): Parameters<
+            DetectCrossCommunityChangesParams,
+        >,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_id = self.project_id().await?;
+        let affected =
+            db::communities::get_affected_communities(self.pool(), project_id, &file_paths)
+                .await
+                .map_err(Self::db_err)?;
+        let cross_module = affected.len() > 1;
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "file_paths": file_paths,
+                "affected_communities": affected,
+                "community_count": affected.len(),
+                "cross_module_impact": cross_module,
+            }),
+            if cross_module {
+                "Changes span multiple communities — consider cross-module review."
+            } else {
+                "Changes are contained within a single community."
+            },
+        )
+    }
+
+    #[tool(
+        description = "Get full context for a file: code structure, linked rules, call dependencies, and community info. Use before reading or modifying a file to understand its role in the codebase."
+    )]
+    pub async fn get_file_context(
+        &self,
+        Parameters(GetFileContextParams { file_path }): Parameters<GetFileContextParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Self::validate_len("file_path", &file_path, 1024)?;
+        let project_id = self.project_id().await?;
+
+        // Code structure
+        let chunks = db::codebase::get_file_chunks_metadata(self.pool(), project_id, &file_path)
+            .await
+            .map_err(Self::db_err)?;
+
+        let code_structure: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "chunk_name": c.chunk_name,
+                    "chunk_kind": c.chunk_kind,
+                    "lines": format!("{}-{}", c.start_line, c.end_line),
+                    "community_id": c.community_id,
+                })
+            })
+            .collect();
+
+        // Linked rules
+        let file_rules =
+            db::rule_chunk_links::get_rules_for_file(self.pool(), &file_path, project_id)
+                .await
+                .map_err(Self::db_err)?;
+
+        let linked_rules: Vec<serde_json::Value> = file_rules
+            .iter()
+            .map(|r| {
+                let preview: String = r.content.chars().take(80).collect();
+                serde_json::json!({
+                    "id": r.rule_id.to_string(),
+                    "category": r.category,
+                    "preview": preview,
+                })
+            })
+            .collect();
+
+        // Dependencies: callers/callees for first 5 named chunks
+        let mut all_callers: Vec<serde_json::Value> = Vec::new();
+        let mut all_callees: Vec<serde_json::Value> = Vec::new();
+        let mut seen_callers: std::collections::HashSet<(String, Option<String>)> =
+            std::collections::HashSet::new();
+        let mut seen_callees: std::collections::HashSet<(String, Option<String>)> =
+            std::collections::HashSet::new();
+
+        let named_chunks: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.chunk_name.as_ref())
+            .take(5)
+            .collect();
+
+        for entity in &named_chunks {
+            let callers = db::codebase_edges::get_callers(self.pool(), project_id, entity)
+                .await
+                .map_err(Self::db_err)?;
+            for e in callers {
+                let key = (e.source_entity.clone(), e.source_file.clone());
+                if seen_callers.insert(key) {
+                    all_callers.push(serde_json::json!({
+                        "entity": e.source_entity,
+                        "file": e.source_file,
+                    }));
+                }
+            }
+            let callees = db::codebase_edges::get_callees(self.pool(), project_id, entity)
+                .await
+                .map_err(Self::db_err)?;
+            for e in callees {
+                let key = (e.target_entity.clone(), e.target_file.clone());
+                if seen_callees.insert(key) {
+                    all_callees.push(serde_json::json!({
+                        "entity": e.target_entity,
+                        "file": e.target_file,
+                    }));
+                }
+            }
+        }
+
+        // Communities
+        let file_paths = vec![file_path.clone()];
+        let communities =
+            db::communities::get_affected_communities(self.pool(), project_id, &file_paths)
+                .await
+                .map_err(Self::db_err)?;
+
+        let communities_json: Vec<serde_json::Value> = communities
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "community_id": c.community_id,
+                    "member_count": c.member_count,
+                })
+            })
+            .collect();
+
+        Self::json_content_with_nudge(
+            &serde_json::json!({
+                "file_path": file_path,
+                "code_structure": code_structure,
+                "linked_rules": linked_rules,
+                "dependencies": {
+                    "callers": all_callers,
+                    "callees": all_callees,
+                },
+                "communities": communities_json,
+            }),
+            "Apply these rules and context when reading or modifying this file.",
         )
     }
 }
 
-fn build_summary_prompt(chunks: &[db::codebase::CodeChunk]) -> String {
-    let mut prompt = String::from(
-        "For each numbered code snippet below, write exactly ONE short sentence (max 15 words) \
-         describing what the code does. Return one summary per line, numbered to match.\n\n",
-    );
-    for (i, chunk) in chunks.iter().enumerate() {
-        let lang = chunk.language.as_deref().unwrap_or("unknown");
-        prompt.push_str(&format!(
-            "--- Snippet {} ({}, {}:{}-{}) ---\n{}\n\n",
-            i + 1,
-            lang,
-            chunk.file_path,
-            chunk.start_line,
-            chunk.end_line,
-            chunk.content
-        ));
-    }
-    prompt
+#[derive(Debug)]
+struct AttemptSnippet {
+    outcome: String,
+    approach: String,
+    reasoning: String,
 }
 
-async fn call_gemini_for_summaries(
-    client: &reqwest::Client,
-    api_key: &str,
-    prompt: &str,
-) -> Result<Vec<String>, String> {
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-        api_key
-    );
+#[derive(Debug)]
+struct TaskContext {
+    description: String,
+    status: String,
+    priority: Option<String>,
+    attempts: Vec<AttemptSnippet>,
+}
 
-    let body = serde_json::json!({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
-    });
+fn build_session_summary_client_prompt() -> &'static str {
+    "You are synthesizing a session briefing from structured data the Lore server returned. \
+     Read `tasks` (active/blocked with recent attempts) and `recent_lessons`. \
+     Produce a single JSON object that matches `schema`. No prose, no markdown fences. \
+     Each array entry is a short factual bullet (max 25 words). \
+     - investigated: topics, files, or questions explored. \
+     - learned: concrete technical insights (bias toward reusable lessons). \
+     - completed: tasks/subtasks that reached an accepted outcome. \
+     - blocked: tasks stuck on rejections or missing info. \
+     - next_steps: what to do next, ordered by priority. \
+     If you want to persist distilled lessons, call `remember_rule(category='lesson', content=...)` afterward."
+}
 
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Gemini API {status}: {text}"));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {e}"))?;
-
-    let text = json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .unwrap_or("");
-
-    let summaries: Vec<String> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            // Strip leading "1. " or "1) " numbering
-            let trimmed = l.trim();
-            if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
-                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-                rest.trim_start_matches(['.', ')', ':', '-', ' '])
-                    .to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .collect();
-
-    Ok(summaries)
+fn session_summary_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "investigated": {"type": "array", "items": {"type": "string"}},
+            "learned":      {"type": "array", "items": {"type": "string"}},
+            "completed":    {"type": "array", "items": {"type": "string"}},
+            "blocked":      {"type": "array", "items": {"type": "string"}},
+            "next_steps":   {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["investigated", "learned", "completed", "blocked", "next_steps"],
+    })
 }
 
 impl ServerHandler for LoreServer {
@@ -1709,6 +3379,7 @@ impl ServerHandler for LoreServer {
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
             ..Default::default()
         }
@@ -1716,9 +3387,9 @@ impl ServerHandler for LoreServer {
 
     async fn list_resources(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, rmcp::Error> {
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
         use rmcp::model::AnnotateAble;
 
         Ok(ListResourcesResult {
@@ -1726,19 +3397,60 @@ impl ServerHandler for LoreServer {
                 RawResource {
                     uri: "lore://protocol".into(),
                     name: "Lore Protocol".into(),
+                    title: None,
                     description: Some("Mandatory episodic memory protocol rules".into()),
                     mime_type: Some("text/plain".into()),
                     size: None,
+                    icons: None,
                 }
                 .no_annotation(),
                 RawResource {
                     uri: "lore://active-context".into(),
                     name: "Active Context".into(),
+                    title: None,
                     description: Some(
                         "Current project, active tasks, and context wipe count".into(),
                     ),
                     mime_type: Some("application/json".into()),
                     size: None,
+                    icons: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://tasks/active".into(),
+                    name: "Active Tasks".into(),
+                    title: None,
+                    description: Some(
+                        "Currently active tasks for the current project with attempt counts".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                    icons: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://lessons/recent".into(),
+                    name: "Recent Lessons".into(),
+                    title: None,
+                    description: Some(
+                        "Ten most recent Lesson-category rules for the current project".into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                    icons: None,
+                }
+                .no_annotation(),
+                RawResource {
+                    uri: "lore://rules".into(),
+                    name: "Semantic Rules".into(),
+                    title: None,
+                    description: Some(
+                        "All active semantic rules for the current project, grouped by category"
+                            .into(),
+                    ),
+                    mime_type: Some("application/json".into()),
+                    size: None,
+                    icons: None,
                 }
                 .no_annotation(),
             ],
@@ -1750,7 +3462,7 @@ impl ServerHandler for LoreServer {
         &self,
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, rmcp::Error> {
+    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
         match request.uri.as_str() {
             "lore://protocol" => Ok(ReadResourceResult {
                 contents: vec![ResourceContents::text(
@@ -1788,6 +3500,90 @@ impl ServerHandler for LoreServer {
                     contents: vec![ResourceContents::text(text, "lore://active-context")],
                 })
             }
+            "lore://tasks/active" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let tasks =
+                        db::tasks::list_tasks(self.pool(), pid, Some(db::TaskStatus::Active))
+                            .await
+                            .unwrap_or_default();
+                    let mut out = Vec::with_capacity(tasks.len());
+                    for t in &tasks {
+                        let attempts = db::attempts::list_attempts(self.pool(), t.id, None)
+                            .await
+                            .unwrap_or_default();
+                        let pending = attempts
+                            .iter()
+                            .filter(|a| matches!(a.outcome, db::attempts::AttemptOutcome::Pending))
+                            .count();
+                        let rejected = attempts
+                            .iter()
+                            .filter(|a| matches!(a.outcome, db::attempts::AttemptOutcome::Rejected))
+                            .count();
+                        out.push(serde_json::json!({
+                            "id": t.id,
+                            "description": t.description,
+                            "priority": t.priority,
+                            "task_type": t.task_type,
+                            "created_at": t.created_at,
+                            "total_attempts": attempts.len(),
+                            "pending_attempts": pending,
+                            "rejected_attempts": rejected,
+                        }));
+                    }
+                    serde_json::to_string_pretty(&serde_json::json!({ "tasks": out }))
+                        .unwrap_or_default()
+                } else {
+                    r#"{"tasks": [], "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://tasks/active")],
+                })
+            }
+            "lore://lessons/recent" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let rules = db::semantic::list_rules(
+                        self.pool(),
+                        pid,
+                        Some(db::semantic::RuleCategory::Lesson),
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    let recent: Vec<_> = rules.into_iter().rev().take(10).collect();
+                    serde_json::to_string_pretty(&serde_json::json!({ "lessons": recent }))
+                        .unwrap_or_default()
+                } else {
+                    r#"{"lessons": [], "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://lessons/recent")],
+                })
+            }
+            "lore://rules" => {
+                let project_id = *self.inner.current_project_id.read().await;
+                let text = if let Some(pid) = project_id {
+                    let rules = db::semantic::list_rules(self.pool(), pid, None, None)
+                        .await
+                        .unwrap_or_default();
+                    let mut by_cat: std::collections::BTreeMap<String, Vec<_>> =
+                        std::collections::BTreeMap::new();
+                    for r in rules {
+                        let key = format!("{:?}", r.category).to_lowercase();
+                        by_cat.entry(key).or_default().push(r);
+                    }
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({ "rules_by_category": by_cat }),
+                    )
+                    .unwrap_or_default()
+                } else {
+                    r#"{"rules_by_category": {}, "hint": "Call switch_project first"}"#.to_string()
+                };
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::text(text, "lore://rules")],
+                })
+            }
             _ => Err(ErrorData::resource_not_found(
                 "Unknown resource URI",
                 Some(serde_json::Value::String(request.uri)),
@@ -1795,18 +3591,66 @@ impl ServerHandler for LoreServer {
         }
     }
 
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, rmcp::ErrorData> {
+        Ok(ListPromptsResult {
+            prompts: Self::prompt_catalog()
+                .into_iter()
+                .map(|p| p.to_prompt())
+                .collect(),
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, rmcp::ErrorData> {
+        let def = Self::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == request.name)
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    "Unknown prompt name",
+                    Some(serde_json::json!({ "name": request.name })),
+                )
+            })?;
+
+        let args = request.arguments.unwrap_or_default();
+        for a in def.arguments {
+            if a.required && !args.contains_key(a.name) {
+                return Err(ErrorData::invalid_params(
+                    "Missing required argument",
+                    Some(serde_json::json!({
+                        "prompt": def.name,
+                        "argument": a.name,
+                    })),
+                ));
+            }
+        }
+
+        let text = def.render(&args);
+        Ok(GetPromptResult {
+            description: Some(def.description.to_string()),
+            messages: vec![PromptMessage::new_text(PromptMessageRole::User, text)],
+        })
+    }
+
     async fn list_tools(
         &self,
-        _request: PaginatedRequestParam,
+        _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, rmcp::Error> {
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
         let disabled = &self.config().disabled_tools;
+        let all = self.inner.tool_router.list_all();
         let tools = if disabled.is_empty() {
-            Self::tool_box().list()
+            all
         } else {
-            Self::tool_box()
-                .list()
-                .into_iter()
+            all.into_iter()
                 .filter(|t| !disabled.contains(t.name.as_ref()))
                 .collect()
         };
@@ -1820,7 +3664,7 @@ impl ServerHandler for LoreServer {
         &self,
         request: CallToolRequestParam,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let disabled = &self.config().disabled_tools;
         if disabled.contains(request.name.as_ref()) {
             return Err(ErrorData::invalid_params(
@@ -1834,7 +3678,7 @@ impl ServerHandler for LoreServer {
         }
 
         let ctx = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let result = Self::tool_box().call(ctx).await?;
+        let result = self.inner.tool_router.call(ctx).await?;
 
         self.inner.tool_call_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1852,11 +3696,80 @@ mod tests {
         assert!(LoreServer::parse_rule_category("Fact").is_ok());
         assert!(LoreServer::parse_rule_category("CONSTRAINT").is_ok());
         assert!(LoreServer::parse_rule_category("lesson").is_ok());
+        assert!(LoreServer::parse_rule_category("instruction").is_ok());
+        assert!(LoreServer::parse_rule_category("Instruction").is_ok());
     }
 
     #[test]
     fn test_parse_rule_category_invalid() {
         assert!(LoreServer::parse_rule_category("garbage").is_err());
+    }
+
+    fn fake_rule(content: &str) -> db::semantic::SemanticRule {
+        let now = chrono::Utc::now();
+        db::semantic::SemanticRule {
+            id: uuid::Uuid::new_v4(),
+            project_id: uuid::Uuid::new_v4(),
+            category: db::semantic::RuleCategory::Instruction,
+            content: content.to_string(),
+            embedding: None,
+            source_task_id: None,
+            created_at: now,
+            expires_at: None,
+            hit_count: 0,
+            last_used_at: None,
+            weight: None,
+            task_type_affinity: None,
+            tags: vec![],
+            valid_from: now,
+            valid_until: None,
+            is_always_injected: true,
+            project_name: None,
+        }
+    }
+
+    #[test]
+    fn test_procedural_block_under_budget() {
+        let rules = vec![fake_rule("short one"), fake_rule("another short")];
+        let v = build_procedural_block(rules);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 2);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["limit"], PROCEDURAL_RULE_LIMIT);
+        assert_eq!(v["byte_budget"], PROCEDURAL_CHAR_BUDGET);
+    }
+
+    #[test]
+    fn test_procedural_block_truncates_over_budget() {
+        let big = "x".repeat(PROCEDURAL_CHAR_BUDGET - 10);
+        let tail = "y".repeat(500);
+        let rules = vec![fake_rule(&big), fake_rule(&tail), fake_rule("never")];
+        let v = build_procedural_block(rules);
+        let included = v["rules"].as_array().unwrap();
+        assert!(included.len() <= 2, "third rule must be dropped");
+        assert_eq!(v["truncated"], true);
+        assert!(v["total_bytes"].as_u64().unwrap() >= (PROCEDURAL_CHAR_BUDGET - 10) as u64);
+    }
+
+    #[test]
+    fn test_procedural_block_single_oversize_is_included_and_flagged_truncated() {
+        // fail-open: the rule surfaces so the caller sees the standing
+        // instruction, but truncated=true because the byte budget was blown.
+        let big = "x".repeat(PROCEDURAL_CHAR_BUDGET + 500);
+        let v = build_procedural_block(vec![fake_rule(&big)]);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            v["truncated"], true,
+            "truncated must be true when budget is exceeded, even by a single included rule"
+        );
+        assert!(v["total_bytes"].as_u64().unwrap() > PROCEDURAL_CHAR_BUDGET as u64);
+    }
+
+    #[test]
+    fn test_procedural_block_empty_on_no_rules() {
+        let v = build_procedural_block(vec![]);
+        assert_eq!(v["rules"].as_array().unwrap().len(), 0);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["total_bytes"], 0);
     }
 
     #[test]
@@ -1909,21 +3822,63 @@ mod tests {
 
     #[test]
     fn test_tool_box_lists_all_tools() {
-        let tools = LoreServer::tool_box().list();
+        let tools = LoreServer::tool_router().list_all();
         assert!(
-            tools.len() >= 21,
-            "Expected at least 21 tools, got {}",
+            tools.len() >= 30,
+            "Expected at least 30 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert!(names.contains(&"remember_rule"));
         assert!(names.contains(&"forget_rule"));
+        assert!(names.contains(&"get_rule"));
         assert!(names.contains(&"generate_handoff"));
+        assert!(names.contains(&"link_tasks"));
+        assert!(names.contains(&"add_edge"));
+        assert!(names.contains(&"query_neighbors"));
+        assert!(names.contains(&"find_path"));
+        assert!(names.contains(&"get_rules_for_file"));
+        assert!(names.contains(&"find_callers"));
+        assert!(names.contains(&"find_callees"));
+        assert!(names.contains(&"shortest_code_path"));
+        assert!(names.contains(&"detect_communities"));
+        assert!(names.contains(&"get_community_members"));
+        assert!(names.contains(&"detect_cross_community_changes"));
+        assert!(names.contains(&"get_file_context"));
+        assert!(names.contains(&"generate_session_summary"));
+        assert!(names.contains(&"list_chunks_needing_summary"));
+        assert!(names.contains(&"submit_chunk_summaries"));
+        assert!(!names.contains(&"generate_summaries"));
+    }
+
+    #[test]
+    fn test_session_summary_client_prompt_mentions_schema() {
+        let p = build_session_summary_client_prompt();
+        assert!(p.contains("schema"));
+        assert!(p.contains("investigated"));
+        assert!(p.contains("next_steps"));
+        assert!(p.contains("remember_rule"));
+    }
+
+    #[test]
+    fn test_session_summary_schema_has_required_fields() {
+        let s = session_summary_schema();
+        let required = s["required"].as_array().unwrap();
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        for f in [
+            "investigated",
+            "learned",
+            "completed",
+            "blocked",
+            "next_steps",
+        ] {
+            assert!(names.contains(&f), "schema missing required field {f}");
+        }
     }
 
     #[test]
     fn test_disabled_tools_filter() {
-        let all = LoreServer::tool_box().list();
+        let all = LoreServer::tool_router().list_all();
         let disabled: std::collections::HashSet<String> = ["forget_rule", "export_memory"]
             .iter()
             .map(|s| s.to_string())
@@ -1936,5 +3891,124 @@ mod tests {
         assert!(!names.contains(&"forget_rule"));
         assert!(!names.contains(&"export_memory"));
         assert!(names.contains(&"remember_rule"));
+    }
+
+    #[test]
+    fn test_score_task_base_priority() {
+        let now = chrono::Utc::now();
+        let make = |priority: Option<&str>, rejected: i64| db::tasks::TaskSummary {
+            id: uuid::Uuid::new_v4(),
+            description: "test".into(),
+            status: db::TaskStatus::Active,
+            created_at: now,
+            priority: priority.map(|s| s.to_string()),
+            total_attempts: 0,
+            pending_attempts: 0,
+            rejected_attempts: rejected,
+            accepted_attempts: 0,
+        };
+
+        let (s1, _) = LoreServer::score_task(&make(Some("P1"), 0), now);
+        let (s2, _) = LoreServer::score_task(&make(Some("P2"), 0), now);
+        let (s4, _) = LoreServer::score_task(&make(None, 0), now);
+        assert!(s1 > s2);
+        assert!(s2 > s4);
+
+        // Rejections add 0.3 each
+        let (sr, _) = LoreServer::score_task(&make(None, 3), now);
+        assert!((sr - (1.0 + 0.9)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_score_task_staleness() {
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::days(10);
+        let summary = db::tasks::TaskSummary {
+            id: uuid::Uuid::new_v4(),
+            description: "stale".into(),
+            status: db::TaskStatus::Active,
+            created_at: old,
+            priority: None,
+            total_attempts: 0,
+            pending_attempts: 0,
+            rejected_attempts: 0,
+            accepted_attempts: 0,
+        };
+        let (score, explanation) = LoreServer::score_task(&summary, now);
+        // base(1.0) + staleness(10 * 0.1 = 1.0) = 2.0
+        assert!((score - 2.0).abs() < 0.1);
+        assert!(explanation.contains("stale"));
+    }
+
+    #[test]
+    fn test_prompt_catalog_has_all_templates() {
+        let names: Vec<&str> = LoreServer::prompt_catalog()
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        for expected in [
+            "plan_task",
+            "resume_work",
+            "review_ledger",
+            "diagnose_failure",
+            "record_lesson",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "prompt catalog missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prompt_def_to_prompt_encodes_required_args() {
+        let plan = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "plan_task")
+            .expect("plan_task present");
+        let prompt = plan.to_prompt();
+        assert_eq!(prompt.name, "plan_task");
+        let args = prompt.arguments.expect("arguments set");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "goal");
+        assert_eq!(args[0].required, Some(true));
+    }
+
+    #[test]
+    fn test_prompt_render_substitutes_args() {
+        let plan = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "plan_task")
+            .unwrap();
+        let mut args = serde_json::Map::new();
+        args.insert("goal".into(), serde_json::json!("Add OAuth login"));
+        let out = plan.render(&args);
+        assert!(out.contains("Add OAuth login"));
+        assert!(out.contains("start_task"));
+    }
+
+    #[test]
+    fn test_prompt_resume_work_has_no_required_args() {
+        let resume = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "resume_work")
+            .unwrap();
+        let prompt = resume.to_prompt();
+        assert!(prompt.arguments.is_none());
+    }
+
+    #[test]
+    fn test_diagnose_failure_renders_both_args() {
+        let diag = LoreServer::prompt_catalog()
+            .into_iter()
+            .find(|p| p.name == "diagnose_failure")
+            .unwrap();
+        let mut args = serde_json::Map::new();
+        args.insert("task_id".into(), serde_json::json!("abc-123"));
+        args.insert("error".into(), serde_json::json!("connection refused"));
+        let out = diag.render(&args);
+        assert!(out.contains("abc-123"));
+        assert!(out.contains("connection refused"));
+        assert!(out.contains("log_outcome"));
     }
 }

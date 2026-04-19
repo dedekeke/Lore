@@ -1,18 +1,21 @@
 use lore::config::{Config, McpTransport};
 use lore::{db, embeddings, server};
 use rmcp::ServiceExt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
 
-    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
+    let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "warn".into());
+    // ort emits graph-transformer/allocator spam via `ort::logging` tracing target;
+    // default to warn (RUST_LOG can still override e.g. `ort=debug` for diagnostics).
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&log_level))
+        .add_directive("ort=warn".parse().expect("valid ort directive"));
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level)),
-        )
+        .with_env_filter(filter)
         // MCP stdio transport uses stdout for JSON-RPC, so logs must go to stderr
         .with_writer(std::io::stderr)
         .init();
@@ -22,7 +25,7 @@ async fn main() {
 
     let pool = match db::create_pool(&config).await {
         Ok(pool) => {
-            tracing::info!("Database pool initialized");
+            tracing::debug!("Database pool initialized");
             pool
         }
         Err(e) => {
@@ -33,7 +36,7 @@ async fn main() {
 
     let embeddings = match embeddings::create_provider(&config) {
         Ok(provider) => {
-            tracing::info!("Embedding provider initialized");
+            tracing::debug!("Embedding provider initialized");
             provider
         }
         Err(e) => {
@@ -79,7 +82,17 @@ async fn main() {
             }
         }
         McpTransport::Sse => {
-            let addr: SocketAddr = ([0, 0, 0, 0], config.mcp_sse_port).into();
+            let bind: IpAddr = config.mcp_sse_bind.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = %config.mcp_sse_bind,
+                    "Invalid MCP_SSE_BIND, defaulting to 127.0.0.1"
+                );
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            });
+            let addr: SocketAddr = SocketAddr::new(bind, config.mcp_sse_port);
+            if bind.is_unspecified() {
+                tracing::warn!(%addr, "SSE bound to 0.0.0.0 — exposed to the network. Use MCP_SSE_BIND=127.0.0.1 for local-only.");
+            }
             tracing::info!(%addr, "Lore MCP server listening on SSE");
             let sse_server = match rmcp::transport::sse_server::SseServer::serve(addr).await {
                 Ok(s) => s,
@@ -91,9 +104,9 @@ async fn main() {
             let ct = sse_server.with_service(move || server.clone());
             // Block until ctrl-c
             tokio::signal::ctrl_c().await.ok();
-            tracing::info!("Shutting down SSE server");
+            tracing::debug!("Shutting down SSE server");
             ct.cancel();
         }
     }
-    tracing::info!("Lore MCP server shut down");
+    tracing::debug!("Lore MCP server shut down");
 }

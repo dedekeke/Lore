@@ -38,7 +38,7 @@ async fn backfill_rules(
     if stale.is_empty() {
         return Ok(());
     }
-    tracing::info!(count = stale.len(), "Backfilling rule embeddings");
+    tracing::debug!(count = stale.len(), "Backfilling rule embeddings");
 
     // Process in batches of 10
     for chunk in stale.chunks(10) {
@@ -53,7 +53,7 @@ async fn backfill_rules(
                 .await?;
         }
     }
-    tracing::info!(count = stale.len(), "Rule embeddings backfilled");
+    tracing::debug!(count = stale.len(), "Rule embeddings backfilled");
     Ok(())
 }
 
@@ -71,7 +71,7 @@ async fn backfill_attempts(
     if stale.is_empty() {
         return Ok(());
     }
-    tracing::info!(count = stale.len(), "Backfilling attempt embeddings");
+    tracing::debug!(count = stale.len(), "Backfilling attempt embeddings");
 
     for chunk in stale.chunks(10) {
         let texts: Vec<&str> = chunk.iter().map(|r| r.text.as_str()).collect();
@@ -85,6 +85,6 @@ async fn backfill_attempts(
                 .await?;
         }
     }
-    tracing::info!(count = stale.len(), "Attempt embeddings backfilled");
+    tracing::debug!(count = stale.len(), "Attempt embeddings backfilled");
     Ok(())
 }

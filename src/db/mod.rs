@@ -1,10 +1,16 @@
 pub mod attempts;
 pub mod codebase;
+pub mod codebase_edges;
+pub mod communities;
+pub mod knowledge_edges;
 pub mod pool;
 pub mod projects;
 pub mod retention;
+pub mod rule_chunk_links;
+pub mod scratchpad;
 pub mod semantic;
 pub mod snapshots;
+pub mod task_links;
 pub mod tasks;
 
 pub use attempts::AttemptOutcome;

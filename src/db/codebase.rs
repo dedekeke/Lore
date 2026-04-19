@@ -19,6 +19,9 @@ pub struct CodeChunk {
     pub indexed_at: DateTime<Utc>,
     pub summary: Option<String>,
     pub behavior_version: i32,
+    pub chunk_name: Option<String>,
+    pub chunk_kind: Option<String>,
+    pub community_id: Option<i32>,
 }
 
 /// Get existing file hashes for a project (for incremental indexing)
@@ -101,7 +104,6 @@ pub async fn insert_chunks(
     }
 
     let mut total = 0u64;
-    // Insert in batches of 100 to avoid parameter limits
     for batch in chunks.chunks(100) {
         let mut project_ids = Vec::with_capacity(batch.len());
         let mut paths = Vec::with_capacity(batch.len());
@@ -112,6 +114,8 @@ pub async fn insert_chunks(
         let mut embeddings: Vec<Option<Vector>> = Vec::with_capacity(batch.len());
         let mut hashes = Vec::with_capacity(batch.len());
         let mut versions = Vec::with_capacity(batch.len());
+        let mut names: Vec<Option<&str>> = Vec::with_capacity(batch.len());
+        let mut kinds: Vec<Option<&str>> = Vec::with_capacity(batch.len());
 
         for c in batch {
             project_ids.push(project_id);
@@ -123,17 +127,20 @@ pub async fn insert_chunks(
             embeddings.push(c.embedding.as_ref().map(|e| Vector::from(e.to_vec())));
             hashes.push(c.file_hash.as_str());
             versions.push(c.behavior_version);
+            names.push(c.chunk_name.as_deref());
+            kinds.push(c.chunk_kind.as_deref());
         }
 
         let result = sqlx::query(
             "INSERT INTO ai_memory.code_chunks \
-             (project_id, file_path, start_line, end_line, language, content, embedding, file_hash, behavior_version) \
-             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::vector[], $8::text[], $9::int[]) \
+             (project_id, file_path, start_line, end_line, language, content, embedding, file_hash, behavior_version, chunk_name, chunk_kind) \
+             SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::vector[], $8::text[], $9::int[], $10::text[], $11::text[]) \
              ON CONFLICT (project_id, file_path, start_line) DO UPDATE \
              SET content = EXCLUDED.content, \
                  embedding = COALESCE(EXCLUDED.embedding, ai_memory.code_chunks.embedding), \
                  file_hash = EXCLUDED.file_hash, end_line = EXCLUDED.end_line, \
                  language = EXCLUDED.language, behavior_version = EXCLUDED.behavior_version, \
+                 chunk_name = EXCLUDED.chunk_name, chunk_kind = EXCLUDED.chunk_kind, \
                  indexed_at = NOW()",
         )
         .bind(&project_ids)
@@ -145,6 +152,8 @@ pub async fn insert_chunks(
         .bind(&embeddings)
         .bind(&hashes)
         .bind(&versions)
+        .bind(&names)
+        .bind(&kinds)
         .execute(pool)
         .await?;
         total += result.rows_affected();
@@ -177,7 +186,7 @@ pub async fn search_chunks(
     let candidates = if !has_words {
         let sql = format!(
             "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-             embedding, file_hash, indexed_at, summary, behavior_version \
+             embedding, file_hash, indexed_at, summary, behavior_version, chunk_name, chunk_kind, community_id \
              FROM ai_memory.code_chunks \
              WHERE project_id = $1 AND embedding IS NOT NULL {file_filter} \
              ORDER BY embedding <=> $2::vector LIMIT $3"
@@ -211,7 +220,8 @@ pub async fn search_chunks(
                 FULL OUTER JOIN fts_ranked f ON v.id = f.id
             )
             SELECT s.id, s.project_id, s.file_path, s.start_line, s.end_line, s.language,
-                   s.content, s.embedding, s.file_hash, s.indexed_at, s.summary, s.behavior_version
+                   s.content, s.embedding, s.file_hash, s.indexed_at, s.summary, s.behavior_version, \
+                   s.chunk_name, s.chunk_kind, s.community_id
             FROM fused
             JOIN ai_memory.code_chunks s ON s.id = fused.id
             ORDER BY fused.rrf_score DESC
@@ -383,7 +393,7 @@ pub async fn get_chunks_needing_summary(
 ) -> Result<Vec<CodeChunk>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, file_path, start_line, end_line, language, content, \
-         embedding, file_hash, indexed_at, summary, behavior_version \
+         embedding, file_hash, indexed_at, summary, behavior_version, chunk_name, chunk_kind, community_id \
          FROM ai_memory.code_chunks \
          WHERE project_id = $1 AND summary IS NULL \
          ORDER BY indexed_at DESC LIMIT $2",
@@ -392,6 +402,21 @@ pub async fn get_chunks_needing_summary(
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// Count chunks still needing a summary (for pagination in `list_chunks_needing_summary`).
+pub async fn count_chunks_needing_summary(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND summary IS NULL",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 /// Batch update summaries for code chunks
@@ -442,6 +467,47 @@ pub async fn get_file_hashes_versioned(
     .await
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChunkMeta {
+    pub id: Uuid,
+    pub chunk_name: Option<String>,
+    pub chunk_kind: Option<String>,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub community_id: Option<i32>,
+}
+
+pub async fn get_file_chunks_metadata(
+    pool: &PgPool,
+    project_id: Uuid,
+    file_path: &str,
+) -> Result<Vec<ChunkMeta>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, Option<String>, Option<String>, i32, i32, Option<i32>)>(
+        "SELECT id, chunk_name, chunk_kind, start_line, end_line, community_id \
+         FROM ai_memory.code_chunks \
+         WHERE project_id = $1 AND file_path = $2 \
+         ORDER BY start_line",
+    )
+    .bind(project_id)
+    .bind(file_path)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(id, chunk_name, chunk_kind, start_line, end_line, community_id)| ChunkMeta {
+                    id,
+                    chunk_name,
+                    chunk_kind,
+                    start_line,
+                    end_line,
+                    community_id,
+                },
+            )
+            .collect()
+    })
+}
+
 pub struct NewCodeChunk {
     pub file_path: String,
     pub start_line: i32,
@@ -451,6 +517,8 @@ pub struct NewCodeChunk {
     pub embedding: Option<Vec<f32>>,
     pub file_hash: String,
     pub behavior_version: i32,
+    pub chunk_name: Option<String>,
+    pub chunk_kind: Option<String>,
 }
 
 #[cfg(test)]
@@ -472,6 +540,9 @@ mod tests {
             indexed_at: Utc::now(),
             summary: None,
             behavior_version: 1,
+            chunk_name: None,
+            chunk_kind: None,
+            community_id: None,
         }
     }
 

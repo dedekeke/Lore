@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::embeddings::{AnyEmbeddingProvider, EmbeddingProvider};
+use crate::tree_sitter_chunker::{self, CodeEdge};
 
 /// Detect language from file extension
 pub fn detect_language(path: &str) -> Option<String> {
@@ -15,7 +16,8 @@ pub fn detect_language(path: &str) -> Option<String> {
         "rs" => "rust",
         "py" | "pyi" => "python",
         "js" | "jsx" | "mjs" => "javascript",
-        "ts" | "tsx" => "typescript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
         "go" => "go",
         "java" => "java",
         "c" | "h" => "c",
@@ -204,7 +206,7 @@ pub async fn index_codebase(
         .await
         .map_err(IndexError::Db)?;
     if stale_reembedded > 0 {
-        tracing::info!(
+        tracing::debug!(
             stale_reembedded,
             "Marked chunks for re-embedding due to behavior_version bump"
         );
@@ -233,8 +235,8 @@ pub async fn index_codebase(
         git_changed_files(root)
     };
 
-    // Collect changed files and their chunks (no DB writes yet)
     let mut all_chunks: Vec<db::codebase::NewCodeChunk> = Vec::new();
+    let mut all_edges: Vec<CodeEdge> = Vec::new();
     let mut current_files: Vec<String> = Vec::new();
     let mut changed_files: Vec<String> = Vec::new();
     let mut files_scanned = 0u64;
@@ -265,7 +267,6 @@ pub async fn index_codebase(
         files_scanned += 1;
         current_files.push(rel_path.clone());
 
-        // Git fast-path: skip files git says are unchanged AND already indexed at current version
         if let Some(ref gc) = git_changed {
             if !gc.contains(&rel_path) {
                 if let Some((_, ver)) = existing.get(&rel_path) {
@@ -287,7 +288,6 @@ pub async fn index_codebase(
 
         let hash = sha256_hex(&content);
 
-        // SHA-256 fallback check (still needed for files git reports as changed but content is same)
         if let Some((existing_hash, ver)) = existing.get(&rel_path) {
             if existing_hash == &hash && *ver >= behavior_version {
                 files_skipped += 1;
@@ -298,25 +298,60 @@ pub async fn index_codebase(
         changed_files.push(rel_path.clone());
 
         let language = detect_language(&rel_path);
-        let ranges = chunk_file(&content, language.as_deref(), MAX_CHUNK_LINES);
+        let lang_str = language.as_deref().unwrap_or("");
+
+        // AST-first chunking: parse once, reuse tree for edge extraction
+        let ast_result = tree_sitter_chunker::chunk_file_ast(&content, lang_str);
         let lines: Vec<&str> = content.lines().collect();
 
-        for (start, end) in ranges {
-            let chunk_content: String = lines[start..end].join("\n");
-            if chunk_content.trim().is_empty() {
-                continue;
+        if let Some((ref chunks, ref tree)) = ast_result {
+            for ac in chunks {
+                let start = ac.start_line.saturating_sub(1);
+                let end = ac.end_line.min(lines.len());
+                let chunk_content: String = lines[start..end].join("\n");
+                if chunk_content.trim().is_empty() {
+                    continue;
+                }
+                all_chunks.push(db::codebase::NewCodeChunk {
+                    file_path: rel_path.clone(),
+                    start_line: ac.start_line as i32,
+                    end_line: ac.end_line as i32,
+                    language: language.clone(),
+                    content: chunk_content,
+                    embedding: None,
+                    file_hash: hash.clone(),
+                    behavior_version,
+                    chunk_name: ac.name.clone(),
+                    chunk_kind: Some(ac.kind.clone()),
+                });
             }
 
-            all_chunks.push(db::codebase::NewCodeChunk {
-                file_path: rel_path.clone(),
-                start_line: (start + 1) as i32,
-                end_line: end as i32,
-                language: language.clone(),
-                content: chunk_content,
-                embedding: None,
-                file_hash: hash.clone(),
-                behavior_version,
-            });
+            // Extract edges from the already-parsed tree (no re-parse)
+            let mut calls = tree_sitter_chunker::extract_calls(tree, &content, &rel_path);
+            let mut imports = tree_sitter_chunker::extract_imports(tree, &content, &rel_path);
+            all_edges.append(&mut calls);
+            all_edges.append(&mut imports);
+        } else {
+            // Regex fallback for unsupported languages or parse failures
+            let ranges = chunk_file(&content, language.as_deref(), MAX_CHUNK_LINES);
+            for (start, end) in ranges {
+                let chunk_content: String = lines[start..end].join("\n");
+                if chunk_content.trim().is_empty() {
+                    continue;
+                }
+                all_chunks.push(db::codebase::NewCodeChunk {
+                    file_path: rel_path.clone(),
+                    start_line: (start + 1) as i32,
+                    end_line: end as i32,
+                    language: language.clone(),
+                    content: chunk_content,
+                    embedding: None,
+                    file_hash: hash.clone(),
+                    behavior_version,
+                    chunk_name: None,
+                    chunk_kind: None,
+                });
+            }
         }
     }
 
@@ -363,6 +398,34 @@ pub async fn index_codebase(
                 db::codebase::delete_stale_start_lines(pool, project_id, file_path, &valid_starts)
                     .await
                     .map_err(IndexError::Db)?;
+        }
+    }
+
+    // Delete old edges for changed files, then insert fresh edges
+    for file_path in &changed_files {
+        let _ = db::codebase_edges::delete_file_edges(pool, project_id, file_path)
+            .await
+            .map_err(IndexError::Db)?;
+    }
+    let edges_inserted = db::codebase_edges::insert_edges(pool, project_id, &all_edges)
+        .await
+        .map_err(IndexError::Db)?;
+    if edges_inserted > 0 {
+        tracing::debug!(edges_inserted, "Inserted codebase edges");
+    }
+
+    // Best-effort community detection after edges change
+    if edges_inserted > 0 || !changed_files.is_empty() {
+        match crate::community::detect_communities(pool, project_id).await {
+            Ok(cr) => {
+                tracing::debug!(
+                    communities = cr.num_communities,
+                    assigned = cr.num_assigned,
+                    modularity = format!("{:.4}", cr.modularity),
+                    "Community detection complete"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "Community detection failed (non-fatal)"),
         }
     }
 

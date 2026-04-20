@@ -1,6 +1,6 @@
 mod common;
 
-use lore::db::attempts::{self, AttemptOutcome};
+use lore::db::attempts::{self, AttemptOutcome, LogOutcomeArgs};
 use lore::db::tasks::TaskStatus;
 use lore::db::{projects, tasks};
 
@@ -109,14 +109,16 @@ async fn test_get_task_stats_with_attempts() {
         .unwrap();
     attempts::log_outcome(
         &pool,
-        a1,
-        AttemptOutcome::Rejected,
-        "bad approach",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a1,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "bad approach",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -125,14 +127,16 @@ async fn test_get_task_stats_with_attempts() {
         .unwrap();
     attempts::log_outcome(
         &pool,
-        a2,
-        AttemptOutcome::Accepted,
-        "works",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a2,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "works",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();

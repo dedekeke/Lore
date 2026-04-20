@@ -144,3 +144,23 @@ async fn test_search_similar_failures() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].approach_summary, "approach A");
 }
+
+/// Confirms migration 20260420154629 created the 3 partial indexes.
+/// Regression guard: dashboard queries filtering by session_id or
+/// resolved_by_*_id must not regress to sequential scans.
+#[tokio::test]
+async fn test_attempts_partial_indexes_exist() {
+    let (pool, _c) = common::setup_db().await;
+    let names: Vec<(String,)> = sqlx::query_as(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = 'ai_memory' AND tablename = 'attempts' \
+           AND indexname IN (\
+               'idx_attempts_session_id', \
+               'idx_attempts_resolved_by_agent_id', \
+               'idx_attempts_resolved_by_session_id')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(names.len(), 3, "expected 3 partial indexes, got {names:?}");
+}

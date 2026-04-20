@@ -146,10 +146,57 @@ async fn test_full_task_lifecycle() {
             task_id,
             lesson: Some("always check compilation first".into()),
             resolved_attempt_id: None,
+            followups: None,
         }))
         .await
         .unwrap();
     assert!(extract_json(&complete)["success"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_complete_task_creates_followups_as_child_tasks() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("followups", "/tmp"))
+        .await
+        .unwrap();
+
+    let parent = server
+        .start_task(start_task_params("main work"))
+        .await
+        .unwrap();
+    let parent_id = extract_json(&parent)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let result = server
+        .complete_task(Parameters(CompleteTaskParams {
+            task_id: parent_id.clone(),
+            lesson: None,
+            resolved_attempt_id: None,
+            followups: Some(vec![
+                "refactor log_outcome to params struct".into(),
+                "index session_id on attempts".into(),
+                "   ".into(),
+            ]),
+        }))
+        .await
+        .unwrap();
+
+    let json = extract_json(&result);
+    assert!(json["success"].as_bool().unwrap());
+    let ids = json["followup_task_ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 2, "empty/whitespace entries should be skipped");
+
+    let listed = server
+        .list_subtasks(Parameters(lore::server::ListSubtasksParams {
+            parent_task_id: parent_id,
+        }))
+        .await
+        .unwrap();
+    let subtasks = extract_json(&listed);
+    assert_eq!(subtasks.as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -375,6 +422,7 @@ async fn test_get_task_stats() {
             task_id: task_id.clone(),
             lesson: None,
             resolved_attempt_id: None,
+            followups: None,
         }))
         .await
         .unwrap();

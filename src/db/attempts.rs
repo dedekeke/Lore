@@ -100,6 +100,9 @@ pub async fn list_attempts(
     }
 }
 
+/// Record an attempt outcome. `resolved_by_agent_id` and `resolved_by_session_id` use
+/// `COALESCE`: passing `None` preserves the previously stored value. Once set, this
+/// function cannot clear them — a follow-up path would need an explicit clear API.
 #[allow(clippy::too_many_arguments)]
 pub async fn log_outcome(
     pool: &PgPool,

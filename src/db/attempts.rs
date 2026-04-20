@@ -103,6 +103,7 @@ pub async fn list_attempts(
 /// Input to `log_outcome`. Grouped into a struct so callers use named fields
 /// and new optional columns (resolver identity, future work) can be added
 /// without breaking every call site.
+#[derive(Debug)]
 pub struct LogOutcomeArgs<'a> {
     pub attempt_id: Uuid,
     pub outcome: AttemptOutcome,

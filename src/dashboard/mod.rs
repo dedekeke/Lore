@@ -257,9 +257,13 @@ async fn task_detail(
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let snapshots = db::snapshots::list_snapshots(&state.pool, id)
-        .await
-        .unwrap_or_default();
+    let snapshots = match db::snapshots::list_snapshots(&state.pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(task_id = %id, error = %e, "list_snapshots failed; rendering task_detail without snapshots");
+            Vec::new()
+        }
+    };
     let subtasks = db::tasks::list_subtasks(&state.pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -678,6 +682,12 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     // Captures the "log follow-ups after merge/complete_task" workflow; a count
     // matching `completed_tasks` means every completion begot at least one
     // deferred review task.
+    //
+    // Heuristic, not exact. Known limitations: (a) subtask created before
+    // `complete_task` is invoked but after real work finished is undercounted;
+    // (b) bulk-imported subtasks with older `created_at` are undercounted. An
+    // explicit `task_links.link_type='follow_up'` is the rigorous fix — logged
+    // as a follow-up of its own.
     let followup_parents: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT parent.id) \
          FROM ai_memory.tasks parent \

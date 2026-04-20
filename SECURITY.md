@@ -38,6 +38,6 @@ task descriptions.** If you find a pattern the scrubber misses, a PR against
 
 ## Dependencies
 
-We track advisories on the Rust toolchain and our direct dependencies via
-`cargo audit` in CI (when present). If you notice a CVE affecting a crate we
-pin, please open an issue — we'll bump.
+Dependency advisories are tracked manually at the moment — `cargo audit` is
+not wired into CI yet. If you spot a CVE affecting a crate we pin, please
+open an issue (or PR the bump directly) and we'll prioritize.

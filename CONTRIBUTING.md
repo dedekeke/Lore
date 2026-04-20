@@ -20,7 +20,8 @@ graphs — PRs, bug reports, and design discussions are all welcome.
 ## Dev loop
 
 ```bash
-./start.sh               # boots Postgres (docker) + builds + runs daemon
+cp .env.example .env     # configure DB URL + ports; keep .env untracked
+./start.sh               # requires Docker running; boots Postgres + builds + runs daemon
 cargo fmt                # before every push
 cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all-features

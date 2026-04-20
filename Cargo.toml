@@ -2,6 +2,7 @@
 name = "lore"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94"
 license = "MIT"
 description = "Persistent episodic memory + codebase graph for AI coding assistants, exposed over MCP."
 readme = "README.md"

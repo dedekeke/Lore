@@ -60,14 +60,20 @@ Fresh aggregate metrics from this replay, keyed by dataset name.
 {
   "mini": {
     "k": 10,
-    "num_cases": 12,
-    "num_recalls": 12,
-    "num_scored": 11,
+    "num_cases": 15,
+    "num_recalls": 14,
+    "num_scored": 13,
     "num_negative": 1,
     "negative_pass_rate": 0.0,
-    "mean_precision_at_k": 0.3636,
-    "mean_recall_at_k": 0.5455,
-    "mean_mrr": 0.4545,
+    "mean_precision_at_k": 0.4231,
+    "mean_recall_at_k": 0.6154,
+    "mean_mrr": 0.5,
+    "num_contexts": 3,
+    "num_contexts_scored": 2,
+    "num_contexts_negative": 1,
+    "mean_context_precision": 0.0,
+    "mean_context_recall": 0.0,
+    "context_negative_pass_rate": 1.0,
     "per_case": [ ... ]
   }
 }
@@ -84,10 +90,13 @@ Fresh aggregate metrics from this replay, keyed by dataset name.
     {
       "name": "mini",
       "deltas": [
-        { "name": "mean_precision_at_k", "baseline": 0.3636, "current": 0.3636, "delta": 0.0, "regression": false },
-        { "name": "mean_recall_at_k",    "baseline": 0.5455, "current": 0.5455, "delta": 0.0, "regression": false },
-        { "name": "mean_mrr",            "baseline": 0.4545, "current": 0.4545, "delta": 0.0, "regression": false },
-        { "name": "negative_pass_rate",  "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false }
+        { "name": "mean_precision_at_k",        "baseline": 0.4231, "current": 0.4231, "delta": 0.0, "regression": false },
+        { "name": "mean_recall_at_k",           "baseline": 0.6154, "current": 0.6154, "delta": 0.0, "regression": false },
+        { "name": "mean_mrr",                   "baseline": 0.5,    "current": 0.5,    "delta": 0.0, "regression": false },
+        { "name": "negative_pass_rate",         "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "mean_context_precision",     "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "mean_context_recall",        "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "context_negative_pass_rate", "baseline": 1.0,    "current": 1.0,    "delta": 0.0, "regression": false }
       ],
       "shape_mismatches": []
     }
@@ -167,7 +176,7 @@ See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) p
 - `StartTask { task_ref }` → `task-{task_ref}` → task UUID
 - `ProposeAttempt { task_ref }` → `attempt-{task_ref}-a{N}` (N = 1-based index of attempts for that task) → attempt UUID
 - `RememberRule { label, always_inject? }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection). `always_inject` defaults to the server's per-category default when omitted.
-- `GetActiveContext { expected_procedural_labels }` — calls `get_active_context` and records `procedural.rules[].id` into `CaseRun.contexts`. Used for Phase 3 procedural-memory surfacing checks (`mini-013`/`014`/`015`). Scoring on the context channel is a P3 follow-up; today the harness only records the raw inputs/outputs.
+- `GetActiveContext { expected_procedural_labels }` — calls `get_active_context` and records `procedural.rules[].id` into `CaseRun.contexts`. Used for Phase 3 procedural-memory surfacing checks (`mini-013`/`014`/`015`). Scored as a separate channel (see "Context channel" below) — rank-agnostic precision/recall plus a negative-pass bit for empty-expected cases.
 
 P1-T3 grades by mapping the UUIDs returned by `recall_rules` back to labels via this map and comparing to `expected_hits`.
 
@@ -185,6 +194,15 @@ An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision 
 - Aggregate means are taken across individual `RecallRun`s, not cases — a case with more queries contributes proportionally.
 - Labels that did not resolve to a UUID at replay time (near-duplicate short-circuit, or `task-*`/`attempt-*` references that `recall_rules` cannot return) stay in recall's denominator but can never enter the numerator — they score as misses.
 - Negative cases (empty `expected_hits`, e.g. `mini-011`) have **undefined** precision/recall/MRR and are excluded from those means. They report a `negative_pass: bool` instead (`true` iff the server returned nothing), aggregated separately into `DatasetMetrics::negative_pass_rate`.
+
+### Context channel
+
+`GetActiveContext` events are scored on a separate channel from `RecallRules`:
+
+- **precision** = `|returned ∩ expected| / |returned|`. Rank-agnostic — the procedural block is an injected set, not a ranked list, so there is no `@k` cutoff and no MRR.
+- **recall** = `|returned ∩ expected| / |expected|`. Same unresolved-label miss rule as `RecallRules`.
+- Negative cases (empty `expected_procedural_labels`) report `negative_pass: bool` (`true` iff the server returned no rules) and are excluded from the precision/recall means.
+- Aggregates surface as `mean_context_precision`, `mean_context_recall`, `context_negative_pass_rate`, plus shape counts (`num_contexts`, `num_contexts_scored`, `num_contexts_negative`). All four metrics are subject to the same `DEFAULT_TOLERANCE` regression gate.
 
 ## Known follow-ups
 

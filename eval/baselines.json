@@ -15,6 +15,12 @@
       "mean_precision_at_k": 0.4230769230769231,
       "mean_recall_at_k": 0.6153846153846154,
       "mean_mrr": 0.5,
+      "num_contexts": 3,
+      "num_contexts_scored": 2,
+      "num_contexts_negative": 1,
+      "mean_context_precision": 0.0,
+      "mean_context_recall": 0.0,
+      "context_negative_pass_rate": 1.0,
       "per_case": [
         {
           "case_id": "mini-001-recall-coding-style",
@@ -29,7 +35,10 @@
           ],
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 1.0
+          "mean_mrr": 1.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-002-attempt-ledger",
@@ -44,7 +53,10 @@
           ],
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
-          "mean_mrr": 0.0
+          "mean_mrr": 0.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-003-lesson-consolidation",
@@ -59,7 +71,10 @@
           ],
           "mean_precision_at_k": 1.0,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 1.0
+          "mean_mrr": 1.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-004-cross-task-link",
@@ -74,7 +89,10 @@
           ],
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
-          "mean_mrr": 0.0
+          "mean_mrr": 0.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-005-contradiction-detection",
@@ -89,7 +107,10 @@
           ],
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 1.0
+          "mean_mrr": 1.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-006-temporal-validity",
@@ -104,7 +125,10 @@
           ],
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 0.5
+          "mean_mrr": 0.5,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-007-failure-search",
@@ -119,7 +143,10 @@
           ],
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
-          "mean_mrr": 0.0
+          "mean_mrr": 0.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-008-multi-hit-recall",
@@ -134,7 +161,10 @@
           ],
           "mean_precision_at_k": 1.0,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 1.0
+          "mean_mrr": 1.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-009-task-completion",
@@ -149,7 +179,10 @@
           ],
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
-          "mean_mrr": 0.0
+          "mean_mrr": 0.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-010-irrelevant-noise",
@@ -164,7 +197,10 @@
           ],
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 0.5
+          "mean_mrr": 0.5,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-011-zero-hit-precision",
@@ -179,7 +215,10 @@
           ],
           "mean_precision_at_k": null,
           "mean_recall_at_k": null,
-          "mean_mrr": null
+          "mean_mrr": null,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-012-incomplete-workflow",
@@ -194,7 +233,10 @@
           ],
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
-          "mean_mrr": 0.0
+          "mean_mrr": 0.0,
+          "per_context": [],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-013-procedural-always-inject-surfaces",
@@ -209,14 +251,32 @@
           ],
           "mean_precision_at_k": 1.0,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 1.0
+          "mean_mrr": 1.0,
+          "per_context": [
+            {
+              "precision": 0.0,
+              "recall": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_context_precision": 0.0,
+          "mean_context_recall": 0.0
         },
         {
           "case_id": "mini-014-non-procedural-not-surfaced",
           "per_recall": [],
           "mean_precision_at_k": null,
           "mean_recall_at_k": null,
-          "mean_mrr": null
+          "mean_mrr": null,
+          "per_context": [
+            {
+              "precision": null,
+              "recall": null,
+              "negative_pass": true
+            }
+          ],
+          "mean_context_precision": null,
+          "mean_context_recall": null
         },
         {
           "case_id": "mini-015-mixed-inject-only-flagged-surfaces",
@@ -231,7 +291,16 @@
           ],
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
-          "mean_mrr": 0.5
+          "mean_mrr": 0.5,
+          "per_context": [
+            {
+              "precision": 0.0,
+              "recall": 0.0,
+              "negative_pass": null
+            }
+          ],
+          "mean_context_precision": 0.0,
+          "mean_context_recall": 0.0
         }
       ]
     }

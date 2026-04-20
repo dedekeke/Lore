@@ -268,6 +268,24 @@ fn diff_dataset(
             base.num_negative, cur.num_negative
         ));
     }
+    if base.num_contexts != cur.num_contexts {
+        shape_mismatches.push(format!(
+            "num_contexts: baseline={} current={}",
+            base.num_contexts, cur.num_contexts
+        ));
+    }
+    if base.num_contexts_scored != cur.num_contexts_scored {
+        shape_mismatches.push(format!(
+            "num_contexts_scored: baseline={} current={}",
+            base.num_contexts_scored, cur.num_contexts_scored
+        ));
+    }
+    if base.num_contexts_negative != cur.num_contexts_negative {
+        shape_mismatches.push(format!(
+            "num_contexts_negative: baseline={} current={}",
+            base.num_contexts_negative, cur.num_contexts_negative
+        ));
+    }
 
     let deltas = vec![
         metric_delta(
@@ -287,6 +305,24 @@ fn diff_dataset(
             "negative_pass_rate",
             base.negative_pass_rate,
             cur.negative_pass_rate,
+            tolerance,
+        ),
+        metric_delta(
+            "mean_context_precision",
+            base.mean_context_precision,
+            cur.mean_context_precision,
+            tolerance,
+        ),
+        metric_delta(
+            "mean_context_recall",
+            base.mean_context_recall,
+            cur.mean_context_recall,
+            tolerance,
+        ),
+        metric_delta(
+            "context_negative_pass_rate",
+            base.context_negative_pass_rate,
+            cur.context_negative_pass_rate,
             tolerance,
         ),
     ];
@@ -329,6 +365,12 @@ mod tests {
             mean_precision_at_k: p,
             mean_recall_at_k: r,
             mean_mrr: mrr,
+            num_contexts: 0,
+            num_contexts_scored: 0,
+            num_contexts_negative: 0,
+            mean_context_precision: 0.0,
+            mean_context_recall: 0.0,
+            context_negative_pass_rate: 0.0,
             per_case: vec![],
         }
     }

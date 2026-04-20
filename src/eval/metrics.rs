@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::harness::{CaseRun, RecallRun};
+use super::harness::{CaseRun, ContextRun, RecallRun};
 
 /// Metrics for a single `RecallRules` event. All three ranking metrics are
 /// `Option` because a negative case (empty `expected_hits`) has no defined
@@ -46,9 +46,25 @@ pub struct RecallMetrics {
     pub negative_pass: Option<bool>,
 }
 
-/// Metrics rolled up per case. Means are taken only over recalls whose
-/// metric is `Some(_)` — negative cases don't count toward the precision/
-/// recall/MRR means.
+/// Metrics for a single `GetActiveContext` event. Precision/recall are
+/// `Option` for the same reason as `RecallMetrics`: a negative case (empty
+/// `expected_procedural_labels`) has no ranking metric, only a pass bit.
+/// Rank-agnostic (the procedural block is a set, not a ranked list) so no
+/// MRR is reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[must_use]
+pub struct ContextMetrics {
+    pub precision: Option<f64>,
+    pub recall: Option<f64>,
+    /// `Some(true)` when the case expected no rules and got none;
+    /// `Some(false)` when it expected none but got some; `None` for
+    /// positive cases.
+    pub negative_pass: Option<bool>,
+}
+
+/// Metrics rolled up per case. Means are taken only over recalls/contexts
+/// whose metric is `Some(_)` — negative cases don't count toward the
+/// precision/recall/MRR means.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[must_use]
 pub struct CaseMetrics {
@@ -57,6 +73,12 @@ pub struct CaseMetrics {
     pub mean_precision_at_k: Option<f64>,
     pub mean_recall_at_k: Option<f64>,
     pub mean_mrr: Option<f64>,
+    #[serde(default)]
+    pub per_context: Vec<ContextMetrics>,
+    #[serde(default)]
+    pub mean_context_precision: Option<f64>,
+    #[serde(default)]
+    pub mean_context_recall: Option<f64>,
 }
 
 /// Dataset-level aggregate. Means are taken over individual `RecallRun`s
@@ -79,6 +101,27 @@ pub struct DatasetMetrics {
     pub mean_precision_at_k: f64,
     pub mean_recall_at_k: f64,
     pub mean_mrr: f64,
+    /// Total number of `GetActiveContext` events across all cases.
+    #[serde(default)]
+    pub num_contexts: usize,
+    /// Positive context events (expected at least one procedural rule).
+    #[serde(default)]
+    pub num_contexts_scored: usize,
+    /// Negative context events (expected no procedural rules).
+    #[serde(default)]
+    pub num_contexts_negative: usize,
+    /// Mean precision over positive context events. 0.0 when
+    /// `num_contexts_scored == 0`.
+    #[serde(default)]
+    pub mean_context_precision: f64,
+    /// Mean recall over positive context events. 0.0 when
+    /// `num_contexts_scored == 0`.
+    #[serde(default)]
+    pub mean_context_recall: f64,
+    /// Fraction of negative context events that passed (server returned no
+    /// procedural rules). 0.0 when `num_contexts_negative == 0`.
+    #[serde(default)]
+    pub context_negative_pass_rate: f64,
     pub per_case: Vec<CaseMetrics>,
 }
 
@@ -148,8 +191,51 @@ pub fn score_recall(run: &RecallRun, labels: &HashMap<String, String>, k: usize)
     }
 }
 
-/// Score every recall in a case and compute per-case means. Means skip
-/// negative (empty-expected) recalls.
+/// Score a single `GetActiveContext` event. The procedural block is a set
+/// (not a ranked list) so precision/recall are computed over the full
+/// returned ID list without a `k` cutoff.
+pub fn score_context(run: &ContextRun, labels: &HashMap<String, String>) -> ContextMetrics {
+    // Same resolution rule as `score_recall`: labels that never bound to a
+    // UUID (deduplicated or never stored) stay in the denominator as misses.
+    let expected_uuids: HashSet<&str> = run
+        .expected_labels
+        .iter()
+        .filter_map(|label| labels.get(label).map(String::as_str))
+        .collect();
+    let returned: HashSet<&str> = run
+        .returned_procedural_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    if run.expected_labels.is_empty() {
+        return ContextMetrics {
+            precision: None,
+            recall: None,
+            negative_pass: Some(run.returned_procedural_ids.is_empty()),
+        };
+    }
+
+    let hits = expected_uuids
+        .iter()
+        .filter(|id| returned.contains(*id))
+        .count();
+    let precision = if returned.is_empty() {
+        0.0
+    } else {
+        hits as f64 / returned.len() as f64
+    };
+    let recall = hits as f64 / run.expected_labels.len() as f64;
+
+    ContextMetrics {
+        precision: Some(precision),
+        recall: Some(recall),
+        negative_pass: None,
+    }
+}
+
+/// Score every recall + context in a case and compute per-case means.
+/// Means skip negative (empty-expected) events.
 pub fn score_case(run: &CaseRun, k: usize) -> CaseMetrics {
     let per_recall: Vec<RecallMetrics> = run
         .recalls
@@ -161,12 +247,23 @@ pub fn score_case(run: &CaseRun, k: usize) -> CaseMetrics {
     let mean_recall = mean_opt(per_recall.iter().filter_map(|m| m.recall_at_k));
     let mean_mrr = mean_opt(per_recall.iter().filter_map(|m| m.mrr));
 
+    let per_context: Vec<ContextMetrics> = run
+        .contexts
+        .iter()
+        .map(|c| score_context(c, &run.labels))
+        .collect();
+    let mean_context_precision = mean_opt(per_context.iter().filter_map(|m| m.precision));
+    let mean_context_recall = mean_opt(per_context.iter().filter_map(|m| m.recall));
+
     CaseMetrics {
         case_id: run.case_id.clone(),
         per_recall,
         mean_precision_at_k: mean_precision,
         mean_recall_at_k: mean_recall,
         mean_mrr,
+        per_context,
+        mean_context_precision,
+        mean_context_recall,
     }
 }
 
@@ -202,6 +299,30 @@ pub fn aggregate(runs: &[CaseRun], k: usize) -> DatasetMetrics {
         negative_passes as f64 / num_negative as f64
     };
 
+    let all_contexts: Vec<&ContextMetrics> =
+        per_case.iter().flat_map(|c| c.per_context.iter()).collect();
+    let num_contexts = all_contexts.len();
+    let num_contexts_scored = all_contexts
+        .iter()
+        .filter(|m| m.precision.is_some())
+        .count();
+    let num_contexts_negative = all_contexts
+        .iter()
+        .filter(|m| m.negative_pass.is_some())
+        .count();
+    let mean_context_precision =
+        mean_opt(all_contexts.iter().filter_map(|m| m.precision)).unwrap_or(0.0);
+    let mean_context_recall = mean_opt(all_contexts.iter().filter_map(|m| m.recall)).unwrap_or(0.0);
+    let context_negative_passes = all_contexts
+        .iter()
+        .filter(|m| matches!(m.negative_pass, Some(true)))
+        .count();
+    let context_negative_pass_rate = if num_contexts_negative == 0 {
+        0.0
+    } else {
+        context_negative_passes as f64 / num_contexts_negative as f64
+    };
+
     DatasetMetrics {
         k,
         num_cases: runs.len(),
@@ -212,6 +333,12 @@ pub fn aggregate(runs: &[CaseRun], k: usize) -> DatasetMetrics {
         mean_precision_at_k: mean_precision,
         mean_recall_at_k: mean_recall,
         mean_mrr,
+        num_contexts,
+        num_contexts_scored,
+        num_contexts_negative,
+        mean_context_precision,
+        mean_context_recall,
+        context_negative_pass_rate,
         per_case,
     }
 }
@@ -241,6 +368,13 @@ mod tests {
             query: query.to_string(),
             expected_labels: expected.iter().map(|s| s.to_string()).collect(),
             returned_ids: returned.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn context(expected: &[&str], returned: &[&str]) -> ContextRun {
+        ContextRun {
+            expected_labels: expected.iter().map(|s| s.to_string()).collect(),
+            returned_procedural_ids: returned.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -369,6 +503,95 @@ mod tests {
         assert_eq!(agg.num_scored, 4);
         assert_eq!(agg.num_negative, 0);
         assert!((agg.mean_precision_at_k - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn context_perfect_hit() {
+        let l = labels(&[("rule-a", "uuid-a"), ("rule-b", "uuid-b")]);
+        let c = context(&["rule-a", "rule-b"], &["uuid-a", "uuid-b"]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, Some(1.0));
+        assert_eq!(m.recall, Some(1.0));
+        assert_eq!(m.negative_pass, None);
+    }
+
+    #[test]
+    fn context_partial_precision() {
+        // 1 hit out of 2 returned → precision 0.5; 1 hit out of 1 expected → recall 1.0.
+        let l = labels(&[("rule-a", "uuid-a")]);
+        let c = context(&["rule-a"], &["uuid-a", "uuid-noise"]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, Some(0.5));
+        assert_eq!(m.recall, Some(1.0));
+    }
+
+    #[test]
+    fn context_partial_recall() {
+        // 1 hit out of 1 returned → precision 1.0; 1 hit out of 2 expected → recall 0.5.
+        let l = labels(&[("rule-a", "uuid-a"), ("rule-b", "uuid-b")]);
+        let c = context(&["rule-a", "rule-b"], &["uuid-a"]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, Some(1.0));
+        assert_eq!(m.recall, Some(0.5));
+    }
+
+    #[test]
+    fn context_empty_return_is_precision_zero_on_positive() {
+        let l = labels(&[("rule-a", "uuid-a")]);
+        let c = context(&["rule-a"], &[]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, Some(0.0));
+        assert_eq!(m.recall, Some(0.0));
+    }
+
+    #[test]
+    fn context_unresolved_label_counts_as_miss() {
+        let l = labels(&[("rule-a", "uuid-a")]);
+        let c = context(&["rule-a", "rule-b-deduped"], &["uuid-a"]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, Some(1.0));
+        assert_eq!(m.recall, Some(0.5));
+    }
+
+    #[test]
+    fn context_negative_empty_return_passes() {
+        let l = HashMap::new();
+        let c = context(&[], &[]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.precision, None);
+        assert_eq!(m.recall, None);
+        assert_eq!(m.negative_pass, Some(true));
+    }
+
+    #[test]
+    fn context_negative_nonempty_return_fails() {
+        let l = HashMap::new();
+        let c = context(&[], &["uuid-x"]);
+        let m = score_context(&c, &l);
+        assert_eq!(m.negative_pass, Some(false));
+    }
+
+    #[test]
+    fn aggregate_counts_context_channel_separately() {
+        let case = CaseRun {
+            case_id: "ctx".into(),
+            labels: labels(&[("rule-a", "uuid-a"), ("rule-b", "uuid-b")]),
+            recalls: vec![recall("q", &["rule-a"], &["uuid-a"])],
+            contexts: vec![
+                context(&["rule-a"], &["uuid-a"]),
+                context(&["rule-b"], &["uuid-x"]),
+                context(&[], &[]),
+            ],
+            deduplicated_labels: vec![],
+        };
+        let agg = aggregate(&[case], 10);
+        assert_eq!(agg.num_contexts, 3);
+        assert_eq!(agg.num_contexts_scored, 2);
+        assert_eq!(agg.num_contexts_negative, 1);
+        // Two positives: (1.0, 0.0) → mean 0.5.
+        assert!((agg.mean_context_precision - 0.5).abs() < 1e-9);
+        assert!((agg.mean_context_recall - 0.5).abs() < 1e-9);
+        assert_eq!(agg.context_negative_pass_rate, 1.0);
     }
 
     #[test]

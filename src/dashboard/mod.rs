@@ -257,6 +257,9 @@ async fn task_detail(
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snapshots = db::snapshots::list_snapshots(&state.pool, id)
+        .await
+        .unwrap_or_default();
     let subtasks = db::tasks::list_subtasks(&state.pool, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -276,7 +279,7 @@ async fn task_detail(
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
+        context! { task => task, attempts => attempts, snapshots => snapshots, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
     )
 }
 
@@ -671,6 +674,28 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
         "—".to_string()
     };
 
+    // Followups = completed tasks that spawned at least one subtask AFTER completion.
+    // Captures the "log follow-ups after merge/complete_task" workflow; a count
+    // matching `completed_tasks` means every completion begot at least one
+    // deferred review task.
+    let followup_parents: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT parent.id) \
+         FROM ai_memory.tasks parent \
+         JOIN ai_memory.tasks child ON child.parent_task_id = parent.id \
+         WHERE parent.status = 'completed' \
+           AND parent.completed_at IS NOT NULL \
+           AND child.created_at > parent.completed_at",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+    let followups_captured = followup_parents as usize;
+    let followups_rate = if completed_tasks > 0 {
+        (followups_captured * 100) / completed_tasks
+    } else {
+        0
+    };
+
     render(
         &state.env,
         "analytics.html",
@@ -691,6 +716,8 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
             total_attempt_bytes => total_attempt_bytes,
             context_wipes => total_context_wipes,
             avg_attempts_per_task => avg_attempts_per_task,
+            followups_captured => followups_captured,
+            followups_rate => followups_rate,
             projects => project_stats,
         },
     )

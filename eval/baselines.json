@@ -36,7 +36,6 @@
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 1.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -54,7 +53,6 @@
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
           "mean_mrr": 0.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -72,7 +70,6 @@
           "mean_precision_at_k": 1.0,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 1.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -90,7 +87,6 @@
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
           "mean_mrr": 0.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -108,7 +104,6 @@
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 1.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -126,7 +121,6 @@
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 0.5,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -144,7 +138,6 @@
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
           "mean_mrr": 0.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -162,7 +155,6 @@
           "mean_precision_at_k": 1.0,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 1.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -180,7 +172,6 @@
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
           "mean_mrr": 0.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -198,7 +189,6 @@
           "mean_precision_at_k": 0.5,
           "mean_recall_at_k": 1.0,
           "mean_mrr": 0.5,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -216,7 +206,6 @@
           "mean_precision_at_k": null,
           "mean_recall_at_k": null,
           "mean_mrr": null,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },
@@ -234,7 +223,6 @@
           "mean_precision_at_k": 0.0,
           "mean_recall_at_k": 0.0,
           "mean_mrr": 0.0,
-          "per_context": [],
           "mean_context_precision": null,
           "mean_context_recall": null
         },

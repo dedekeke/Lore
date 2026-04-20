@@ -73,7 +73,7 @@ pub struct CaseMetrics {
     pub mean_precision_at_k: Option<f64>,
     pub mean_recall_at_k: Option<f64>,
     pub mean_mrr: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_context: Vec<ContextMetrics>,
     #[serde(default)]
     pub mean_context_precision: Option<f64>,
@@ -175,6 +175,9 @@ pub fn score_recall(run: &RecallRun, labels: &HashMap<String, String>, k: usize)
     } else {
         hits as f64 / top_k.len() as f64
     };
+    // Denominator is the raw `expected_labels` count, NOT `expected_uuids.len()`:
+    // unresolved labels (deduplicated or never stored) stay as misses — see
+    // module-level docs.
     let recall = hits as f64 / run.expected_labels.len() as f64;
 
     let rr = top_k
@@ -225,6 +228,7 @@ pub fn score_context(run: &ContextRun, labels: &HashMap<String, String>) -> Cont
     } else {
         hits as f64 / returned.len() as f64
     };
+    // Same denominator policy as `score_recall`: unresolved labels count as misses.
     let recall = hits as f64 / run.expected_labels.len() as f64;
 
     ContextMetrics {
@@ -592,6 +596,26 @@ mod tests {
         assert!((agg.mean_context_precision - 0.5).abs() < 1e-9);
         assert!((agg.mean_context_recall - 0.5).abs() < 1e-9);
         assert_eq!(agg.context_negative_pass_rate, 1.0);
+    }
+
+    #[test]
+    fn aggregate_context_channel_zero_events_is_zero() {
+        // Lock in `0.0` (not `None`) when no context events exist, mirroring
+        // how `mean_precision_at_k` degrades when no recalls are scored.
+        let case = CaseRun {
+            case_id: "no-ctx".into(),
+            labels: labels(&[("rule-a", "uuid-a")]),
+            recalls: vec![recall("q", &["rule-a"], &["uuid-a"])],
+            contexts: vec![],
+            deduplicated_labels: vec![],
+        };
+        let agg = aggregate(&[case], 1);
+        assert_eq!(agg.num_contexts, 0);
+        assert_eq!(agg.num_contexts_scored, 0);
+        assert_eq!(agg.num_contexts_negative, 0);
+        assert_eq!(agg.mean_context_precision, 0.0);
+        assert_eq!(agg.mean_context_recall, 0.0);
+        assert_eq!(agg.context_negative_pass_rate, 0.0);
     }
 
     #[test]

@@ -1473,6 +1473,13 @@ impl LoreServer {
             db::scratchpad::write_scratch(self.pool(), project_id, task, &key, &value, ttl_secs)
                 .await
                 .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            ttl_secs = ?ttl_secs,
+            "Wrote scratchpad entry"
+        );
         Self::json_content_with_nudge(
             &entry,
             "Scratch entry written. Read it back with read_scratch(key, task_id).",
@@ -1493,6 +1500,13 @@ impl LoreServer {
         let entry = db::scratchpad::read_scratch(self.pool(), project_id, task, &key)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            found = entry.is_some(),
+            "Read scratchpad entry"
+        );
         match entry {
             Some(e) => Self::json_content_with_nudge(&e, "Use this entry in your current task."),
             None => Self::json_content_with_nudge(
@@ -1515,6 +1529,13 @@ impl LoreServer {
         let entries = db::scratchpad::list_scratch(self.pool(), project_id, task, limit)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            limit,
+            count = entries.len(),
+            "Listed scratchpad entries"
+        );
         Self::json_content(&entries)
     }
 
@@ -1530,6 +1551,13 @@ impl LoreServer {
         let deleted = db::scratchpad::delete_scratch(self.pool(), project_id, task, &key)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            deleted,
+            "Deleted scratchpad entry"
+        );
         Self::json_content_with_nudge(
             &serde_json::json!({ "deleted": deleted }),
             if deleted {

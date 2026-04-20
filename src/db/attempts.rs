@@ -100,22 +100,26 @@ pub async fn list_attempts(
     }
 }
 
+/// Input to `log_outcome`. Grouped into a struct so callers use named fields
+/// and new optional columns (resolver identity, future work) can be added
+/// without breaking every call site.
+#[derive(Debug)]
+pub struct LogOutcomeArgs<'a> {
+    pub attempt_id: Uuid,
+    pub outcome: AttemptOutcome,
+    pub reasoning: &'a str,
+    pub reasoning_embedding: Option<&'a [f32]>,
+    pub git_ref: Option<&'a str>,
+    pub code_snippet: Option<&'a str>,
+    pub resolved_by_agent_id: Option<&'a str>,
+    pub resolved_by_session_id: Option<&'a str>,
+}
+
 /// Record an attempt outcome. `resolved_by_agent_id` and `resolved_by_session_id` use
 /// `COALESCE`: passing `None` preserves the previously stored value. Once set, this
 /// function cannot clear them — a follow-up path would need an explicit clear API.
-#[allow(clippy::too_many_arguments)]
-pub async fn log_outcome(
-    pool: &PgPool,
-    id: Uuid,
-    outcome: AttemptOutcome,
-    reasoning: &str,
-    reasoning_embedding: Option<&[f32]>,
-    git_ref: Option<&str>,
-    code_snippet: Option<&str>,
-    resolved_by_agent_id: Option<&str>,
-    resolved_by_session_id: Option<&str>,
-) -> Result<bool, sqlx::Error> {
-    let emb = reasoning_embedding.map(|e| Vector::from(e.to_vec()));
+pub async fn log_outcome(pool: &PgPool, args: LogOutcomeArgs<'_>) -> Result<bool, sqlx::Error> {
+    let emb = args.reasoning_embedding.map(|e| Vector::from(e.to_vec()));
     let result = sqlx::query(
         "UPDATE ai_memory.attempts \
          SET outcome = $2, reasoning = $3, reasoning_embedding = $4, git_ref = $5, \
@@ -125,14 +129,14 @@ pub async fn log_outcome(
          resolved_at = NOW() \
          WHERE id = $1",
     )
-    .bind(id)
-    .bind(&outcome)
-    .bind(reasoning)
+    .bind(args.attempt_id)
+    .bind(&args.outcome)
+    .bind(args.reasoning)
     .bind(emb.as_ref())
-    .bind(git_ref)
-    .bind(code_snippet)
-    .bind(resolved_by_agent_id)
-    .bind(resolved_by_session_id)
+    .bind(args.git_ref)
+    .bind(args.code_snippet)
+    .bind(args.resolved_by_agent_id)
+    .bind(args.resolved_by_session_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)

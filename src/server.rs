@@ -1692,14 +1692,16 @@ impl LoreServer {
         let embedding = self.embed(&reasoning).await?;
         let success = db::attempts::log_outcome(
             self.pool(),
-            aid,
-            out.clone(),
-            &reasoning,
-            Some(&embedding),
-            git_ref.as_deref(),
-            code_snippet.as_deref(),
-            agent_id.as_deref(),
-            session_id.as_deref(),
+            db::attempts::LogOutcomeArgs {
+                attempt_id: aid,
+                outcome: out.clone(),
+                reasoning: &reasoning,
+                reasoning_embedding: Some(&embedding),
+                git_ref: git_ref.as_deref(),
+                code_snippet: code_snippet.as_deref(),
+                resolved_by_agent_id: agent_id.as_deref(),
+                resolved_by_session_id: session_id.as_deref(),
+            },
         )
         .await
         .map_err(Self::db_err)?;

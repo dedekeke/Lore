@@ -1,5 +1,6 @@
 mod common;
 
+use lore::db::attempts::LogOutcomeArgs;
 use lore::db::semantic::RuleCategory;
 use lore::db::{attempts, projects, retention, scratchpad, semantic, tasks, AttemptOutcome};
 
@@ -97,14 +98,16 @@ async fn test_consolidate_preserves_failure_narrative() {
         .unwrap();
     attempts::log_outcome(
         &pool,
-        rejected_id,
-        AttemptOutcome::Rejected,
-        "CSRF risk",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: rejected_id,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "CSRF risk",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -121,14 +124,16 @@ async fn test_consolidate_preserves_failure_narrative() {
     .unwrap();
     attempts::log_outcome(
         &pool,
-        accepted_id,
-        AttemptOutcome::Accepted,
-        "stateless, CSRF-safe",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: accepted_id,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "stateless, CSRF-safe",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -182,14 +187,16 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .unwrap();
     attempts::log_outcome(
         &pool,
-        aid,
-        AttemptOutcome::Accepted,
-        "ok",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: aid,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "ok",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();

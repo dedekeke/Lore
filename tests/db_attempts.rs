@@ -1,6 +1,6 @@
 mod common;
 
-use lore::db::attempts::AttemptOutcome;
+use lore::db::attempts::{AttemptOutcome, LogOutcomeArgs};
 use lore::db::{attempts, projects, tasks};
 
 #[tokio::test]
@@ -34,14 +34,16 @@ async fn test_log_outcome() {
     let emb = vec![0.5_f32; 384];
     attempts::log_outcome(
         &pool,
-        aid,
-        AttemptOutcome::Rejected,
-        "didn't work",
-        Some(&emb),
-        Some("abc123"),
-        Some("fn main() {}"),
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: aid,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "didn't work",
+            reasoning_embedding: Some(&emb),
+            git_ref: Some("abc123"),
+            code_snippet: Some("fn main() {}"),
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -70,14 +72,16 @@ async fn test_list_attempts_with_filter() {
         .unwrap();
     attempts::log_outcome(
         &pool,
-        a1,
-        AttemptOutcome::Rejected,
-        "nope",
-        None,
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a1,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "nope",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -110,27 +114,31 @@ async fn test_search_similar_failures() {
     let emb2 = vec![0.9_f32; 384];
     attempts::log_outcome(
         &pool,
-        a1,
-        AttemptOutcome::Rejected,
-        "error A",
-        Some(&emb1),
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a1,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "error A",
+            reasoning_embedding: Some(&emb1),
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
     attempts::log_outcome(
         &pool,
-        a2,
-        AttemptOutcome::Rejected,
-        "error B",
-        Some(&emb2),
-        None,
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a2,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "error B",
+            reasoning_embedding: Some(&emb2),
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();

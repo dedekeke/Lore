@@ -257,10 +257,16 @@ fn json_field(res: &CallToolResult, field: &'static str) -> Result<String, Repla
 /// Pulls `procedural.rules[].id` from a `get_active_context` payload.
 /// When the feature flag is off or the fetch failed, the key is absent —
 /// treat as empty. Matches the contract in `build_procedural_block`.
+///
+/// Note: returns `Ok(vec![])` for BOTH "block absent" (flag off, fetch failed)
+/// AND "block present but empty" (no always-inject rules). Scoring cannot
+/// distinguish them; the `tracing::debug!` on pointer miss surfaces the
+/// absent case for debugging.
 fn parse_procedural_ids(res: &CallToolResult) -> Result<Vec<String>, ReplayError> {
     let text = tool_text(res)?;
     let v: serde_json::Value = serde_json::from_str(text)?;
     let Some(rules) = v.pointer("/procedural/rules").and_then(|x| x.as_array()) else {
+        tracing::debug!("get_active_context response lacks /procedural/rules — treating as empty");
         return Ok(Vec::new());
     };
     Ok(rules

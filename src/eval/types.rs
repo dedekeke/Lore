@@ -35,8 +35,11 @@ pub enum EvalEvent {
         /// `RecallRules.expected_hits` entry. Required so the harness can
         /// resolve expected labels to real rule UUIDs after insertion.
         label: String,
-        /// Optional override for the `always_inject` flag. When `None`, the
-        /// server's default applies (true iff category is `instruction`).
+        /// Optional override for the `always_inject` flag. Tri-state:
+        /// - `None`: preserve server-side category inference
+        ///   (true iff category is `instruction`).
+        /// - `Some(true)`: force always-inject on.
+        /// - `Some(false)`: force always-inject off, even for instructions.
         #[serde(default)]
         always_inject: Option<bool>,
     },

@@ -1,5 +1,9 @@
 # Lore — AI Decision Ledger & Code Graph (MCP Server)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
+
 Persistent **episodic memory + codebase graph** for AI coding assistants, exposed over the [Model Context Protocol](https://modelcontextprotocol.io/). Lore keeps what the AI tried, why it failed, why it worked, and how the codebase is wired together — all in a structured Postgres store with vector search.
 
 Instead of re-loading thousands of tokens of chat history on every context wipe, the AI queries a dense, typed ledger and a per-file context packet.
@@ -58,7 +62,7 @@ That's it. `./start.sh` also supports `stop`, `restart`, `status`, `logs`, `fore
 
 **Scope:** this is a local, single-user daemon. It binds `127.0.0.1:3101` by default (no auth). To expose it on the network, set `MCP_SSE_BIND=0.0.0.0` in `.env` — understand the tool surface is unauthenticated before you do.
 
-Requires Rust 1.75+, Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
+Requires Rust 1.94+ (see `rust-version` in `Cargo.toml`), Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
 
 ### Stdio mode (legacy)
 
@@ -261,3 +265,14 @@ Lore ships a mandatory operating protocol fetched via `get_protocol` or the `lor
 9. `review_ledger(task_id)` if lost.
 10. `get_active_context()` every ~5 messages.
 11. At ~97% context → `generate_handoff()` immediately.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev loop, PR expectations, and
+commit conventions. Security issues: [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE).

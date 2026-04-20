@@ -921,7 +921,7 @@ pub struct CompleteTaskParams {
     )]
     pub resolved_attempt_id: Option<String>,
     #[schemars(
-        description = "Follow-up items surfaced during this task (e.g. reviewer nits, deferred refactors, unrelated bugs found). Each entry becomes a child task under the current one. Pass them here so they don't get forgotten — this is the single capture point."
+        description = "Follow-up items surfaced during this task (reviewer nits, deferred refactors, unrelated bugs). Each becomes a child task. Pass here so they aren't forgotten. Max 2048 bytes/entry."
     )]
     pub followups: Option<Vec<String>>,
 }
@@ -2067,11 +2067,12 @@ impl LoreServer {
             }
 
             if let Some(items) = followups {
+                followup_ids.reserve(items.len());
                 for raw in items.into_iter().filter(|s| !s.trim().is_empty()) {
                     let scrubbed = self.maybe_scrub(raw);
                     Self::validate_len("followup", &scrubbed, 2048)?;
                     let embedding = self.embed(&scrubbed).await.ok();
-                    let new_id = db::tasks::create_task(
+                    match db::tasks::create_task(
                         self.pool(),
                         project_id,
                         &scrubbed,
@@ -2081,8 +2082,21 @@ impl LoreServer {
                         embedding.as_deref(),
                     )
                     .await
-                    .map_err(Self::db_err)?;
-                    followup_ids.push(new_id);
+                    {
+                        Ok(new_id) => followup_ids.push(new_id),
+                        Err(e) => {
+                            return Err(rmcp::ErrorData::internal_error(
+                                format!(
+                                    "Partial failure after {} follow-up(s) created: {e}",
+                                    followup_ids.len()
+                                ),
+                                Some(serde_json::json!({
+                                    "parent_task_id": task_id,
+                                    "followup_task_ids": followup_ids,
+                                })),
+                            ));
+                        }
+                    }
                 }
             }
         }

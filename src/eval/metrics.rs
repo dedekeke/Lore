@@ -349,6 +349,7 @@ mod tests {
             case_id: "a".into(),
             labels: labels(&[("rule-a", "uuid-a")]),
             recalls: vec![recall("q", &["rule-a"], &["uuid-a"])],
+            contexts: vec![],
             deduplicated_labels: vec![],
         };
         let case_b = CaseRun {
@@ -359,6 +360,7 @@ mod tests {
                 recall("q", &["rule-b"], &["uuid-z"]),
                 recall("q", &["rule-b"], &["uuid-z"]),
             ],
+            contexts: vec![],
             deduplicated_labels: vec![],
         };
         let agg = aggregate(&[case_a, case_b], 1);
@@ -382,6 +384,7 @@ mod tests {
                 recall("q", &[], &[]),
                 recall("q", &[], &["uuid-noise"]),
             ],
+            contexts: vec![],
             deduplicated_labels: vec![],
         };
         let agg = aggregate(&[case], 1);

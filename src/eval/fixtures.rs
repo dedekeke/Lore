@@ -31,12 +31,13 @@ mod tests {
                 "case must have events: {}",
                 case.id
             );
-            // At least one RecallRules event — otherwise there's nothing to score.
+            // At least one scoring anchor — RecallRules or GetActiveContext.
             assert!(
-                case.events
-                    .iter()
-                    .any(|e| matches!(e, EvalEvent::RecallRules { .. })),
-                "case {} must have a RecallRules event",
+                case.events.iter().any(|e| matches!(
+                    e,
+                    EvalEvent::RecallRules { .. } | EvalEvent::GetActiveContext { .. }
+                )),
+                "case {} must have a RecallRules or GetActiveContext event",
                 case.id
             );
         }

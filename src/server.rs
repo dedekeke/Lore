@@ -1482,7 +1482,7 @@ impl LoreServer {
             project_id = %project_id,
             task_id = ?task,
             key = %key,
-            ttl_secs = ?ttl_secs,
+            ttl_secs = ttl_secs.unwrap_or(-1),
             "Wrote scratchpad entry"
         );
         Self::json_content_with_nudge(
@@ -2798,7 +2798,7 @@ impl LoreServer {
                 .await
                 .ok()
                 .and_then(|a| a.last().map(|a| a.id));
-            let _ = db::snapshots::create_snapshot(
+            if let Err(e) = db::snapshots::create_snapshot(
                 self.pool(),
                 task.id,
                 token_count.unwrap_or(0),
@@ -2806,7 +2806,14 @@ impl LoreServer {
                 None,
                 None,
             )
-            .await;
+            .await
+            {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "generate_handoff: create_snapshot failed; handoff markdown still returned"
+                );
+            }
         }
 
         writeln!(

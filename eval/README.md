@@ -115,11 +115,20 @@ A drop of `-tolerance` exactly is **not** a regression — only strictly-greater
 
 ### When to regenerate the baseline
 
-Only in a dedicated, review-gated PR that changes **only** `eval/baselines.json` and explains *why*:
+Two regen shapes, two policies:
+
+**Drift regen** (dedicated PR, review-gated). Existing rows' metrics moved because code, model, or semantics changed. The diff must be read row-by-row — reviewer has to decide if each delta is expected.
 
 - Embedding provider swap (e.g. Fake → LocalEmbeddingProvider / Arctic-Embed).
-- Fixture edit (adding cases, rewording queries).
 - Scoring semantics change (e.g. TREC precision convention update).
+- Retrieval pipeline edit (ranker, filters, thresholds).
+
+**Fixture-add regen** (same PR as the fixture). New rows added to `mini.json`; existing rows' metrics are byte-identical. The diff is purely additive — the signal is "new rows score what we expect", reviewable in the same PR.
+
+- Adding new cases with new event kinds or new coverage.
+- Reconciling baseline shape fields (`num_cases`, `num_recalls`) after fixture growth.
+
+If the diff touches both — existing rows moved AND new rows added — split the PR. Land the drift regen first so reviewers can isolate each delta.
 
 Regenerate with:
 
@@ -135,7 +144,7 @@ P1-T2 uses `FakeEmbeddingProvider::hashed(384)` — deterministic sha256-seeded 
 
 ## Fixtures
 
-- `fixtures/mini.json` — 12 hand-crafted synthetic cases committed in-tree. Used for the baseline gate + CI smoke. < 10 KB.
+- `fixtures/mini.json` — 15 hand-crafted synthetic cases committed in-tree. Used for the baseline gate + CI smoke. < 15 KB.
 - Real datasets (LoCoMo, LongMemEval, BEAM) are downloaded at first run into `~/.cache/lore/eval/` and sha256-verified via the `fetch_cached` helper. They are **never** committed.
 
 ## Contributing a new dataset

@@ -650,7 +650,8 @@ impl LoreServer {
          7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
          8. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
          9. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
-         10. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         10. TASK COMPLETION: when closing a task, pass any review-surfaced follow-ups (reviewer nits, deferred refactors, related bugs) to complete_task via the `followups` array — they become child tasks automatically. This is the single capture point; items not logged here are forgotten.\n\
+         11. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -919,6 +920,10 @@ pub struct CompleteTaskParams {
         description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
     )]
     pub resolved_attempt_id: Option<String>,
+    #[schemars(
+        description = "Follow-up items surfaced during this task (reviewer nits, deferred refactors, unrelated bugs). Each becomes a child task. Pass here so they aren't forgotten. Max 2048 bytes/entry."
+    )]
+    pub followups: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2013,13 +2018,16 @@ impl LoreServer {
         )
     }
 
-    #[tool(description = "Mark a task as completed, optionally recording a lesson learned")]
+    #[tool(
+        description = "Mark a task as completed. Optionally record a lesson and log follow-up work surfaced during the task (reviewer nits, deferred refactors, bugs found) via `followups` so they don't get forgotten after the task closes."
+    )]
     pub async fn complete_task(
         &self,
         Parameters(CompleteTaskParams {
             task_id,
             lesson,
             resolved_attempt_id,
+            followups,
         }): Parameters<CompleteTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let lesson = lesson.map(|l| self.maybe_scrub(l));
@@ -2041,9 +2049,10 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
 
+        let mut followup_ids: Vec<Uuid> = Vec::new();
         if success {
+            let project_id = self.project_id().await?;
             if let Some(lesson_text) = &lesson {
-                let project_id = self.project_id().await?;
                 let embedding = self.embed(lesson_text).await?;
                 db::semantic::create_rule(
                     self.pool(),
@@ -2056,6 +2065,40 @@ impl LoreServer {
                 .await
                 .map_err(Self::db_err)?;
             }
+
+            if let Some(items) = followups {
+                followup_ids.reserve(items.len());
+                for raw in items.into_iter().filter(|s| !s.trim().is_empty()) {
+                    let scrubbed = self.maybe_scrub(raw);
+                    Self::validate_len("followup", &scrubbed, 2048)?;
+                    let embedding = self.embed(&scrubbed).await.ok();
+                    match db::tasks::create_task(
+                        self.pool(),
+                        project_id,
+                        &scrubbed,
+                        Some(tid),
+                        None,
+                        None,
+                        embedding.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(new_id) => followup_ids.push(new_id),
+                        Err(e) => {
+                            return Err(rmcp::ErrorData::internal_error(
+                                format!(
+                                    "Partial failure after {} follow-up(s) created: {e}",
+                                    followup_ids.len()
+                                ),
+                                Some(serde_json::json!({
+                                    "parent_task_id": task_id,
+                                    "followup_task_ids": followup_ids,
+                                })),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         let rolled_up = if success {
@@ -2067,14 +2110,31 @@ impl LoreServer {
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parents_rolled_up": rolled_up }),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "lesson": lesson,
+                    "parents_rolled_up": rolled_up,
+                    "followups_created": followup_ids.len(),
+                }),
             )
             .await;
         }
 
+        let nudge = if followup_ids.is_empty() {
+            "Task closed. For your next goal, call start_task(description).".to_string()
+        } else {
+            format!(
+                "Task closed — {} follow-up(s) logged as child tasks. For your next goal, call start_task(description).",
+                followup_ids.len()
+            )
+        };
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
-            "Task closed. For your next goal, call start_task(description).",
+            &serde_json::json!({
+                "success": success,
+                "parents_rolled_up": rolled_up,
+                "followup_task_ids": followup_ids,
+            }),
+            &nudge,
         )
     }
 

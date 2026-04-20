@@ -75,13 +75,15 @@
 <h2>Attempts ({{ attempts | length }})</h2>
 {% if attempts %}
 <table>
-  <thead><tr><th>Approach</th><th style="width: 90px;">Outcome</th><th>Reasoning</th><th style="width: 100px;">Created</th></tr></thead>
+  <thead><tr><th>Approach</th><th style="width: 90px;">Outcome</th><th>Reasoning</th><th style="width: 110px;">Agent</th><th style="width: 110px;">Session</th><th style="width: 100px;">Created</th></tr></thead>
   <tbody>
     {% for a in attempts %}
     <tr>
       <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
       <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
+      <td class="mono" style="color: var(--muted);">{{ a.agent_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);">{{ a.session_id | default(value="—") }}</td>
       <td class="mono" style="color: var(--muted);">{{ a.created_at | dateformat }}</td>
     </tr>
     {% endfor %}

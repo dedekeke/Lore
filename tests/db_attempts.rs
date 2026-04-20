@@ -11,7 +11,7 @@ async fn test_create_and_get_attempt() {
         .await
         .unwrap();
 
-    let aid = attempts::create_attempt(&pool, tid, "try X", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "try X", None, None, None)
         .await
         .unwrap();
     let attempt = attempts::get_attempt(&pool, aid).await.unwrap().unwrap();
@@ -27,7 +27,7 @@ async fn test_log_outcome() {
     let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "try", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "try", None, None, None)
         .await
         .unwrap();
 
@@ -40,6 +40,8 @@ async fn test_log_outcome() {
         Some(&emb),
         Some("abc123"),
         Some("fn main() {}"),
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -60,10 +62,10 @@ async fn test_list_attempts_with_filter() {
         .await
         .unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "try1", None, None)
+    let a1 = attempts::create_attempt(&pool, tid, "try1", None, None, None)
         .await
         .unwrap();
-    attempts::create_attempt(&pool, tid, "try2", None, None)
+    attempts::create_attempt(&pool, tid, "try2", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
@@ -71,6 +73,8 @@ async fn test_list_attempts_with_filter() {
         a1,
         AttemptOutcome::Rejected,
         "nope",
+        None,
+        None,
         None,
         None,
         None,
@@ -95,10 +99,10 @@ async fn test_search_similar_failures() {
         .await
         .unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "approach A", None, None)
+    let a1 = attempts::create_attempt(&pool, tid, "approach A", None, None, None)
         .await
         .unwrap();
-    let a2 = attempts::create_attempt(&pool, tid, "approach B", None, None)
+    let a2 = attempts::create_attempt(&pool, tid, "approach B", None, None, None)
         .await
         .unwrap();
 
@@ -112,6 +116,8 @@ async fn test_search_similar_failures() {
         Some(&emb1),
         None,
         None,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -121,6 +127,8 @@ async fn test_search_similar_failures() {
         AttemptOutcome::Rejected,
         "error B",
         Some(&emb2),
+        None,
+        None,
         None,
         None,
     )

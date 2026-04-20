@@ -106,6 +106,7 @@ async fn test_full_task_lifecycle() {
             task_id: task_id.clone(),
             approach_summary: "try approach A".into(),
             agent_id: None,
+            session_id: None,
             request_confirmation: None,
         })
         .await
@@ -122,6 +123,8 @@ async fn test_full_task_lifecycle() {
             reasoning: "didn't compile".into(),
             git_ref: None,
             code_snippet: None,
+            agent_id: None,
+            session_id: None,
         }))
         .await
         .unwrap();
@@ -336,6 +339,7 @@ async fn test_get_task_stats() {
             task_id: task_id.clone(),
             approach_summary: "approach A".into(),
             agent_id: None,
+            session_id: None,
             request_confirmation: None,
         })
         .await
@@ -352,6 +356,8 @@ async fn test_get_task_stats() {
             reasoning: "nope".into(),
             git_ref: None,
             code_snippet: None,
+            agent_id: None,
+            session_id: None,
         }))
         .await
         .unwrap();
@@ -638,6 +644,8 @@ async fn test_log_context_wipe() {
             task_id,
             token_count: 10000,
             last_attempt_id: None,
+            agent_id: None,
+            session_id: None,
         }))
         .await
         .unwrap();

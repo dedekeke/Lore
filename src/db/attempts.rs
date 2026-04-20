@@ -26,6 +26,9 @@ pub struct Attempt {
     pub git_ref: Option<String>,
     pub token_cost: Option<i32>,
     pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub resolved_by_agent_id: Option<String>,
+    pub resolved_by_session_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
 }
@@ -35,15 +38,17 @@ pub async fn create_attempt(
     task_id: Uuid,
     approach_summary: &str,
     agent_id: Option<&str>,
+    session_id: Option<&str>,
     git_ref: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.attempts (task_id, approach_summary, agent_id, git_ref) \
-         VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO ai_memory.attempts (task_id, approach_summary, agent_id, session_id, git_ref) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(task_id)
     .bind(approach_summary)
     .bind(agent_id)
+    .bind(session_id)
     .bind(git_ref)
     .fetch_one(pool)
     .await?;
@@ -54,7 +59,8 @@ pub async fn create_attempt(
 pub async fn get_attempt(pool: &PgPool, id: Uuid) -> Result<Option<Attempt>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \
-         reasoning_embedding, git_ref, token_cost, agent_id, created_at, resolved_at \
+         reasoning_embedding, git_ref, token_cost, agent_id, session_id, \
+         resolved_by_agent_id, resolved_by_session_id, created_at, resolved_at \
          FROM ai_memory.attempts WHERE id = $1",
     )
     .bind(id)
@@ -71,7 +77,8 @@ pub async fn list_attempts(
         Some(o) => {
             sqlx::query_as(
                 "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \
-                 reasoning_embedding, git_ref, token_cost, agent_id, created_at, resolved_at \
+                 reasoning_embedding, git_ref, token_cost, agent_id, session_id, \
+                 resolved_by_agent_id, resolved_by_session_id, created_at, resolved_at \
                  FROM ai_memory.attempts WHERE task_id = $1 AND outcome = $2 ORDER BY created_at",
             )
             .bind(task_id)
@@ -82,7 +89,8 @@ pub async fn list_attempts(
         None => {
             sqlx::query_as(
                 "SELECT id, task_id, approach_summary, code_snippet, outcome, reasoning, \
-                 reasoning_embedding, git_ref, token_cost, agent_id, created_at, resolved_at \
+                 reasoning_embedding, git_ref, token_cost, agent_id, session_id, \
+                 resolved_by_agent_id, resolved_by_session_id, created_at, resolved_at \
                  FROM ai_memory.attempts WHERE task_id = $1 ORDER BY created_at",
             )
             .bind(task_id)
@@ -92,6 +100,10 @@ pub async fn list_attempts(
     }
 }
 
+/// Record an attempt outcome. `resolved_by_agent_id` and `resolved_by_session_id` use
+/// `COALESCE`: passing `None` preserves the previously stored value. Once set, this
+/// function cannot clear them — a follow-up path would need an explicit clear API.
+#[allow(clippy::too_many_arguments)]
 pub async fn log_outcome(
     pool: &PgPool,
     id: Uuid,
@@ -100,12 +112,17 @@ pub async fn log_outcome(
     reasoning_embedding: Option<&[f32]>,
     git_ref: Option<&str>,
     code_snippet: Option<&str>,
+    resolved_by_agent_id: Option<&str>,
+    resolved_by_session_id: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let emb = reasoning_embedding.map(|e| Vector::from(e.to_vec()));
     let result = sqlx::query(
         "UPDATE ai_memory.attempts \
          SET outcome = $2, reasoning = $3, reasoning_embedding = $4, git_ref = $5, \
-         code_snippet = COALESCE($6, code_snippet), resolved_at = NOW() \
+         code_snippet = COALESCE($6, code_snippet), \
+         resolved_by_agent_id = COALESCE($7, resolved_by_agent_id), \
+         resolved_by_session_id = COALESCE($8, resolved_by_session_id), \
+         resolved_at = NOW() \
          WHERE id = $1",
     )
     .bind(id)
@@ -114,6 +131,8 @@ pub async fn log_outcome(
     .bind(emb.as_ref())
     .bind(git_ref)
     .bind(code_snippet)
+    .bind(resolved_by_agent_id)
+    .bind(resolved_by_session_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -178,7 +197,8 @@ pub async fn search_similar_failures(
     };
     let sql = format!(
         "SELECT a.id, a.task_id, a.approach_summary, a.code_snippet, a.outcome, a.reasoning, \
-         a.reasoning_embedding, a.git_ref, a.token_cost, a.agent_id, a.created_at, a.resolved_at \
+         a.reasoning_embedding, a.git_ref, a.token_cost, a.agent_id, a.session_id, \
+         a.resolved_by_agent_id, a.resolved_by_session_id, a.created_at, a.resolved_at \
          FROM ai_memory.attempts a \
          JOIN ai_memory.tasks t ON a.task_id = t.id \
          WHERE a.outcome = 'rejected' AND a.reasoning_embedding IS NOT NULL {project_filter} \

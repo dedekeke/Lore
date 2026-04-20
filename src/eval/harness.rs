@@ -114,6 +114,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         task_id,
                         approach_summary: approach.clone(),
                         agent_id: None,
+                        session_id: None,
                         request_confirmation: None,
                     })
                     .await?;
@@ -145,6 +146,8 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         reasoning: reasoning.clone(),
                         git_ref: None,
                         code_snippet: None,
+                        agent_id: None,
+                        session_id: None,
                     }))
                     .await?;
             }

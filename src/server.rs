@@ -812,6 +812,10 @@ pub struct ProposeAttemptParams {
     #[schemars(description = "Optional agent identifier for multi-agent workflows")]
     pub agent_id: Option<String>,
     #[schemars(
+        description = "Optional session identifier — disambiguates attempts from the same agent across separate sessions"
+    )]
+    pub session_id: Option<String>,
+    #[schemars(
         description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. This is an LLM-initiated review request — use it when you want an explicit human sign-off on your plan. Default false. Silently skipped when the client does not support elicitation."
     )]
     pub request_confirmation: Option<bool>,
@@ -833,6 +837,12 @@ pub struct LogOutcomeParams {
         description = "Optional code snippet — include the actual code that was written for this attempt"
     )]
     pub code_snippet: Option<String>,
+    #[schemars(
+        description = "Optional agent identifier of the agent resolving this attempt (may differ from proposer)"
+    )]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Optional session identifier of the resolver")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -957,6 +967,10 @@ pub struct LogContextWipeParams {
     pub token_count: i32,
     #[schemars(description = "UUID of the last attempt before the wipe")]
     pub last_attempt_id: Option<String>,
+    #[schemars(description = "Optional agent identifier emitting the wipe event")]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Optional session identifier emitting the wipe event")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1591,6 +1605,7 @@ impl LoreServer {
             task_id,
             approach_summary,
             agent_id,
+            session_id,
             ..
         }: ProposeAttemptParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -1603,6 +1618,7 @@ impl LoreServer {
             tid,
             &approach_summary,
             agent_id.as_deref(),
+            session_id.as_deref(),
             git_ref.as_deref(),
         )
         .await
@@ -1628,6 +1644,8 @@ impl LoreServer {
             reasoning,
             git_ref,
             code_snippet,
+            agent_id,
+            session_id,
         }): Parameters<LogOutcomeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let reasoning = self.maybe_scrub(reasoning);
@@ -1647,6 +1665,8 @@ impl LoreServer {
             Some(&embedding),
             git_ref.as_deref(),
             code_snippet.as_deref(),
+            agent_id.as_deref(),
+            session_id.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
@@ -2310,6 +2330,8 @@ impl LoreServer {
             task_id,
             token_count,
             last_attempt_id,
+            agent_id,
+            session_id,
         }): Parameters<LogContextWipeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let tid = Self::parse_uuid(&task_id)?;
@@ -2317,9 +2339,16 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
-        let id = db::snapshots::create_snapshot(self.pool(), tid, token_count, aid)
-            .await
-            .map_err(Self::db_err)?;
+        let id = db::snapshots::create_snapshot(
+            self.pool(),
+            tid,
+            token_count,
+            aid,
+            agent_id.as_deref(),
+            session_id.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
             &serde_json::json!({ "snapshot_id": id.to_string() }),
             "Context wipe recorded. In the new session, call get_next_steps() or get_active_context() to resume.",
@@ -2686,6 +2715,8 @@ impl LoreServer {
                 task.id,
                 token_count.unwrap_or(0),
                 last_attempt,
+                None,
+                None,
             )
             .await;
         }

@@ -104,7 +104,7 @@ async fn test_get_task_stats_with_attempts() {
     let t1 = tasks::create_task(&pool, pid, "stats task", None, None, None, None)
         .await
         .unwrap();
-    let a1 = attempts::create_attempt(&pool, t1, "approach 1", None, None)
+    let a1 = attempts::create_attempt(&pool, t1, "approach 1", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
@@ -115,10 +115,12 @@ async fn test_get_task_stats_with_attempts() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .await
     .unwrap();
-    let a2 = attempts::create_attempt(&pool, t1, "approach 2", None, None)
+    let a2 = attempts::create_attempt(&pool, t1, "approach 2", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
@@ -126,6 +128,8 @@ async fn test_get_task_stats_with_attempts() {
         a2,
         AttemptOutcome::Accepted,
         "works",
+        None,
+        None,
         None,
         None,
         None,

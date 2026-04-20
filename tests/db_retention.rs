@@ -10,7 +10,7 @@ async fn test_prune_old_attempts() {
     let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None, None)
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn test_consolidate_preserves_failure_narrative() {
         .await
         .unwrap();
 
-    let rejected_id = attempts::create_attempt(&pool, tid, "use JWT in cookies", None, None)
+    let rejected_id = attempts::create_attempt(&pool, tid, "use JWT in cookies", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
@@ -103,19 +103,29 @@ async fn test_consolidate_preserves_failure_narrative() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .await
     .unwrap();
 
-    let accepted_id =
-        attempts::create_attempt(&pool, tid, "use JWT in Authorization header", None, None)
-            .await
-            .unwrap();
+    let accepted_id = attempts::create_attempt(
+        &pool,
+        tid,
+        "use JWT in Authorization header",
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     attempts::log_outcome(
         &pool,
         accepted_id,
         AttemptOutcome::Accepted,
         "stateless, CSRF-safe",
+        None,
+        None,
         None,
         None,
         None,
@@ -167,12 +177,22 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .await
         .unwrap();
 
-    let aid = attempts::create_attempt(&pool, tid, "approach", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "approach", None, None, None)
         .await
         .unwrap();
-    attempts::log_outcome(&pool, aid, AttemptOutcome::Accepted, "ok", None, None, None)
-        .await
-        .unwrap();
+    attempts::log_outcome(
+        &pool,
+        aid,
+        AttemptOutcome::Accepted,
+        "ok",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     tasks::complete_task(&pool, tid, None).await.unwrap();
 
     sqlx::query("UPDATE ai_memory.attempts SET resolved_at = NOW() - interval '100 days'")

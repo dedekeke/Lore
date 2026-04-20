@@ -72,6 +72,24 @@
 </table>
 {% endif %}
 
+{% if snapshots %}
+<h2>Context Snapshots ({{ snapshots | length }})</h2>
+<table>
+  <thead><tr><th style="width: 120px;">Wiped</th><th style="width: 90px;">Tokens</th><th style="width: 110px;">Agent</th><th style="width: 110px;">Session</th><th>Last Attempt</th></tr></thead>
+  <tbody>
+    {% for s in snapshots %}
+    <tr>
+      <td class="mono" style="color: var(--muted);">{{ s.wiped_at | dateformat }}</td>
+      <td class="mono">{{ s.token_count_before }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.agent_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.session_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.last_attempt_id | default(value="—") }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h2>Attempts ({{ attempts | length }})</h2>
 {% if attempts %}
 <table>

@@ -166,9 +166,12 @@ See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) p
 
 - `StartTask { task_ref }` → `task-{task_ref}` → task UUID
 - `ProposeAttempt { task_ref }` → `attempt-{task_ref}-a{N}` (N = 1-based index of attempts for that task) → attempt UUID
-- `RememberRule { label }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection)
+- `RememberRule { label, always_inject? }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection). `always_inject` defaults to the server's per-category default when omitted.
+- `GetActiveContext { expected_procedural_labels }` — calls `get_active_context` and records `procedural.rules[].id` into `CaseRun.contexts`. Used for Phase 3 procedural-memory surfacing checks (`mini-013`/`014`/`015`). Scoring on the context channel is a P3 follow-up; today the harness only records the raw inputs/outputs.
 
 P1-T3 grades by mapping the UUIDs returned by `recall_rules` back to labels via this map and comparing to `expected_hits`.
+
+> **Scratchpad (Phase 3)** is intentionally **not** exercised by the eval harness. `write_scratch`/`read_scratch` are deterministic key/value I/O and not a retrieval-quality signal — they are covered by `tests/db_scratchpad.rs` + `tests/server_integration.rs` instead.
 
 An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip. Cases whose `expected_hits` reference `task-*` or `attempt-*` labels (e.g. `mini-002`, `mini-004`, `mini-007`, `mini-009`, `mini-012`) score zero against the current `recall_rules` implementation because that tool searches `semantic_rules` only; a dedicated `FindSimilarFailures` event type is a planned follow-up.
 

@@ -35,10 +35,20 @@ pub enum EvalEvent {
         /// `RecallRules.expected_hits` entry. Required so the harness can
         /// resolve expected labels to real rule UUIDs after insertion.
         label: String,
+        /// Optional override for the `always_inject` flag. When `None`, the
+        /// server's default applies (true iff category is `instruction`).
+        #[serde(default)]
+        always_inject: Option<bool>,
     },
     RecallRules {
         query: String,
         expected_hits: Vec<String>,
+    },
+    /// Calls `get_active_context` and asserts that the `procedural.rules[].id`
+    /// array contains the rules resolved from `expected_procedural_labels`.
+    /// Used to verify always-inject surfacing for Phase 3 fixtures.
+    GetActiveContext {
+        expected_procedural_labels: Vec<String>,
     },
 }
 

@@ -1,6 +1,6 @@
 mod common;
 
-use lore::db::attempts::AttemptOutcome;
+use lore::db::attempts::{AttemptOutcome, LogOutcomeArgs};
 use lore::db::{attempts, projects, tasks};
 
 #[tokio::test]
@@ -11,7 +11,7 @@ async fn test_create_and_get_attempt() {
         .await
         .unwrap();
 
-    let aid = attempts::create_attempt(&pool, tid, "try X", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "try X", None, None, None)
         .await
         .unwrap();
     let attempt = attempts::get_attempt(&pool, aid).await.unwrap().unwrap();
@@ -27,19 +27,23 @@ async fn test_log_outcome() {
     let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "try", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "try", None, None, None)
         .await
         .unwrap();
 
     let emb = vec![0.5_f32; 384];
     attempts::log_outcome(
         &pool,
-        aid,
-        AttemptOutcome::Rejected,
-        "didn't work",
-        Some(&emb),
-        Some("abc123"),
-        Some("fn main() {}"),
+        LogOutcomeArgs {
+            attempt_id: aid,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "didn't work",
+            reasoning_embedding: Some(&emb),
+            git_ref: Some("abc123"),
+            code_snippet: Some("fn main() {}"),
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -60,20 +64,24 @@ async fn test_list_attempts_with_filter() {
         .await
         .unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "try1", None, None)
+    let a1 = attempts::create_attempt(&pool, tid, "try1", None, None, None)
         .await
         .unwrap();
-    attempts::create_attempt(&pool, tid, "try2", None, None)
+    attempts::create_attempt(&pool, tid, "try2", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
         &pool,
-        a1,
-        AttemptOutcome::Rejected,
-        "nope",
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a1,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "nope",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -95,10 +103,10 @@ async fn test_search_similar_failures() {
         .await
         .unwrap();
 
-    let a1 = attempts::create_attempt(&pool, tid, "approach A", None, None)
+    let a1 = attempts::create_attempt(&pool, tid, "approach A", None, None, None)
         .await
         .unwrap();
-    let a2 = attempts::create_attempt(&pool, tid, "approach B", None, None)
+    let a2 = attempts::create_attempt(&pool, tid, "approach B", None, None, None)
         .await
         .unwrap();
 
@@ -106,23 +114,31 @@ async fn test_search_similar_failures() {
     let emb2 = vec![0.9_f32; 384];
     attempts::log_outcome(
         &pool,
-        a1,
-        AttemptOutcome::Rejected,
-        "error A",
-        Some(&emb1),
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a1,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "error A",
+            reasoning_embedding: Some(&emb1),
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
     attempts::log_outcome(
         &pool,
-        a2,
-        AttemptOutcome::Rejected,
-        "error B",
-        Some(&emb2),
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: a2,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "error B",
+            reasoning_embedding: Some(&emb2),
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -135,4 +151,24 @@ async fn test_search_similar_failures() {
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].approach_summary, "approach A");
+}
+
+/// Confirms migration 20260420154629 created the 3 partial indexes.
+/// Regression guard: dashboard queries filtering by session_id or
+/// resolved_by_*_id must not regress to sequential scans.
+#[tokio::test]
+async fn test_attempts_partial_indexes_exist() {
+    let (pool, _c) = common::setup_db().await;
+    let names: Vec<(String,)> = sqlx::query_as(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = 'ai_memory' AND tablename = 'attempts' \
+           AND indexname IN (\
+               'idx_attempts_session_id', \
+               'idx_attempts_resolved_by_agent_id', \
+               'idx_attempts_resolved_by_session_id')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(names.len(), 3, "expected 3 partial indexes, got {names:?}");
 }

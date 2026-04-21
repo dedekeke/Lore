@@ -60,14 +60,20 @@ Fresh aggregate metrics from this replay, keyed by dataset name.
 {
   "mini": {
     "k": 10,
-    "num_cases": 12,
-    "num_recalls": 12,
-    "num_scored": 11,
+    "num_cases": 15,
+    "num_recalls": 14,
+    "num_scored": 13,
     "num_negative": 1,
     "negative_pass_rate": 0.0,
-    "mean_precision_at_k": 0.3636,
-    "mean_recall_at_k": 0.5455,
-    "mean_mrr": 0.4545,
+    "mean_precision_at_k": 0.4231,
+    "mean_recall_at_k": 0.6154,
+    "mean_mrr": 0.5,
+    "num_contexts": 3,
+    "num_contexts_scored": 2,
+    "num_contexts_negative": 1,
+    "mean_context_precision": 0.0,
+    "mean_context_recall": 0.0,
+    "context_negative_pass_rate": 1.0,
     "per_case": [ ... ]
   }
 }
@@ -84,10 +90,13 @@ Fresh aggregate metrics from this replay, keyed by dataset name.
     {
       "name": "mini",
       "deltas": [
-        { "name": "mean_precision_at_k", "baseline": 0.3636, "current": 0.3636, "delta": 0.0, "regression": false },
-        { "name": "mean_recall_at_k",    "baseline": 0.5455, "current": 0.5455, "delta": 0.0, "regression": false },
-        { "name": "mean_mrr",            "baseline": 0.4545, "current": 0.4545, "delta": 0.0, "regression": false },
-        { "name": "negative_pass_rate",  "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false }
+        { "name": "mean_precision_at_k",        "baseline": 0.4231, "current": 0.4231, "delta": 0.0, "regression": false },
+        { "name": "mean_recall_at_k",           "baseline": 0.6154, "current": 0.6154, "delta": 0.0, "regression": false },
+        { "name": "mean_mrr",                   "baseline": 0.5,    "current": 0.5,    "delta": 0.0, "regression": false },
+        { "name": "negative_pass_rate",         "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "mean_context_precision",     "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "mean_context_recall",        "baseline": 0.0,    "current": 0.0,    "delta": 0.0, "regression": false },
+        { "name": "context_negative_pass_rate", "baseline": 1.0,    "current": 1.0,    "delta": 0.0, "regression": false }
       ],
       "shape_mismatches": []
     }
@@ -115,11 +124,20 @@ A drop of `-tolerance` exactly is **not** a regression — only strictly-greater
 
 ### When to regenerate the baseline
 
-Only in a dedicated, review-gated PR that changes **only** `eval/baselines.json` and explains *why*:
+Two regen shapes, two policies:
+
+**Drift regen** (dedicated PR, review-gated). Existing rows' metrics moved because code, model, or semantics changed. The diff must be read row-by-row — reviewer has to decide if each delta is expected.
 
 - Embedding provider swap (e.g. Fake → LocalEmbeddingProvider / Arctic-Embed).
-- Fixture edit (adding cases, rewording queries).
 - Scoring semantics change (e.g. TREC precision convention update).
+- Retrieval pipeline edit (ranker, filters, thresholds).
+
+**Fixture-add regen** (same PR as the fixture). New rows added to `mini.json`; existing rows' metrics are byte-identical. The diff is purely additive — the signal is "new rows score what we expect", reviewable in the same PR.
+
+- Adding new cases with new event kinds or new coverage.
+- Reconciling baseline shape fields (`num_cases`, `num_recalls`) after fixture growth.
+
+If the diff touches both — existing rows moved AND new rows added — split the PR. Land the drift regen first so reviewers can isolate each delta.
 
 Regenerate with:
 
@@ -135,7 +153,7 @@ P1-T2 uses `FakeEmbeddingProvider::hashed(384)` — deterministic sha256-seeded 
 
 ## Fixtures
 
-- `fixtures/mini.json` — 12 hand-crafted synthetic cases committed in-tree. Used for the baseline gate + CI smoke. < 10 KB.
+- `fixtures/mini.json` — 15 hand-crafted synthetic cases committed in-tree. Used for the baseline gate + CI smoke. < 15 KB.
 - Real datasets (LoCoMo, LongMemEval, BEAM) are downloaded at first run into `~/.cache/lore/eval/` and sha256-verified via the `fetch_cached` helper. They are **never** committed.
 
 ## Contributing a new dataset
@@ -166,9 +184,12 @@ See `src/eval/types.rs`. An `EvalCase` is a list of `EvalEvent`s (replay tape) p
 
 - `StartTask { task_ref }` → `task-{task_ref}` → task UUID
 - `ProposeAttempt { task_ref }` → `attempt-{task_ref}-a{N}` (N = 1-based index of attempts for that task) → attempt UUID
-- `RememberRule { label }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection)
+- `RememberRule { label, always_inject? }` → `{label}` (must be declared on the event) → rule UUID (absent if the server short-circuits on duplicate detection). `always_inject` defaults to the server's per-category default when omitted.
+- `GetActiveContext { expected_procedural_labels }` — calls `get_active_context` and records `procedural.rules[].id` into `CaseRun.contexts`. Used for Phase 3 procedural-memory surfacing checks (`mini-013`/`014`/`015`). Scored as a separate channel (see "Context channel" below) — rank-agnostic precision/recall plus a negative-pass bit for empty-expected cases.
 
 P1-T3 grades by mapping the UUIDs returned by `recall_rules` back to labels via this map and comparing to `expected_hits`.
+
+> **Scratchpad (Phase 3)** is intentionally **not** exercised by the eval harness. `write_scratch`/`read_scratch` are deterministic key/value I/O and not a retrieval-quality signal — they are covered by `tests/db_scratchpad.rs` + `tests/server_integration.rs` instead.
 
 An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision signal, not a skip. Cases whose `expected_hits` reference `task-*` or `attempt-*` labels (e.g. `mini-002`, `mini-004`, `mini-007`, `mini-009`, `mini-012`) score zero against the current `recall_rules` implementation because that tool searches `semantic_rules` only; a dedicated `FindSimilarFailures` event type is a planned follow-up.
 
@@ -182,6 +203,15 @@ An empty `expected_hits` (see `mini-011`) asserts **zero hits** — a precision 
 - Aggregate means are taken across individual `RecallRun`s, not cases — a case with more queries contributes proportionally.
 - Labels that did not resolve to a UUID at replay time (near-duplicate short-circuit, or `task-*`/`attempt-*` references that `recall_rules` cannot return) stay in recall's denominator but can never enter the numerator — they score as misses.
 - Negative cases (empty `expected_hits`, e.g. `mini-011`) have **undefined** precision/recall/MRR and are excluded from those means. They report a `negative_pass: bool` instead (`true` iff the server returned nothing), aggregated separately into `DatasetMetrics::negative_pass_rate`.
+
+### Context channel
+
+`GetActiveContext` events are scored on a separate channel from `RecallRules`:
+
+- **precision** = `|returned ∩ expected| / |returned|`. Rank-agnostic — the procedural block is an injected set, not a ranked list, so there is no `@k` cutoff and no MRR.
+- **recall** = `|returned ∩ expected| / |expected|`. Same unresolved-label miss rule as `RecallRules`.
+- Negative cases (empty `expected_procedural_labels`) report `negative_pass: bool` (`true` iff the server returned no rules) and are excluded from the precision/recall means.
+- Aggregates surface as `mean_context_precision`, `mean_context_recall`, `context_negative_pass_rate`, plus shape counts (`num_contexts`, `num_contexts_scored`, `num_contexts_negative`). All four metrics are subject to the same `DEFAULT_TOLERANCE` regression gate.
 
 ## Known follow-ups
 

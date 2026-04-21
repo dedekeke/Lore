@@ -1,5 +1,9 @@
 # Lore — AI Decision Ledger & Code Graph (MCP Server)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
+
 Persistent **episodic memory + codebase graph** for AI coding assistants, exposed over the [Model Context Protocol](https://modelcontextprotocol.io/). Lore keeps what the AI tried, why it failed, why it worked, and how the codebase is wired together — all in a structured Postgres store with vector search.
 
 Instead of re-loading thousands of tokens of chat history on every context wipe, the AI queries a dense, typed ledger and a per-file context packet.
@@ -58,7 +62,7 @@ That's it. `./start.sh` also supports `stop`, `restart`, `status`, `logs`, `fore
 
 **Scope:** this is a local, single-user daemon. It binds `127.0.0.1:3101` by default (no auth). To expose it on the network, set `MCP_SSE_BIND=0.0.0.0` in `.env` — understand the tool surface is unauthenticated before you do.
 
-Requires Rust 1.75+, Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
+Requires Rust 1.94+ (see `rust-version` in `Cargo.toml`), Docker (for the bundled Postgres) **or** an existing Postgres 15+ with [pgvector](https://github.com/pgvector/pgvector) reachable via `DATABASE_URL`.
 
 ### Stdio mode (legacy)
 
@@ -92,13 +96,24 @@ Building with `--no-default-features` skips the `ort` runtime (smaller binary, f
 
 | Tool                 | Description                                                                 |
 |----------------------|-----------------------------------------------------------------------------|
-| `remember_rule`      | Store rule with embedding; warns on near-duplicates (cosine ≥ 0.95) and contradictions. Runs scrubber on content. |
+| `remember_rule`      | Store rule with embedding; warns on near-duplicates (cosine ≥ 0.95) and contradictions. Runs scrubber on content. `always_inject=true` (default for `category=instruction`) surfaces the rule in every `get_active_context` response. |
 | `recall_rules`       | Hybrid vector + keyword search; `compact=true` returns preview + score + hit stats (~10× cheaper). |
 | `get_rule`           | Fetch single rule by ID with full content; increments `hit_count`, sets `last_used_at`. |
 | `forget_rule`        | Delete, or supersede (sets `valid_until`) to preserve history.              |
 | `list_rules`         | List rules, optional category / tag filter.                                 |
-| `update_rule`        | Update category, content, or tags of an existing rule.                      |
+| `update_rule`        | Update category, content, tags, or `always_inject` flag of an existing rule. |
 | `get_duplicate_rules`| Find near-duplicate pairs (cosine ≥ 0.88) for manual cleanup.               |
+
+### Scratchpad (session-scoped notes)
+
+Lightweight key/value store for intermediate notes an agent does not want to promote into a rule or a task. Scoped to `(project_id, task_id?, key)`; TTL defaults to 60 min and is swept by the existing retention job.
+
+| Tool             | Description                                                                 |
+|------------------|-----------------------------------------------------------------------------|
+| `write_scratch`  | Upsert a note at `key` with optional `ttl_secs` and optional `task_id` scope. Runs scrubber on value. |
+| `read_scratch`   | Fetch a note by `key`.                                                      |
+| `list_scratch`   | List keys (and expiry) for the current project + optional task scope.       |
+| `delete_scratch` | Remove a note by `key`.                                                     |
 
 ### Episodic ledger
 
@@ -110,7 +125,7 @@ Building with `--no-default-features` skips the `ort` runtime (smaller binary, f
 | `review_ledger`   | List attempts for a task; filter by outcome.                        |
 | `link_tasks`      | Link two tasks via `blocks` / `related_to` / `caused_by` / `duplicate_of`. |
 | `update_task`     | Update priority, task_type, or description.                         |
-| `complete_task`   | Close task; extract lesson; auto-detects resolved attempt.          |
+| `complete_task`   | Close task; extract lesson; auto-detects resolved attempt; accepts `followups: [...]` to auto-spawn child tasks for review-surfaced work. |
 | `abandon_task`    | Abandon with reason; optional save-as-lesson.                       |
 | `list_tasks`      | List for current project; filter by status.                         |
 | `list_subtasks`   | List children of a parent task.                                     |
@@ -146,7 +161,7 @@ Building with `--no-default-features` skips the `ort` runtime (smaller binary, f
 | Tool                    | Description                                                            |
 |-------------------------|------------------------------------------------------------------------|
 | `find_similar_failures` | Semantic search over past rejection reasoning; supports cross-project. |
-| `get_active_context`    | Resume packet: current project, active task, recent attempts, wipe count. |
+| `get_active_context`    | Resume packet: current project, active task, recent attempts, wipe count, plus `procedural` block (always-inject rules) when `LORE_PROCEDURAL_MEMORY=on`. |
 | `log_context_wipe`      | Mark a context exhaustion event.                                       |
 | `generate_handoff`      | Dense handoff briefing for next session; auto-logs wipe.               |
 | `generate_session_summary` | Structured session briefing (tasks + attempts + lessons) plus a client prompt + JSON schema — the client LLM synthesizes the summary; no server-side LLM call. |
@@ -250,3 +265,14 @@ Lore ships a mandatory operating protocol fetched via `get_protocol` or the `lor
 9. `review_ledger(task_id)` if lost.
 10. `get_active_context()` every ~5 messages.
 11. At ~97% context → `generate_handoff()` immediately.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev loop, PR expectations, and
+commit conventions. Security issues: [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE).

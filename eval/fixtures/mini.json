@@ -324,5 +324,84 @@
       "recall_hit_ids": ["attempt-t6-a1"],
       "task_completion": null
     }
+  },
+  {
+    "id": "mini-013-procedural-always-inject-surfaces",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Always run cargo fmt and cargo clippy before opening a PR.",
+        "category": "instruction",
+        "label": "rule-pr-precheck"
+      },
+      {
+        "kind": "get_active_context",
+        "expected_procedural_labels": ["rule-pr-precheck"]
+      },
+      {
+        "kind": "recall_rules",
+        "query": "pre-commit checks",
+        "expected_hits": ["rule-pr-precheck"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-pr-precheck"],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-014-non-procedural-not-surfaced",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "The staging DB hostname is db-staging.internal.",
+        "category": "fact",
+        "label": "rule-staging-db",
+        "always_inject": false
+      },
+      {
+        "kind": "get_active_context",
+        "expected_procedural_labels": []
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": [],
+      "task_completion": null
+    }
+  },
+  {
+    "id": "mini-015-mixed-inject-only-flagged-surfaces",
+    "dataset": "synthetic",
+    "events": [
+      {
+        "kind": "remember_rule",
+        "content": "Prefer structured tracing over println for server code.",
+        "category": "preference",
+        "label": "rule-tracing",
+        "always_inject": true
+      },
+      {
+        "kind": "remember_rule",
+        "content": "Team stand-up is at 10:00 Europe/Amsterdam.",
+        "category": "fact",
+        "label": "rule-standup-time",
+        "always_inject": false
+      },
+      {
+        "kind": "get_active_context",
+        "expected_procedural_labels": ["rule-tracing"]
+      },
+      {
+        "kind": "recall_rules",
+        "query": "observability convention",
+        "expected_hits": ["rule-tracing"]
+      }
+    ],
+    "expected": {
+      "recall_hit_ids": ["rule-tracing"],
+      "task_completion": null
+    }
   }
 ]

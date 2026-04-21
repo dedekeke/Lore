@@ -50,6 +50,15 @@ pub struct RecallRun {
     pub returned_ids: Vec<String>,
 }
 
+/// Raw inputs + outputs for one `GetActiveContext` event — captures the
+/// procedural-block UUIDs surfaced and the case-local labels we expected
+/// to see. Scoring is deferred.
+#[derive(Debug, Clone)]
+pub struct ContextRun {
+    pub expected_labels: Vec<String>,
+    pub returned_procedural_ids: Vec<String>,
+}
+
 /// Replay output for one case.
 #[derive(Debug, Clone)]
 pub struct CaseRun {
@@ -58,6 +67,7 @@ pub struct CaseRun {
     /// -> real UUID assigned by the server at insertion time.
     pub labels: HashMap<String, String>,
     pub recalls: Vec<RecallRun>,
+    pub contexts: Vec<ContextRun>,
     /// RememberRule labels whose rule was short-circuited by the server's
     /// near-duplicate guard (cosine >= 0.95). The rule was not stored, so
     /// the label cannot be resolved to a UUID. Surfaced here so P1-T3 can
@@ -84,6 +94,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
     let mut attempt_uuids: HashMap<String, String> = HashMap::new();
     let mut attempt_counter: HashMap<String, usize> = HashMap::new();
     let mut recalls: Vec<RecallRun> = Vec::new();
+    let mut contexts: Vec<ContextRun> = Vec::new();
     let mut deduplicated_labels: Vec<String> = Vec::new();
 
     for event in &case.events {
@@ -114,6 +125,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         task_id,
                         approach_summary: approach.clone(),
                         agent_id: None,
+                        session_id: None,
                         request_confirmation: None,
                     })
                     .await?;
@@ -145,6 +157,8 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         reasoning: reasoning.clone(),
                         git_ref: None,
                         code_snippet: None,
+                        agent_id: None,
+                        session_id: None,
                     }))
                     .await?;
             }
@@ -152,13 +166,14 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                 content,
                 category,
                 label,
+                always_inject,
             } => {
                 let res = server
                     .remember_rule(Parameters(RememberRuleParams {
                         category: category.clone(),
                         content: content.clone(),
                         tags: None,
-                        always_inject: None,
+                        always_inject: *always_inject,
                     }))
                     .await?;
                 // `rule_id` absent when server short-circuits on duplicate_warning
@@ -196,6 +211,16 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                     returned_ids,
                 });
             }
+            EvalEvent::GetActiveContext {
+                expected_procedural_labels,
+            } => {
+                let res = server.get_active_context().await?;
+                let returned_procedural_ids = parse_procedural_ids(&res)?;
+                contexts.push(ContextRun {
+                    expected_labels: expected_procedural_labels.clone(),
+                    returned_procedural_ids,
+                });
+            }
         }
     }
 
@@ -203,6 +228,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
         case_id: case.id.clone(),
         labels,
         recalls,
+        contexts,
         deduplicated_labels,
     })
 }
@@ -226,6 +252,27 @@ fn json_field(res: &CallToolResult, field: &'static str) -> Result<String, Repla
         .and_then(|f| f.as_str())
         .map(String::from)
         .ok_or(ReplayError::MissingField { field })
+}
+
+/// Pulls `procedural.rules[].id` from a `get_active_context` payload.
+/// When the feature flag is off or the fetch failed, the key is absent —
+/// treat as empty. Matches the contract in `build_procedural_block`.
+///
+/// Note: returns `Ok(vec![])` for BOTH "block absent" (flag off, fetch failed)
+/// AND "block present but empty" (no always-inject rules). Scoring cannot
+/// distinguish them; the `tracing::debug!` on pointer miss surfaces the
+/// absent case for debugging.
+fn parse_procedural_ids(res: &CallToolResult) -> Result<Vec<String>, ReplayError> {
+    let text = tool_text(res)?;
+    let v: serde_json::Value = serde_json::from_str(text)?;
+    let Some(rules) = v.pointer("/procedural/rules").and_then(|x| x.as_array()) else {
+        tracing::debug!("get_active_context response lacks /procedural/rules — treating as empty");
+        return Ok(Vec::new());
+    };
+    Ok(rules
+        .iter()
+        .filter_map(|r| r.get("id").and_then(|i| i.as_str()).map(String::from))
+        .collect())
 }
 
 /// `recall_rules(compact=true)` returns a JSON array of `{id, score, ...}`.

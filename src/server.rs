@@ -650,7 +650,8 @@ impl LoreServer {
          7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
          8. PERIODIC CHECK: call get_active_context() every ~5 messages to stay grounded.\n\
          9. COLD START: at the beginning of a new session, call get_next_steps() for a briefing on pending work.\n\
-         10. If unsure what to do next, call get_protocol() to re-read these rules.\n\
+         10. TASK COMPLETION: when closing a task, pass any review-surfaced follow-ups (reviewer nits, deferred refactors, related bugs) to complete_task via the `followups` array — they become child tasks automatically. This is the single capture point; items not logged here are forgotten.\n\
+         11. If unsure what to do next, call get_protocol() to re-read these rules.\n\
          Violation causes context rot and repeated failures."
     }
 }
@@ -812,6 +813,10 @@ pub struct ProposeAttemptParams {
     #[schemars(description = "Optional agent identifier for multi-agent workflows")]
     pub agent_id: Option<String>,
     #[schemars(
+        description = "Optional session identifier — disambiguates attempts from the same agent across separate sessions"
+    )]
+    pub session_id: Option<String>,
+    #[schemars(
         description = "If true, ask the user to confirm the approach via MCP elicitation before persisting the attempt. This is an LLM-initiated review request — use it when you want an explicit human sign-off on your plan. Default false. Silently skipped when the client does not support elicitation."
     )]
     pub request_confirmation: Option<bool>,
@@ -833,6 +838,12 @@ pub struct LogOutcomeParams {
         description = "Optional code snippet — include the actual code that was written for this attempt"
     )]
     pub code_snippet: Option<String>,
+    #[schemars(
+        description = "Optional agent identifier of the agent resolving this attempt (may differ from proposer)"
+    )]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Optional session identifier of the resolver")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -909,6 +920,10 @@ pub struct CompleteTaskParams {
         description = "UUID of the accepted attempt that resolved this task. If omitted, auto-detects from the last accepted attempt."
     )]
     pub resolved_attempt_id: Option<String>,
+    #[schemars(
+        description = "Follow-up items surfaced during this task (reviewer nits, deferred refactors, unrelated bugs). Each becomes a child task. Pass here so they aren't forgotten. Max 2048 bytes/entry."
+    )]
+    pub followups: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -957,6 +972,10 @@ pub struct LogContextWipeParams {
     pub token_count: i32,
     #[schemars(description = "UUID of the last attempt before the wipe")]
     pub last_attempt_id: Option<String>,
+    #[schemars(description = "Optional agent identifier emitting the wipe event")]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Optional session identifier emitting the wipe event")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1459,6 +1478,13 @@ impl LoreServer {
             db::scratchpad::write_scratch(self.pool(), project_id, task, &key, &value, ttl_secs)
                 .await
                 .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            ttl_secs = ttl_secs.unwrap_or(-1),
+            "Wrote scratchpad entry"
+        );
         Self::json_content_with_nudge(
             &entry,
             "Scratch entry written. Read it back with read_scratch(key, task_id).",
@@ -1479,6 +1505,13 @@ impl LoreServer {
         let entry = db::scratchpad::read_scratch(self.pool(), project_id, task, &key)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            found = entry.is_some(),
+            "Read scratchpad entry"
+        );
         match entry {
             Some(e) => Self::json_content_with_nudge(&e, "Use this entry in your current task."),
             None => Self::json_content_with_nudge(
@@ -1501,6 +1534,13 @@ impl LoreServer {
         let entries = db::scratchpad::list_scratch(self.pool(), project_id, task, limit)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            limit,
+            count = entries.len(),
+            "Listed scratchpad entries"
+        );
         Self::json_content(&entries)
     }
 
@@ -1516,6 +1556,13 @@ impl LoreServer {
         let deleted = db::scratchpad::delete_scratch(self.pool(), project_id, task, &key)
             .await
             .map_err(Self::db_err)?;
+        tracing::debug!(
+            project_id = %project_id,
+            task_id = ?task,
+            key = %key,
+            deleted,
+            "Deleted scratchpad entry"
+        );
         Self::json_content_with_nudge(
             &serde_json::json!({ "deleted": deleted }),
             if deleted {
@@ -1591,6 +1638,7 @@ impl LoreServer {
             task_id,
             approach_summary,
             agent_id,
+            session_id,
             ..
         }: ProposeAttemptParams,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -1603,6 +1651,7 @@ impl LoreServer {
             tid,
             &approach_summary,
             agent_id.as_deref(),
+            session_id.as_deref(),
             git_ref.as_deref(),
         )
         .await
@@ -1628,6 +1677,8 @@ impl LoreServer {
             reasoning,
             git_ref,
             code_snippet,
+            agent_id,
+            session_id,
         }): Parameters<LogOutcomeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let reasoning = self.maybe_scrub(reasoning);
@@ -1641,12 +1692,16 @@ impl LoreServer {
         let embedding = self.embed(&reasoning).await?;
         let success = db::attempts::log_outcome(
             self.pool(),
-            aid,
-            out.clone(),
-            &reasoning,
-            Some(&embedding),
-            git_ref.as_deref(),
-            code_snippet.as_deref(),
+            db::attempts::LogOutcomeArgs {
+                attempt_id: aid,
+                outcome: out.clone(),
+                reasoning: &reasoning,
+                reasoning_embedding: Some(&embedding),
+                git_ref: git_ref.as_deref(),
+                code_snippet: code_snippet.as_deref(),
+                resolved_by_agent_id: agent_id.as_deref(),
+                resolved_by_session_id: session_id.as_deref(),
+            },
         )
         .await
         .map_err(Self::db_err)?;
@@ -1965,13 +2020,16 @@ impl LoreServer {
         )
     }
 
-    #[tool(description = "Mark a task as completed, optionally recording a lesson learned")]
+    #[tool(
+        description = "Mark a task as completed. Optionally record a lesson and log follow-up work surfaced during the task (reviewer nits, deferred refactors, bugs found) via `followups` so they don't get forgotten after the task closes."
+    )]
     pub async fn complete_task(
         &self,
         Parameters(CompleteTaskParams {
             task_id,
             lesson,
             resolved_attempt_id,
+            followups,
         }): Parameters<CompleteTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let lesson = lesson.map(|l| self.maybe_scrub(l));
@@ -1993,9 +2051,10 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
 
+        let mut followup_ids: Vec<Uuid> = Vec::new();
         if success {
+            let project_id = self.project_id().await?;
             if let Some(lesson_text) = &lesson {
-                let project_id = self.project_id().await?;
                 let embedding = self.embed(lesson_text).await?;
                 db::semantic::create_rule(
                     self.pool(),
@@ -2008,6 +2067,40 @@ impl LoreServer {
                 .await
                 .map_err(Self::db_err)?;
             }
+
+            if let Some(items) = followups {
+                followup_ids.reserve(items.len());
+                for raw in items.into_iter().filter(|s| !s.trim().is_empty()) {
+                    let scrubbed = self.maybe_scrub(raw);
+                    Self::validate_len("followup", &scrubbed, 2048)?;
+                    let embedding = self.embed(&scrubbed).await.ok();
+                    match db::tasks::create_task(
+                        self.pool(),
+                        project_id,
+                        &scrubbed,
+                        Some(tid),
+                        None,
+                        None,
+                        embedding.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(new_id) => followup_ids.push(new_id),
+                        Err(e) => {
+                            return Err(rmcp::ErrorData::internal_error(
+                                format!(
+                                    "Partial failure after {} follow-up(s) created: {e}",
+                                    followup_ids.len()
+                                ),
+                                Some(serde_json::json!({
+                                    "parent_task_id": task_id,
+                                    "followup_task_ids": followup_ids,
+                                })),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         let rolled_up = if success {
@@ -2019,14 +2112,31 @@ impl LoreServer {
         if success {
             self.fire_webhook(
                 "task_completed",
-                serde_json::json!({ "task_id": task_id, "lesson": lesson, "parents_rolled_up": rolled_up }),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "lesson": lesson,
+                    "parents_rolled_up": rolled_up,
+                    "followups_created": followup_ids.len(),
+                }),
             )
             .await;
         }
 
+        let nudge = if followup_ids.is_empty() {
+            "Task closed. For your next goal, call start_task(description).".to_string()
+        } else {
+            format!(
+                "Task closed — {} follow-up(s) logged as child tasks. For your next goal, call start_task(description).",
+                followup_ids.len()
+            )
+        };
         Self::json_content_with_nudge(
-            &serde_json::json!({ "success": success, "parents_rolled_up": rolled_up }),
-            "Task closed. For your next goal, call start_task(description).",
+            &serde_json::json!({
+                "success": success,
+                "parents_rolled_up": rolled_up,
+                "followup_task_ids": followup_ids,
+            }),
+            &nudge,
         )
     }
 
@@ -2310,6 +2420,8 @@ impl LoreServer {
             task_id,
             token_count,
             last_attempt_id,
+            agent_id,
+            session_id,
         }): Parameters<LogContextWipeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let tid = Self::parse_uuid(&task_id)?;
@@ -2317,9 +2429,16 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
-        let id = db::snapshots::create_snapshot(self.pool(), tid, token_count, aid)
-            .await
-            .map_err(Self::db_err)?;
+        let id = db::snapshots::create_snapshot(
+            self.pool(),
+            tid,
+            token_count,
+            aid,
+            agent_id.as_deref(),
+            session_id.as_deref(),
+        )
+        .await
+        .map_err(Self::db_err)?;
         Self::json_content_with_nudge(
             &serde_json::json!({ "snapshot_id": id.to_string() }),
             "Context wipe recorded. In the new session, call get_next_steps() or get_active_context() to resume.",
@@ -2681,13 +2800,22 @@ impl LoreServer {
                 .await
                 .ok()
                 .and_then(|a| a.last().map(|a| a.id));
-            let _ = db::snapshots::create_snapshot(
+            if let Err(e) = db::snapshots::create_snapshot(
                 self.pool(),
                 task.id,
                 token_count.unwrap_or(0),
                 last_attempt,
+                None,
+                None,
             )
-            .await;
+            .await
+            {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "generate_handoff: create_snapshot failed; handoff markdown still returned"
+                );
+            }
         }
 
         writeln!(

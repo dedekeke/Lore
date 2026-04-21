@@ -1,5 +1,6 @@
 mod common;
 
+use lore::db::attempts::LogOutcomeArgs;
 use lore::db::semantic::RuleCategory;
 use lore::db::{attempts, projects, retention, scratchpad, semantic, tasks, AttemptOutcome};
 
@@ -10,7 +11,7 @@ async fn test_prune_old_attempts() {
     let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
         .await
         .unwrap();
-    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None, None)
         .await
         .unwrap();
 
@@ -92,33 +93,47 @@ async fn test_consolidate_preserves_failure_narrative() {
         .await
         .unwrap();
 
-    let rejected_id = attempts::create_attempt(&pool, tid, "use JWT in cookies", None, None)
+    let rejected_id = attempts::create_attempt(&pool, tid, "use JWT in cookies", None, None, None)
         .await
         .unwrap();
     attempts::log_outcome(
         &pool,
-        rejected_id,
-        AttemptOutcome::Rejected,
-        "CSRF risk",
+        LogOutcomeArgs {
+            attempt_id: rejected_id,
+            outcome: AttemptOutcome::Rejected,
+            reasoning: "CSRF risk",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let accepted_id = attempts::create_attempt(
+        &pool,
+        tid,
+        "use JWT in Authorization header",
         None,
         None,
         None,
     )
     .await
     .unwrap();
-
-    let accepted_id =
-        attempts::create_attempt(&pool, tid, "use JWT in Authorization header", None, None)
-            .await
-            .unwrap();
     attempts::log_outcome(
         &pool,
-        accepted_id,
-        AttemptOutcome::Accepted,
-        "stateless, CSRF-safe",
-        None,
-        None,
-        None,
+        LogOutcomeArgs {
+            attempt_id: accepted_id,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "stateless, CSRF-safe",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
     )
     .await
     .unwrap();
@@ -167,12 +182,24 @@ async fn test_consolidate_skips_tasks_below_threshold() {
         .await
         .unwrap();
 
-    let aid = attempts::create_attempt(&pool, tid, "approach", None, None)
+    let aid = attempts::create_attempt(&pool, tid, "approach", None, None, None)
         .await
         .unwrap();
-    attempts::log_outcome(&pool, aid, AttemptOutcome::Accepted, "ok", None, None, None)
-        .await
-        .unwrap();
+    attempts::log_outcome(
+        &pool,
+        LogOutcomeArgs {
+            attempt_id: aid,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "ok",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
+    )
+    .await
+    .unwrap();
     tasks::complete_task(&pool, tid, None).await.unwrap();
 
     sqlx::query("UPDATE ai_memory.attempts SET resolved_at = NOW() - interval '100 days'")

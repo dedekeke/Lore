@@ -261,15 +261,13 @@ async fn test_ticket_number_create_update_clear() {
     assert_eq!(task.ticket_number.as_deref(), Some("ABC-123"));
 
     // Update to a new ticket
-    let updated = tasks::update_task(
+    let updated = tasks::apply_task_update(
         &pool,
         tid,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(Some("ENG-42")),
+        tasks::TaskUpdate {
+            ticket_number: Some(Some("ENG-42")),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -278,9 +276,16 @@ async fn test_ticket_number_create_update_clear() {
     assert_eq!(task.ticket_number.as_deref(), Some("ENG-42"));
 
     // Clear it
-    let updated = tasks::update_task(&pool, tid, None, None, None, None, None, Some(None))
-        .await
-        .unwrap();
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            ticket_number: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert!(updated);
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
     assert!(task.ticket_number.is_none());

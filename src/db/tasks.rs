@@ -71,51 +71,73 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Err
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn update_task(
+/// Partial update set for `apply_task_update`.
+///
+/// Each field is `Option<Option<_>>` with three states:
+/// - `None` — don't touch (leave existing value).
+/// - `Some(None)` — clear (write SQL NULL).
+/// - `Some(Some(v))` — set to `v`.
+///
+/// Constructed via `TaskUpdate::default()` and then field-set, so call sites
+/// only mention the fields they actually mutate.
+#[derive(Debug, Default)]
+pub struct TaskUpdate<'a> {
+    pub priority: Option<Option<&'a str>>,
+    pub task_type: Option<Option<&'a str>>,
+    pub description: Option<&'a str>,
+    pub description_embedding: Option<&'a [f32]>,
+    pub parent_task_id: Option<Option<Uuid>>,
+    pub ticket_number: Option<Option<&'a str>>,
+}
+
+impl TaskUpdate<'_> {
+    fn is_empty(&self) -> bool {
+        self.priority.is_none()
+            && self.task_type.is_none()
+            && self.description.is_none()
+            && self.description_embedding.is_none()
+            && self.parent_task_id.is_none()
+            && self.ticket_number.is_none()
+    }
+}
+
+pub async fn apply_task_update(
     pool: &PgPool,
     id: Uuid,
-    priority: Option<Option<&str>>,
-    task_type: Option<Option<&str>>,
-    description: Option<&str>,
-    description_embedding: Option<&[f32]>,
-    parent_task_id: Option<Option<Uuid>>,
-    ticket_number: Option<Option<&str>>,
+    fields: TaskUpdate<'_>,
 ) -> Result<bool, sqlx::Error> {
-    // Each Option<Option<_>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
+    if fields.is_empty() {
+        return Ok(false);
+    }
+
     let mut set_clauses = Vec::new();
     let mut param_idx = 2u32;
 
-    if priority.is_some() {
+    if fields.priority.is_some() {
         set_clauses.push(format!("priority = ${param_idx}"));
         param_idx += 1;
     }
-    if task_type.is_some() {
+    if fields.task_type.is_some() {
         set_clauses.push(format!("task_type = ${param_idx}"));
         param_idx += 1;
     }
-    if description.is_some() {
+    if fields.description.is_some() {
         set_clauses.push(format!(
             "description = ${param_idx}, summary = ${}",
             param_idx + 1
         ));
         param_idx += 2;
     }
-    if description_embedding.is_some() {
+    if fields.description_embedding.is_some() {
         set_clauses.push(format!("description_embedding = ${param_idx}"));
         param_idx += 1;
     }
-    if parent_task_id.is_some() {
+    if fields.parent_task_id.is_some() {
         set_clauses.push(format!("parent_task_id = ${param_idx}"));
         param_idx += 1;
     }
-    if ticket_number.is_some() {
+    if fields.ticket_number.is_some() {
         set_clauses.push(format!("ticket_number = ${param_idx}"));
-        param_idx += 1;
-    }
-    let _ = param_idx;
-    if set_clauses.is_empty() {
-        return Ok(false);
     }
 
     let sql = format!(
@@ -123,15 +145,17 @@ pub async fn update_task(
         set_clauses.join(", ")
     );
 
-    let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
+    let emb = fields
+        .description_embedding
+        .map(|e| Vector::from(e.to_vec()));
     let mut query = sqlx::query(&sql).bind(id);
-    if let Some(p) = &priority {
-        query = query.bind(p.as_deref());
+    if let Some(p) = fields.priority {
+        query = query.bind(p);
     }
-    if let Some(tt) = &task_type {
-        query = query.bind(tt.as_deref());
+    if let Some(tt) = fields.task_type {
+        query = query.bind(tt);
     }
-    if let Some(desc) = description {
+    if let Some(desc) = fields.description {
         let summary = generate_summary(desc);
         query = query.bind(desc);
         query = query.bind(summary);
@@ -139,11 +163,11 @@ pub async fn update_task(
     if emb.is_some() {
         query = query.bind(emb.as_ref());
     }
-    if let Some(pid) = &parent_task_id {
-        query = query.bind(*pid);
+    if let Some(pid) = fields.parent_task_id {
+        query = query.bind(pid);
     }
-    if let Some(tn) = &ticket_number {
-        query = query.bind(tn.as_deref());
+    if let Some(tn) = fields.ticket_number {
+        query = query.bind(tn);
     }
 
     let result = query.execute(pool).await?;

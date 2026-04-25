@@ -411,15 +411,17 @@ async fn update_task_handler(
         }
     });
 
-    let updated = db::tasks::update_task(
+    let updated = db::tasks::apply_task_update(
         &state.pool,
         id,
-        priority.as_ref().map(|o| o.as_deref()),
-        task_type.as_ref().map(|o| o.as_deref()),
-        description.as_deref(),
-        None,
-        parent_task_id,
-        ticket_number.as_ref().map(|o| o.as_deref()),
+        db::tasks::TaskUpdate {
+            priority: priority.as_ref().map(|o| o.as_deref()),
+            task_type: task_type.as_ref().map(|o| o.as_deref()),
+            description: description.as_deref(),
+            parent_task_id,
+            ticket_number: ticket_number.as_ref().map(|o| o.as_deref()),
+            ..Default::default()
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

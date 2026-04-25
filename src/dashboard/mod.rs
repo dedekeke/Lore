@@ -167,6 +167,7 @@ pub struct ProjectDetailQuery {
     status: Option<String>,
     priority: Option<String>,
     task_type: Option<String>,
+    ticket_prefix: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
     sort: Option<String>,
@@ -223,6 +224,19 @@ async fn project_detail(
     if let Some(ref tt) = q.task_type {
         tasks.retain(|t| t.task_type.as_deref() == Some(tt.as_str()));
     }
+    let ticket_prefix = q
+        .ticket_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_uppercase);
+    if let Some(ref pfx) = ticket_prefix {
+        tasks.retain(|t| {
+            t.ticket_number
+                .as_deref()
+                .is_some_and(|tn| tn.to_ascii_uppercase().starts_with(pfx))
+        });
+    }
 
     // Collect distinct values for filter dropdowns
     let all_tasks = db::tasks::list_tasks(&state.pool, id, None)
@@ -258,6 +272,7 @@ async fn project_detail(
             current_status => resolved_status,
             current_priority => q.priority,
             current_task_type => q.task_type,
+            current_ticket_prefix => ticket_prefix,
             page => page,
             per_page => per_page,
             total_pages => total_pages,

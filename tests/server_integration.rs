@@ -62,6 +62,7 @@ fn start_task_params(description: &str) -> Parameters<StartTaskParams> {
         parent_task_id: None,
         priority: None,
         task_type: None,
+        ticket_number: None,
     })
 }
 

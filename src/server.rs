@@ -366,6 +366,20 @@ impl LoreServer {
         Ok(())
     }
 
+    /// Char-counted length cap for ticket_number — keeps the dashboard, MCP,
+    /// and HTML `maxlength` enforcement on the same Unicode-character semantic
+    /// (vs. `validate_len` which counts bytes).
+    fn validate_ticket_number(val: &str) -> Result<(), rmcp::ErrorData> {
+        let chars = val.chars().count();
+        if chars > 64 {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("ticket_number exceeds max length ({chars} > 64 chars)"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_nonblank(field: &str, val: &str) -> Result<(), rmcp::ErrorData> {
         if val.trim().is_empty() {
             return Err(rmcp::ErrorData::invalid_params(
@@ -802,6 +816,10 @@ pub struct StartTaskParams {
     pub priority: Option<String>,
     #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
     pub task_type: Option<String>,
+    #[schemars(
+        description = "Optional external tracker reference, e.g. Jira/Linear ticket like \"ABC-123\". Surfaced in get_next_steps and editable on the dashboard."
+    )]
+    pub ticket_number: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -908,6 +926,10 @@ pub struct UpdateTaskParams {
     pub task_type: Option<String>,
     #[schemars(description = "New description text")]
     pub description: Option<String>,
+    #[schemars(
+        description = "External tracker reference, e.g. \"ABC-123\". Empty string clears it."
+    )]
+    pub ticket_number: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1583,6 +1605,7 @@ impl LoreServer {
             parent_task_id,
             priority,
             task_type,
+            ticket_number,
         }): Parameters<StartTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let description = self.maybe_scrub(description);
@@ -1592,6 +1615,12 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
+        let ticket_number = ticket_number
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        if let Some(ref t) = ticket_number {
+            Self::validate_ticket_number(t)?;
+        }
         let embedding = self.embed(&description).await.ok();
         let id = db::tasks::create_task(
             self.pool(),
@@ -1600,6 +1629,7 @@ impl LoreServer {
             parent,
             priority.as_deref(),
             task_type.as_deref(),
+            ticket_number.as_deref(),
             embedding.as_deref(),
         )
         .await
@@ -1962,6 +1992,7 @@ impl LoreServer {
             priority,
             task_type,
             description,
+            ticket_number,
         }): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let description = description.map(|d| self.maybe_scrub(d));
@@ -1985,6 +2016,17 @@ impl LoreServer {
                 Some(trimmed)
             }
         });
+        let tn = ticket_number.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(Some(ref t)) = tn {
+            Self::validate_ticket_number(t)?;
+        }
         let desc = description
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
@@ -2010,6 +2052,7 @@ impl LoreServer {
             desc.as_deref(),
             desc_embedding.as_deref(),
             None,
+            tn.as_ref().map(|o| o.as_deref()),
         )
         .await
         .map_err(Self::db_err)?;
@@ -2079,6 +2122,7 @@ impl LoreServer {
                         project_id,
                         &scrubbed,
                         Some(tid),
+                        None,
                         None,
                         None,
                         embedding.as_deref(),
@@ -2645,22 +2689,27 @@ impl LoreServer {
         // Build action items from scored order
         let mut actions: Vec<String> = Vec::new();
         for (s, score, explanation) in &scored {
+            let ticket = s
+                .ticket_number
+                .as_deref()
+                .map(|t| format!("[{t}] "))
+                .unwrap_or_default();
             let action = match s.status {
                 db::TaskStatus::Active if s.pending_attempts > 0 => {
                     format!(
-                        "[score={score:.2}] Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
                         s.description, s.pending_attempts
                     )
                 }
                 db::TaskStatus::Active => {
                     format!(
-                        "[score={score:.2}] Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
                         s.description, s.total_attempts, s.rejected_attempts
                     )
                 }
                 db::TaskStatus::Blocked => {
                     format!(
-                        "[score={score:.2}] Task '{}' is BLOCKED — needs unblocking ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' is BLOCKED — needs unblocking ({explanation})",
                         s.description
                     )
                 }
@@ -2874,6 +2923,7 @@ impl LoreServer {
                 description: task.description.clone(),
                 status: format!("{:?}", task.status).to_lowercase(),
                 priority: task.priority.clone(),
+                ticket_number: task.ticket_number.clone(),
                 attempts: recent,
             });
         }
@@ -2900,6 +2950,7 @@ impl LoreServer {
                     "description": t.description,
                     "status": t.status,
                     "priority": t.priority,
+                    "ticket_number": t.ticket_number,
                     "recent_attempts": t.attempts.iter().map(|a| serde_json::json!({
                         "outcome": a.outcome,
                         "approach": a.approach,
@@ -3470,6 +3521,7 @@ struct TaskContext {
     description: String,
     status: String,
     priority: Option<String>,
+    ticket_number: Option<String>,
     attempts: Vec<AttemptSnippet>,
 }
 
@@ -4030,6 +4082,7 @@ mod tests {
             status: db::TaskStatus::Active,
             created_at: now,
             priority: priority.map(|s| s.to_string()),
+            ticket_number: None,
             total_attempts: 0,
             pending_attempts: 0,
             rejected_attempts: rejected,
@@ -4057,6 +4110,7 @@ mod tests {
             status: db::TaskStatus::Active,
             created_at: old,
             priority: None,
+            ticket_number: None,
             total_attempts: 0,
             pending_attempts: 0,
             rejected_attempts: 0,

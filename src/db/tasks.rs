@@ -61,7 +61,6 @@ pub async fn create_task(
     Ok(row.0)
 }
 
-#[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \

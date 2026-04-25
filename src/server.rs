@@ -402,6 +402,32 @@ impl LoreServer {
         }
     }
 
+    /// Best-effort fetch of `ticket_number` for inclusion in webhook payloads.
+    /// Narrow `SELECT ticket_number` (no embedding column) — webhook hot path.
+    /// Errors are swallowed (logged at warn) — missing ticket is just `None`
+    /// to subscribers; we never want a transient DB hiccup to drop the event.
+    ///
+    /// On the `rejection_threshold` path this fetch is a separate query from
+    /// the attempt+rejection-list reads, so a concurrent `update_task` could
+    /// emit a `ticket_number` value that differs from what was stored at the
+    /// instant the threshold breached. Acceptable: ticket_number changes are
+    /// rare/operator-driven, and `task_id` remains the authoritative key.
+    async fn task_ticket_number(&self, task_id: uuid::Uuid) -> Option<String> {
+        match sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT ticket_number FROM ai_memory.tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await
+        {
+            Ok(row) => row.and_then(|(t,)| t),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "task_ticket_number lookup failed; webhook payload will carry null");
+                None
+            }
+        }
+    }
+
     async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
         if let Some(url) = &self.config().webhook_url {
             let project_name = if let Some(pid) = *self.inner.current_project_id.read().await {
@@ -1755,10 +1781,12 @@ impl LoreServer {
                 .unwrap_or_default();
                 let threshold = self.config().webhook_rejection_threshold as usize;
                 if rejected.len() == threshold {
+                    let ticket_number = self.task_ticket_number(attempt.task_id).await;
                     self.fire_webhook(
                         "rejection_threshold",
                         serde_json::json!({
                             "task_id": attempt.task_id,
+                            "ticket_number": ticket_number,
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
@@ -2162,10 +2190,12 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({
                     "task_id": task_id,
+                    "ticket_number": ticket_number,
                     "lesson": lesson,
                     "parents_rolled_up": rolled_up,
                     "followups_created": followup_ids.len(),
@@ -2230,9 +2260,15 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "ticket_number": ticket_number,
+                    "reason": reason,
+                    "parents_rolled_up": rolled_up,
+                }),
             )
             .await;
         }

@@ -1668,6 +1668,17 @@ impl LoreServer {
         )
         .await
         .map_err(Self::db_err)?;
+        self.fire_webhook(
+            "task_created",
+            serde_json::json!({
+                "task_id": id.to_string(),
+                "ticket_number": ticket_number,
+                "parent_task_id": parent.map(|p| p.to_string()),
+                "priority": priority,
+                "task_type": task_type,
+            }),
+        )
+        .await;
         Self::json_content_with_nudge(
             &serde_json::json!({ "task_id": id.to_string() }),
             "Task created. Next: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.",

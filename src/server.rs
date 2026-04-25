@@ -2743,14 +2743,26 @@ impl LoreServer {
 
         // L0: minimal orientation
         if tier.as_deref().map(|t| t.to_uppercase()).as_deref() == Some("L0") {
-            let active_count =
-                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
-                    .await
-                    .map_err(Self::db_err)?;
-            let blocked_count =
-                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
-                    .await
-                    .map_err(Self::db_err)?;
+            let active_count = db::tasks::count_tasks(
+                self.pool(),
+                project_id,
+                db::tasks::TaskListFilters {
+                    status: Some(db::TaskStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(Self::db_err)?;
+            let blocked_count = db::tasks::count_tasks(
+                self.pool(),
+                project_id,
+                db::tasks::TaskListFilters {
+                    status: Some(db::TaskStatus::Blocked),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(Self::db_err)?;
             let lesson_count = db::semantic::count_rules_by_category(
                 self.pool(),
                 project_id,

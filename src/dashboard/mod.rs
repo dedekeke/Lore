@@ -779,6 +779,12 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     // complete_task; the prior `child.created_at > parent.completed_at` heuristic
     // missed (a) subtasks created between real work finishing and complete_task
     // being called and (b) bulk-imported subtasks with older created_at.
+    //
+    // No `parent.completed_at IS NOT NULL` guard here: the follow_up edge is only
+    // written by complete_task on a successful 'completed' transition, so its
+    // existence already encodes post-completion intent. status='completed'
+    // remains as a defensive guard against rows whose status was later mutated
+    // back (e.g. update_task_status reverting a completion).
     let followup_parents: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT parent.id) \
          FROM ai_memory.tasks parent \

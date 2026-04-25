@@ -971,6 +971,14 @@ pub struct ListSubtasksParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindTaskByTicketParams {
+    #[schemars(
+        description = "External tracker reference, e.g. \"ABC-123\". Exact match. Returns all tasks in the current project carrying that ticket (uniqueness is not enforced)."
+    )]
+    pub ticket_number: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetTaskStatsParams {
     #[schemars(description = "Filter by status: active, completed, abandoned, or blocked")]
     pub status: Option<String>,
@@ -2258,6 +2266,28 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&subtasks)
+    }
+
+    #[tool(
+        description = "Find tasks in the current project by their external tracker reference (e.g. Jira/Linear ticket like \"ABC-123\"). Exact match. Returns an array because uniqueness is not enforced — a single ticket can map to multiple Lore tasks (refactor + follow-up bug). Empty array on miss."
+    )]
+    pub async fn find_task_by_ticket(
+        &self,
+        Parameters(FindTaskByTicketParams { ticket_number }): Parameters<FindTaskByTicketParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let trimmed = ticket_number.trim();
+        if trimmed.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "ticket_number must not be blank".to_string(),
+                None,
+            ));
+        }
+        Self::validate_ticket_number(trimmed)?;
+        let project_id = self.project_id().await?;
+        let tasks = db::tasks::find_by_ticket_number(self.pool(), project_id, trimmed)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&tasks)
     }
 
     #[tool(

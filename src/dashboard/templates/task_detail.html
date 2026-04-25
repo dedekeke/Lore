@@ -18,13 +18,12 @@
   {# Editable task_type — custom dropdown #}
   <span class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ task.id }}" data-value="{{ task.task_type | default(value='') }}">{{ task.task_type | default(value="+ Type") }}</span>
 
-  {# Editable ticket_number — free-text (Jira/Linear style, e.g. ABC-123) #}
-  <span id="ticket-badge" class="badge badge-ticket" style="cursor: pointer;{% if not task.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editTicket()" title="External tracker reference (Jira/Linear ticket)">{{ task.ticket_number | default(value="+ Ticket") }}</span>
-  <span id="ticket-edit" style="display: none;">
-    <input id="ticket-input" type="text" maxlength="64" placeholder="ABC-123" value="{{ task.ticket_number | default(value='') }}" style="font-size: 0.75rem; padding: 0.15rem 0.4rem; background: var(--surface); border: 1px solid var(--accent); color: var(--fg); border-radius: 4px; width: 110px;">
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveTicket()">Save</button>
-    <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="cancelTicket()">Cancel</button>
-  </span>
+  {# Inline editable ticket_number — click to edit, blur or Enter to save, Esc to cancel #}
+  <span class="badge badge-ticket ticket-edit" contenteditable="true" spellcheck="false"
+        style="cursor: text;{% if not task.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}"
+        data-task-id="{{ task.id }}"
+        data-value="{{ task.ticket_number | default(value='') }}"
+        title="External tracker reference (Jira/Linear ticket)">{{ task.ticket_number | default(value="+ Ticket") }}</span>
 
   {# Link/unlink parent #}
   <span id="parent-badge">
@@ -142,28 +141,6 @@ function editField(badge, field) {
       ? 'cursor: pointer;'
       : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
   });
-}
-function editTicket() {
-  document.getElementById('ticket-badge').style.display = 'none';
-  document.getElementById('ticket-edit').style.display = '';
-  const input = document.getElementById('ticket-input');
-  input.focus();
-  input.select();
-}
-function cancelTicket() {
-  document.getElementById('ticket-badge').style.display = '';
-  document.getElementById('ticket-edit').style.display = 'none';
-}
-async function saveTicket() {
-  const val = document.getElementById('ticket-input').value.trim();
-  if ([...val].length > 64) { alert('Ticket too long (max 64 chars)'); return; }
-  const res = await fetch('/tasks/{{ task.id }}', {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ticket_number: val})
-  });
-  if (!res.ok) { alert('Failed to update ticket'); return; }
-  window.location.reload();
 }
 function showParentSelect() {
   document.getElementById('parent-badge').style.display = 'none';

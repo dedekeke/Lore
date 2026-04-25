@@ -380,35 +380,72 @@ pub fn generate_summary(description: &str) -> String {
     }
 }
 
+/// Filter set for `count_tasks` / `list_tasks_paginated`. All fields default
+/// to `None` so call sites only mention what they touch.
+///
+/// `ticket_prefix` is matched case-insensitively via `ILIKE $n || '%'` — pass
+/// the raw user input (no need to uppercase). Empty / whitespace-only input
+/// should be coerced to `None` at the boundary so the query doesn't widen.
+#[derive(Debug, Default, Clone)]
+pub struct TaskListFilters<'a> {
+    pub status: Option<TaskStatus>,
+    pub priority: Option<&'a str>,
+    pub task_type: Option<&'a str>,
+    pub ticket_prefix: Option<&'a str>,
+}
+
+/// Builds the dynamic `WHERE` body and returns the index of the next free
+/// placeholder. project_id is always bound at $1, so `start_idx` is 2.
+fn task_filter_clauses(filters: &TaskListFilters) -> (String, i32) {
+    let mut clauses = vec!["project_id = $1".to_string()];
+    let mut idx: i32 = 2;
+    if filters.status.is_some() {
+        clauses.push(format!("status = ${idx}"));
+        idx += 1;
+    }
+    if filters.priority.is_some() {
+        clauses.push(format!("priority = ${idx}"));
+        idx += 1;
+    }
+    if filters.task_type.is_some() {
+        clauses.push(format!("task_type = ${idx}"));
+        idx += 1;
+    }
+    if filters.ticket_prefix.is_some() {
+        clauses.push(format!("ticket_number ILIKE ${idx} || '%'"));
+        idx += 1;
+    }
+    (clauses.join(" AND "), idx)
+}
+
 pub async fn count_tasks(
     pool: &PgPool,
     project_id: Uuid,
-    status: Option<TaskStatus>,
+    filters: TaskListFilters<'_>,
 ) -> Result<i64, sqlx::Error> {
-    let row: (i64,) = match status {
-        Some(s) => {
-            sqlx::query_as(
-                "SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1 AND status = $2",
-            )
-            .bind(project_id)
-            .bind(&s)
-            .fetch_one(pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as("SELECT COUNT(*) FROM ai_memory.tasks WHERE project_id = $1")
-                .bind(project_id)
-                .fetch_one(pool)
-                .await?
-        }
-    };
+    let (where_body, _) = task_filter_clauses(&filters);
+    let sql = format!("SELECT COUNT(*) FROM ai_memory.tasks WHERE {where_body}");
+    let mut q = sqlx::query_as::<_, (i64,)>(&sql).bind(project_id);
+    if let Some(ref s) = filters.status {
+        q = q.bind(s);
+    }
+    if let Some(p) = filters.priority {
+        q = q.bind(p);
+    }
+    if let Some(tt) = filters.task_type {
+        q = q.bind(tt);
+    }
+    if let Some(tp) = filters.ticket_prefix {
+        q = q.bind(tp);
+    }
+    let row = q.fetch_one(pool).await?;
     Ok(row.0)
 }
 
 pub async fn list_tasks_paginated(
     pool: &PgPool,
     project_id: Uuid,
-    status: Option<TaskStatus>,
+    filters: TaskListFilters<'_>,
     sort_col: &str,
     sort_dir: &str,
     limit: i64,
@@ -425,48 +462,36 @@ pub async fn list_tasks_paginated(
     } else {
         "DESC"
     };
-
-    // When sorting by created_at, priority is primary and created_at becomes secondary
     let order = if col == "created_at" {
         format!("priority ASC NULLS LAST, {col} {dir} NULLS LAST")
     } else {
         format!("{col} {dir} NULLS LAST")
     };
 
-    let sql = match status {
-        Some(_) => format!(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
-             FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
-             ORDER BY {order} LIMIT $3 OFFSET $4"
-        ),
-        None => format!(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
-             FROM ai_memory.tasks WHERE project_id = $1 \
-             ORDER BY {order} LIMIT $2 OFFSET $3"
-        ),
-    };
+    let (where_body, next_idx) = task_filter_clauses(&filters);
+    let limit_idx = next_idx;
+    let offset_idx = next_idx + 1;
+    let sql = format!(
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+         created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
+         FROM ai_memory.tasks WHERE {where_body} \
+         ORDER BY {order} LIMIT ${limit_idx} OFFSET ${offset_idx}"
+    );
 
-    match status {
-        Some(s) => {
-            sqlx::query_as(&sql)
-                .bind(project_id)
-                .bind(&s)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await
-        }
-        None => {
-            sqlx::query_as(&sql)
-                .bind(project_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await
-        }
+    let mut q = sqlx::query_as::<_, Task>(&sql).bind(project_id);
+    if let Some(ref s) = filters.status {
+        q = q.bind(s);
     }
+    if let Some(p) = filters.priority {
+        q = q.bind(p);
+    }
+    if let Some(tt) = filters.task_type {
+        q = q.bind(tt);
+    }
+    if let Some(tp) = filters.ticket_prefix {
+        q = q.bind(tp);
+    }
+    q.bind(limit).bind(offset).fetch_all(pool).await
 }
 
 /// Direct children only (depth=1), not recursive.

@@ -200,15 +200,32 @@ async fn project_detail(
     let sort_col = q.sort.as_deref().unwrap_or("created_at");
     let sort_dir = q.dir.as_deref().unwrap_or("desc");
 
-    let total = db::tasks::count_tasks(&state.pool, id, status_filter.clone())
+    // Raw value is what the user typed (trim only) — echoed back into the input field.
+    // Capping at 64 chars matches the validate_ticket_number write-path bound and
+    // prevents pathological inputs. The DB does the case-insensitive match via ILIKE.
+    let raw_ticket_prefix = q
+        .ticket_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(str::to_string);
+
+    let filters = db::tasks::TaskListFilters {
+        status: status_filter,
+        priority: q.priority.as_deref(),
+        task_type: q.task_type.as_deref(),
+        ticket_prefix: raw_ticket_prefix.as_deref(),
+    };
+
+    let total = db::tasks::count_tasks(&state.pool, id, filters.clone())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let total_pages = (total + per_page - 1) / per_page;
 
-    let mut tasks = db::tasks::list_tasks_paginated(
+    let tasks = db::tasks::list_tasks_paginated(
         &state.pool,
         id,
-        status_filter,
+        filters,
         sort_col,
         sort_dir,
         per_page,
@@ -216,33 +233,6 @@ async fn project_detail(
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // In-memory filtering for priority, task_type, and ticket_prefix (pending DB-level filter).
-    // Pagination's `total` / `total_pages` are derived from the unfiltered DB count, so
-    // these filters can yield short pages — accepted trade-off until the DB-level pass lands.
-    if let Some(ref p) = q.priority {
-        tasks.retain(|t| t.priority.as_deref() == Some(p.as_str()));
-    }
-    if let Some(ref tt) = q.task_type {
-        tasks.retain(|t| t.task_type.as_deref() == Some(tt.as_str()));
-    }
-    // Raw value is what the user typed (trim only) — echoed back into the input field.
-    // Uppercased value is used for the case-insensitive prefix match. Capping at 64 chars
-    // matches the validate_ticket_number write-path bound and prevents pathological inputs.
-    let raw_ticket_prefix = q
-        .ticket_prefix
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && s.len() <= 64)
-        .map(str::to_string);
-    let ticket_prefix_match = raw_ticket_prefix.as_deref().map(str::to_ascii_uppercase);
-    if let Some(ref pfx) = ticket_prefix_match {
-        tasks.retain(|t| {
-            t.ticket_number
-                .as_deref()
-                .is_some_and(|tn| tn.to_ascii_uppercase().starts_with(pfx))
-        });
-    }
 
     // Collect distinct values for filter dropdowns
     let all_tasks = db::tasks::list_tasks(&state.pool, id, None)

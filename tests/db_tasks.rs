@@ -1,7 +1,7 @@
 mod common;
 
 use lore::db::attempts::{self, AttemptOutcome, LogOutcomeArgs};
-use lore::db::tasks::TaskStatus;
+use lore::db::tasks::{TaskListFilters, TaskStatus};
 use lore::db::{projects, tasks};
 
 #[tokio::test]
@@ -448,4 +448,111 @@ async fn test_task_summary_includes_ticket_number() {
         .unwrap();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].ticket_number.as_deref(), Some("LORE-9"));
+}
+
+#[tokio::test]
+async fn test_filtered_count_and_list_paginated() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "filter-test", "/")
+        .await
+        .unwrap();
+
+    tasks::create_task(
+        &pool,
+        pid,
+        "alpha",
+        None,
+        Some("P1"),
+        Some("Bug"),
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::create_task(
+        &pool,
+        pid,
+        "beta",
+        None,
+        Some("P2"),
+        Some("Feature"),
+        Some("ABC-2"),
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::create_task(
+        &pool,
+        pid,
+        "gamma",
+        None,
+        Some("P1"),
+        Some("Feature"),
+        Some("XYZ-9"),
+        None,
+    )
+    .await
+    .unwrap();
+    let done = tasks::create_task(
+        &pool,
+        pid,
+        "delta",
+        None,
+        Some("P3"),
+        Some("Bug"),
+        Some("ABC-7"),
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::complete_task(&pool, done, None).await.unwrap();
+
+    // Active + priority=P1 → alpha, gamma
+    let f = TaskListFilters {
+        status: Some(TaskStatus::Active),
+        priority: Some("P1"),
+        ..Default::default()
+    };
+    assert_eq!(tasks::count_tasks(&pool, pid, f.clone()).await.unwrap(), 2);
+    let rows = tasks::list_tasks_paginated(&pool, pid, f, "created_at", "asc", 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+
+    // Active + task_type=Feature → beta, gamma
+    let f = TaskListFilters {
+        status: Some(TaskStatus::Active),
+        task_type: Some("Feature"),
+        ..Default::default()
+    };
+    assert_eq!(tasks::count_tasks(&pool, pid, f).await.unwrap(), 2);
+
+    // Active + ticket_prefix=abc (case-insensitive) → alpha, beta (gamma is XYZ, delta is completed)
+    let f = TaskListFilters {
+        status: Some(TaskStatus::Active),
+        ticket_prefix: Some("abc"),
+        ..Default::default()
+    };
+    assert_eq!(tasks::count_tasks(&pool, pid, f).await.unwrap(), 2);
+
+    // No status filter + ticket_prefix=ABC → alpha, beta, delta
+    let f = TaskListFilters {
+        ticket_prefix: Some("ABC"),
+        ..Default::default()
+    };
+    assert_eq!(tasks::count_tasks(&pool, pid, f).await.unwrap(), 3);
+
+    // All filters stacked → alpha
+    let f = TaskListFilters {
+        status: Some(TaskStatus::Active),
+        priority: Some("P1"),
+        task_type: Some("Bug"),
+        ticket_prefix: Some("ABC"),
+    };
+    assert_eq!(tasks::count_tasks(&pool, pid, f.clone()).await.unwrap(), 1);
+    let rows = tasks::list_tasks_paginated(&pool, pid, f, "created_at", "asc", 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].description, "alpha");
 }

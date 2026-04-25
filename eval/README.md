@@ -139,6 +139,8 @@ Two regen shapes, two policies:
 
 If the diff touches both — existing rows moved AND new rows added — split the PR. Land the drift regen first so reviewers can isolate each delta.
 
+The `baselines-additive-guard` job in `.github/workflows/eval.yml` enforces the fixture-add contract automatically: any PR that touches `eval/baselines.json` must keep `version`, `metadata`, and every pre-existing `per_case` row byte-identical vs the base. It runs `scripts/eval_baselines_additive_check.sh` and fails CI on drift, pointing you back to this section.
+
 Regenerate with:
 
 ```bash

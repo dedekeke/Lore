@@ -107,15 +107,22 @@
 <h2>Attempts ({{ attempts | length }})</h2>
 {% if attempts %}
 <table>
-  <thead><tr><th>Approach</th><th style="width: 90px;">Outcome</th><th>Reasoning</th><th style="width: 110px;">Agent</th><th style="width: 110px;">Session</th><th style="width: 100px;">Created</th></tr></thead>
+  <thead><tr>
+    <th>Approach</th>
+    <th style="width: 90px;">Outcome</th>
+    <th>Reasoning</th>
+    <th style="width: 110px;" title="Proposer identity (agent_id / session_id)">Proposer</th>
+    <th style="width: 110px;" title="Resolver identity (resolved_by_agent_id / resolved_by_session_id) — who logged the outcome, may differ from proposer">Resolver</th>
+    <th style="width: 100px;">Created</th>
+  </tr></thead>
   <tbody>
     {% for a in attempts %}
     <tr>
       <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
       <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
-      <td class="mono" style="color: var(--muted);">{{ a.agent_id | default(value="—") }}</td>
-      <td class="mono" style="color: var(--muted);">{{ a.session_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);" title="agent: {{ a.agent_id | default(value='—') }}&#10;session: {{ a.session_id | default(value='—') }}">{% if a.agent_id or a.session_id %}{{ a.agent_id | default(value="—") }}{% if a.session_id %} / {{ a.session_id | truncate(length=8) }}{% endif %}{% else %}—{% endif %}</td>
+      <td class="mono" style="color: var(--muted);" title="resolved_by_agent: {{ a.resolved_by_agent_id | default(value='—') }}&#10;resolved_by_session: {{ a.resolved_by_session_id | default(value='—') }}">{% if a.resolved_by_agent_id or a.resolved_by_session_id %}{{ a.resolved_by_agent_id | default(value="—") }}{% if a.resolved_by_session_id %} / {{ a.resolved_by_session_id | truncate(length=8) }}{% endif %}{% else %}—{% endif %}</td>
       <td class="mono" style="color: var(--muted);">{{ a.created_at | dateformat }}</td>
     </tr>
     {% endfor %}

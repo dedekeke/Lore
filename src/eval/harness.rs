@@ -109,6 +109,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         parent_task_id: None,
                         priority: None,
                         task_type: None,
+                        ticket_number: None,
                     }))
                     .await?;
                 let task_id = json_field(&res, "task_id")?;

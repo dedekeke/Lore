@@ -7,10 +7,10 @@ async fn test_create_and_get_links() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "task 1", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "task 1", None, None, None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "task 2", None, None, None, None)
+    let t2 = tasks::create_task(&pool, pid, "task 2", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -33,10 +33,10 @@ async fn test_delete_link() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None)
+    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -54,10 +54,10 @@ async fn test_cascade_on_task_delete() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None)
+    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -81,10 +81,10 @@ async fn test_duplicate_link_rejected() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "a", None, None, None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None)
+    let t2 = tasks::create_task(&pool, pid, "b", None, None, None, None, None)
         .await
         .unwrap();
 

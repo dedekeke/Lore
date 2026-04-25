@@ -197,3 +197,46 @@ jobs:
                 body,
               });
             }
+
+  # PR-only guard: if eval/baselines.json moved in this PR, ensure pre-existing
+  # per_case rows + version + metadata are byte-identical vs the base. Drift in
+  # those values means the regen carried code-change deltas and belongs in a
+  # dedicated drift-regen PR per eval/README.md, not bundled with fixture adds.
+  baselines-additive-guard:
+    # fork PRs only fetch the merge ref by default — fetch-depth: 0 keeps the
+    # base SHA reachable so `git show $BASE_SHA:eval/baselines.json` works.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect baseline change
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::warning::base sha $BASE_SHA not in local history (fork PR with shallow fetch?); skipping"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$BASE_SHA" -- eval/baselines.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "eval/baselines.json unchanged in this PR — skipping additive-only guard."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Extract base baseline
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/base-baseline
+          git show "$BASE_SHA:eval/baselines.json" > /tmp/base-baseline/baselines.json
+      - name: Additive-only check
+        if: steps.detect.outputs.changed == 'true'
+        run: bash scripts/eval_baselines_additive_check.sh /tmp/base-baseline/baselines.json eval/baselines.json

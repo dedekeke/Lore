@@ -8,6 +8,7 @@ pub struct Project {
     pub name: String,
     pub root_path: String,
     pub created_at: DateTime<Utc>,
+    pub ticket_url_template: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -27,7 +28,7 @@ pub async fn create_project(
 }
 
 pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<Option<Project>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name, root_path, created_at FROM ai_memory.projects WHERE id = $1")
+    sqlx::query_as("SELECT id, name, root_path, created_at, ticket_url_template FROM ai_memory.projects WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -38,7 +39,7 @@ pub async fn get_project_by_name(
     pool: &PgPool,
     name: &str,
 ) -> Result<Option<Project>, sqlx::Error> {
-    sqlx::query_as("SELECT id, name, root_path, created_at FROM ai_memory.projects WHERE name = $1")
+    sqlx::query_as("SELECT id, name, root_path, created_at, ticket_url_template FROM ai_memory.projects WHERE name = $1")
         .bind(name)
         .fetch_optional(pool)
         .await
@@ -47,7 +48,7 @@ pub async fn get_project_by_name(
 #[allow(dead_code)]
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<Project>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, name, root_path, created_at FROM ai_memory.projects ORDER BY created_at",
+        "SELECT id, name, root_path, created_at, ticket_url_template FROM ai_memory.projects ORDER BY created_at",
     )
     .fetch_all(pool)
     .await
@@ -92,11 +93,28 @@ pub async fn get_project_by_root_path(
     root_path: &str,
 ) -> Result<Option<Project>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, name, root_path, created_at FROM ai_memory.projects WHERE root_path = $1",
+        "SELECT id, name, root_path, created_at, ticket_url_template FROM ai_memory.projects WHERE root_path = $1",
     )
     .bind(root_path)
     .fetch_optional(pool)
     .await
+}
+
+/// Set or clear the per-project ticket-URL template (e.g.
+/// `https://jira.example.com/browse/{ticket}`). Pass `None` to clear.
+/// The CHECK constraint enforces the `{ticket}` placeholder when set.
+pub async fn update_ticket_url_template(
+    pool: &PgPool,
+    id: Uuid,
+    template: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE ai_memory.projects SET ticket_url_template = $2 WHERE id = $1")
+            .bind(id)
+            .bind(template)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 #[allow(dead_code)]

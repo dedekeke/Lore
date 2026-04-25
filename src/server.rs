@@ -366,6 +366,20 @@ impl LoreServer {
         Ok(())
     }
 
+    /// Char-counted length cap for ticket_number — keeps the dashboard, MCP,
+    /// and HTML `maxlength` enforcement on the same Unicode-character semantic
+    /// (vs. `validate_len` which counts bytes).
+    fn validate_ticket_number(val: &str) -> Result<(), rmcp::ErrorData> {
+        let chars = val.chars().count();
+        if chars > 64 {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("ticket_number exceeds max length ({chars} > 64 chars)"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_nonblank(field: &str, val: &str) -> Result<(), rmcp::ErrorData> {
         if val.trim().is_empty() {
             return Err(rmcp::ErrorData::invalid_params(
@@ -385,6 +399,32 @@ impl LoreServer {
             crate::scrubber::scrub(&input)
         } else {
             input
+        }
+    }
+
+    /// Best-effort fetch of `ticket_number` for inclusion in webhook payloads.
+    /// Narrow `SELECT ticket_number` (no embedding column) — webhook hot path.
+    /// Errors are swallowed (logged at warn) — missing ticket is just `None`
+    /// to subscribers; we never want a transient DB hiccup to drop the event.
+    ///
+    /// On the `rejection_threshold` path this fetch is a separate query from
+    /// the attempt+rejection-list reads, so a concurrent `update_task` could
+    /// emit a `ticket_number` value that differs from what was stored at the
+    /// instant the threshold breached. Acceptable: ticket_number changes are
+    /// rare/operator-driven, and `task_id` remains the authoritative key.
+    async fn task_ticket_number(&self, task_id: uuid::Uuid) -> Option<String> {
+        match sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT ticket_number FROM ai_memory.tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await
+        {
+            Ok(row) => row.and_then(|(t,)| t),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "task_ticket_number lookup failed; webhook payload will carry null");
+                None
+            }
         }
     }
 
@@ -802,6 +842,10 @@ pub struct StartTaskParams {
     pub priority: Option<String>,
     #[schemars(description = "Task type, e.g. Bug, Feature, Security, Refactor")]
     pub task_type: Option<String>,
+    #[schemars(
+        description = "Optional external tracker reference, e.g. Jira/Linear ticket like \"ABC-123\". Surfaced in get_next_steps and editable on the dashboard."
+    )]
+    pub ticket_number: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -860,7 +904,9 @@ pub struct LinkTasksParams {
     pub source_task_id: String,
     #[schemars(description = "UUID of the target task")]
     pub target_task_id: String,
-    #[schemars(description = "Link type: blocks, related_to, caused_by, or duplicate_of")]
+    #[schemars(
+        description = "Link type: blocks, related_to, caused_by, duplicate_of, or follow_up"
+    )]
     pub link_type: String,
 }
 
@@ -908,6 +954,10 @@ pub struct UpdateTaskParams {
     pub task_type: Option<String>,
     #[schemars(description = "New description text")]
     pub description: Option<String>,
+    #[schemars(
+        description = "External tracker reference, e.g. \"ABC-123\". Empty string clears it."
+    )]
+    pub ticket_number: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -946,6 +996,14 @@ pub struct ListTasksParams {
 pub struct ListSubtasksParams {
     #[schemars(description = "UUID of the parent task")]
     pub parent_task_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindTaskByTicketParams {
+    #[schemars(
+        description = "External tracker reference, e.g. \"ABC-123\". Exact match. Returns all tasks in the current project carrying that ticket (uniqueness is not enforced)."
+    )]
+    pub ticket_number: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1583,6 +1641,7 @@ impl LoreServer {
             parent_task_id,
             priority,
             task_type,
+            ticket_number,
         }): Parameters<StartTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let description = self.maybe_scrub(description);
@@ -1592,6 +1651,12 @@ impl LoreServer {
             .as_deref()
             .map(Self::parse_uuid)
             .transpose()?;
+        let ticket_number = ticket_number
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        if let Some(ref t) = ticket_number {
+            Self::validate_ticket_number(t)?;
+        }
         let embedding = self.embed(&description).await.ok();
         let id = db::tasks::create_task(
             self.pool(),
@@ -1600,10 +1665,22 @@ impl LoreServer {
             parent,
             priority.as_deref(),
             task_type.as_deref(),
+            ticket_number.as_deref(),
             embedding.as_deref(),
         )
         .await
         .map_err(Self::db_err)?;
+        self.fire_webhook(
+            "task_created",
+            serde_json::json!({
+                "task_id": id.to_string(),
+                "ticket_number": ticket_number,
+                "parent_task_id": parent.map(|p| p.to_string()),
+                "priority": priority,
+                "task_type": task_type,
+            }),
+        )
+        .await;
         Self::json_content_with_nudge(
             &serde_json::json!({ "task_id": id.to_string() }),
             "Task created. Next: call propose_attempt(task_id, approach, code) BEFORE writing code to the user.",
@@ -1717,10 +1794,12 @@ impl LoreServer {
                 .unwrap_or_default();
                 let threshold = self.config().webhook_rejection_threshold as usize;
                 if rejected.len() == threshold {
+                    let ticket_number = self.task_ticket_number(attempt.task_id).await;
                     self.fire_webhook(
                         "rejection_threshold",
                         serde_json::json!({
                             "task_id": attempt.task_id,
+                            "ticket_number": ticket_number,
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
@@ -1810,7 +1889,7 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of."
+        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of, follow_up."
     )]
     pub async fn link_tasks(
         &self,
@@ -1822,7 +1901,18 @@ impl LoreServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let source = Self::parse_uuid(&source_task_id)?;
         let target = Self::parse_uuid(&target_task_id)?;
-        let valid_types = ["blocks", "related_to", "caused_by", "duplicate_of"];
+        // Mirror of the DB CHECK constraint on task_links.link_type. The DB is
+        // the source of truth; this list exists only to give a friendly
+        // error before round-tripping to PG. If the migration adds a value,
+        // update here too — drift produces a confusing "valid in DB,
+        // rejected at MCP" failure.
+        let valid_types = [
+            "blocks",
+            "related_to",
+            "caused_by",
+            "duplicate_of",
+            "follow_up",
+        ];
         let lt = link_type.to_lowercase();
         if !valid_types.contains(&lt.as_str()) {
             return Err(rmcp::ErrorData::invalid_params(
@@ -1962,6 +2052,7 @@ impl LoreServer {
             priority,
             task_type,
             description,
+            ticket_number,
         }): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let description = description.map(|d| self.maybe_scrub(d));
@@ -1985,6 +2076,17 @@ impl LoreServer {
                 Some(trimmed)
             }
         });
+        let tn = ticket_number.map(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        if let Some(Some(ref t)) = tn {
+            Self::validate_ticket_number(t)?;
+        }
         let desc = description
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
@@ -2002,14 +2104,20 @@ impl LoreServer {
             None
         };
 
-        let updated = db::tasks::update_task(
+        // parent_task_id is intentionally NOT exposed via this MCP tool —
+        // re-parenting tasks is dashboard-only. ..Default::default() leaves
+        // it untouched.
+        let updated = db::tasks::apply_task_update(
             self.pool(),
             tid,
-            p.as_ref().map(|o| o.as_deref()),
-            tt.as_ref().map(|o| o.as_deref()),
-            desc.as_deref(),
-            desc_embedding.as_deref(),
-            None,
+            db::tasks::TaskUpdate {
+                priority: p.as_ref().map(|o| o.as_deref()),
+                task_type: tt.as_ref().map(|o| o.as_deref()),
+                description: desc.as_deref(),
+                description_embedding: desc_embedding.as_deref(),
+                ticket_number: tn.as_ref().map(|o| o.as_deref()),
+                ..Default::default()
+            },
         )
         .await
         .map_err(Self::db_err)?;
@@ -2081,11 +2189,29 @@ impl LoreServer {
                         Some(tid),
                         None,
                         None,
+                        None,
                         embedding.as_deref(),
                     )
                     .await
                     {
-                        Ok(new_id) => followup_ids.push(new_id),
+                        Ok(new_id) => {
+                            // Explicit follow_up edge — analytics + downstream tooling
+                            // read this instead of inferring from created_at timestamps.
+                            // upsert_link is idempotent: a re-run or a backfill collision
+                            // returns Ok(None), no warn — only real DB errors surface.
+                            if let Err(e) =
+                                db::task_links::upsert_link(self.pool(), tid, new_id, "follow_up")
+                                    .await
+                            {
+                                tracing::warn!(
+                                    parent_task_id = %tid,
+                                    followup_task_id = %new_id,
+                                    error = %e,
+                                    "follow_up link upsert failed; child task still recorded"
+                                );
+                            }
+                            followup_ids.push(new_id);
+                        }
                         Err(e) => {
                             return Err(rmcp::ErrorData::internal_error(
                                 format!(
@@ -2110,10 +2236,12 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({
                     "task_id": task_id,
+                    "ticket_number": ticket_number,
                     "lesson": lesson,
                     "parents_rolled_up": rolled_up,
                     "followups_created": followup_ids.len(),
@@ -2178,9 +2306,15 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "ticket_number": ticket_number,
+                    "reason": reason,
+                    "parents_rolled_up": rolled_up,
+                }),
             )
             .await;
         }
@@ -2214,6 +2348,28 @@ impl LoreServer {
             .await
             .map_err(Self::db_err)?;
         Self::json_content(&subtasks)
+    }
+
+    #[tool(
+        description = "Find tasks in the current project by their external tracker reference (e.g. Jira/Linear ticket like \"ABC-123\"). Exact match. Returns an array because uniqueness is not enforced — a single ticket can map to multiple Lore tasks (refactor + follow-up bug). Empty array on miss."
+    )]
+    pub async fn find_task_by_ticket(
+        &self,
+        Parameters(FindTaskByTicketParams { ticket_number }): Parameters<FindTaskByTicketParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let trimmed = ticket_number.trim();
+        if trimmed.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "ticket_number must not be blank".to_string(),
+                None,
+            ));
+        }
+        Self::validate_ticket_number(trimmed)?;
+        let project_id = self.project_id().await?;
+        let tasks = db::tasks::find_by_ticket_number(self.pool(), project_id, trimmed)
+            .await
+            .map_err(Self::db_err)?;
+        Self::json_content(&tasks)
     }
 
     #[tool(
@@ -2645,22 +2801,27 @@ impl LoreServer {
         // Build action items from scored order
         let mut actions: Vec<String> = Vec::new();
         for (s, score, explanation) in &scored {
+            let ticket = s
+                .ticket_number
+                .as_deref()
+                .map(|t| format!("[{t}] "))
+                .unwrap_or_default();
             let action = match s.status {
                 db::TaskStatus::Active if s.pending_attempts > 0 => {
                     format!(
-                        "[score={score:.2}] Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' has {} pending attempt(s) awaiting outcome resolution ({explanation})",
                         s.description, s.pending_attempts
                     )
                 }
                 db::TaskStatus::Active => {
                     format!(
-                        "[score={score:.2}] Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' is active ({} attempts, {} rejected) — propose next approach ({explanation})",
                         s.description, s.total_attempts, s.rejected_attempts
                     )
                 }
                 db::TaskStatus::Blocked => {
                     format!(
-                        "[score={score:.2}] Task '{}' is BLOCKED — needs unblocking ({explanation})",
+                        "[score={score:.2}] {ticket}Task '{}' is BLOCKED — needs unblocking ({explanation})",
                         s.description
                     )
                 }
@@ -2874,6 +3035,7 @@ impl LoreServer {
                 description: task.description.clone(),
                 status: format!("{:?}", task.status).to_lowercase(),
                 priority: task.priority.clone(),
+                ticket_number: task.ticket_number.clone(),
                 attempts: recent,
             });
         }
@@ -2900,6 +3062,7 @@ impl LoreServer {
                     "description": t.description,
                     "status": t.status,
                     "priority": t.priority,
+                    "ticket_number": t.ticket_number,
                     "recent_attempts": t.attempts.iter().map(|a| serde_json::json!({
                         "outcome": a.outcome,
                         "approach": a.approach,
@@ -3470,6 +3633,7 @@ struct TaskContext {
     description: String,
     status: String,
     priority: Option<String>,
+    ticket_number: Option<String>,
     attempts: Vec<AttemptSnippet>,
 }
 
@@ -4030,6 +4194,7 @@ mod tests {
             status: db::TaskStatus::Active,
             created_at: now,
             priority: priority.map(|s| s.to_string()),
+            ticket_number: None,
             total_attempts: 0,
             pending_attempts: 0,
             rejected_attempts: rejected,
@@ -4057,6 +4222,7 @@ mod tests {
             status: db::TaskStatus::Active,
             created_at: old,
             priority: None,
+            ticket_number: None,
             total_attempts: 0,
             pending_attempts: 0,
             rejected_attempts: 0,

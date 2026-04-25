@@ -8,7 +8,7 @@ use lore::db::{attempts, projects, retention, scratchpad, semantic, tasks, Attem
 async fn test_prune_old_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None, None)
         .await
         .unwrap();
     let aid = attempts::create_attempt(&pool, tid, "old attempt", None, None, None)
@@ -34,7 +34,7 @@ async fn test_prune_old_attempts() {
 async fn test_purge_completed_tasks() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "old task", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "old task", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -59,7 +59,7 @@ async fn test_purge_completed_tasks() {
 async fn test_prune_old_snapshots() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "task", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -89,9 +89,18 @@ async fn test_prune_old_snapshots() {
 async fn test_consolidate_preserves_failure_narrative() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "build auth middleware", None, None, None, None)
-        .await
-        .unwrap();
+    let tid = tasks::create_task(
+        &pool,
+        pid,
+        "build auth middleware",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let rejected_id = attempts::create_attempt(&pool, tid, "use JWT in cookies", None, None, None)
         .await
@@ -178,7 +187,7 @@ async fn test_consolidate_preserves_failure_narrative() {
 async fn test_consolidate_skips_tasks_below_threshold() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "single-try task", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "single-try task", None, None, None, None, None)
         .await
         .unwrap();
 

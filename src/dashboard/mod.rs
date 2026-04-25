@@ -30,6 +30,24 @@ fn truncate_filter(value: String, kwargs: minijinja::value::Kwargs) -> String {
     }
 }
 
+/// Percent-encode a value for safe substitution into a URL path/query
+/// component. Used by the ticket-URL linkifier when expanding `{ticket}`
+/// in a per-project template.
+fn urlencode_filter(value: String) -> String {
+    const SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                          abcdefghijklmnopqrstuvwxyz\
+                          0123456789-_.~";
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if SAFE.contains(byte) {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Format a DateTime string as dd-mm-yyyy
 fn dateformat(value: String) -> String {
     // Input is ISO 8601 like "2026-03-29T13:57:14.579090Z"
@@ -42,6 +60,7 @@ pub fn router(pool: PgPool) -> Router {
     let mut env = Environment::new();
     env.add_filter("truncate", truncate_filter);
     env.add_filter("dateformat", dateformat);
+    env.add_filter("urlencode", urlencode_filter);
     env.add_template("base.html", include_str!("templates/base.html"))
         .unwrap();
     env.add_template("projects.html", include_str!("templates/projects.html"))
@@ -68,7 +87,10 @@ pub fn router(pool: PgPool) -> Router {
 
     Router::new()
         .route("/", get(projects_page))
-        .route("/projects/{id}", get(project_detail))
+        .route(
+            "/projects/{id}",
+            get(project_detail).patch(update_project_handler),
+        )
         .route(
             "/tasks/{id}",
             get(task_detail)
@@ -145,6 +167,7 @@ pub struct ProjectDetailQuery {
     status: Option<String>,
     priority: Option<String>,
     task_type: Option<String>,
+    ticket_prefix: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
     sort: Option<String>,
@@ -194,12 +217,31 @@ async fn project_detail(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // In-memory filtering for priority and task_type (pending DB-level filter)
+    // In-memory filtering for priority, task_type, and ticket_prefix (pending DB-level filter).
+    // Pagination's `total` / `total_pages` are derived from the unfiltered DB count, so
+    // these filters can yield short pages — accepted trade-off until the DB-level pass lands.
     if let Some(ref p) = q.priority {
         tasks.retain(|t| t.priority.as_deref() == Some(p.as_str()));
     }
     if let Some(ref tt) = q.task_type {
         tasks.retain(|t| t.task_type.as_deref() == Some(tt.as_str()));
+    }
+    // Raw value is what the user typed (trim only) — echoed back into the input field.
+    // Uppercased value is used for the case-insensitive prefix match. Capping at 64 chars
+    // matches the validate_ticket_number write-path bound and prevents pathological inputs.
+    let raw_ticket_prefix = q
+        .ticket_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(str::to_string);
+    let ticket_prefix_match = raw_ticket_prefix.as_deref().map(str::to_ascii_uppercase);
+    if let Some(ref pfx) = ticket_prefix_match {
+        tasks.retain(|t| {
+            t.ticket_number
+                .as_deref()
+                .is_some_and(|tn| tn.to_ascii_uppercase().starts_with(pfx))
+        });
     }
 
     // Collect distinct values for filter dropdowns
@@ -236,6 +278,7 @@ async fn project_detail(
             current_status => resolved_status,
             current_priority => q.priority,
             current_task_type => q.task_type,
+            current_ticket_prefix => raw_ticket_prefix,
             page => page,
             per_page => per_page,
             total_pages => total_pages,
@@ -254,6 +297,12 @@ async fn task_detail(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // FK constraint guarantees the project exists; treat missing as data
+    // integrity issue (500), not a stale-link 404.
+    let project = db::projects::get_project(&state.pool, task.project_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -283,7 +332,7 @@ async fn task_detail(
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts, snapshots => snapshots, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
+        context! { task => task, project => project, attempts => attempts, snapshots => snapshots, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
     )
 }
 
@@ -330,6 +379,8 @@ struct UpdateTaskPayload {
     description: Option<String>,
     // "" = clear parent, valid UUID = set parent, absent = don't touch
     parent_task_id: Option<String>,
+    // "" = clear, non-empty = set, absent = don't touch
+    ticket_number: Option<String>,
 }
 
 async fn update_task_handler(
@@ -354,6 +405,19 @@ async fn update_task_handler(
             Some(trimmed)
         }
     });
+    let ticket_number = payload.ticket_number.map(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    if let Some(Some(ref t)) = ticket_number {
+        if t.chars().count() > 64 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
     let description = payload
         .description
         .map(|v| v.trim().to_string())
@@ -368,14 +432,17 @@ async fn update_task_handler(
         }
     });
 
-    let updated = db::tasks::update_task(
+    let updated = db::tasks::apply_task_update(
         &state.pool,
         id,
-        priority.as_ref().map(|o| o.as_deref()),
-        task_type.as_ref().map(|o| o.as_deref()),
-        description.as_deref(),
-        None,
-        parent_task_id,
+        db::tasks::TaskUpdate {
+            priority: priority.as_ref().map(|o| o.as_deref()),
+            task_type: task_type.as_ref().map(|o| o.as_deref()),
+            description: description.as_deref(),
+            parent_task_id,
+            ticket_number: ticket_number.as_ref().map(|o| o.as_deref()),
+            ..Default::default()
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -390,6 +457,7 @@ struct CreateTaskPayload {
     priority: Option<String>,
     task_type: Option<String>,
     parent_task_id: Option<String>,
+    ticket_number: Option<String>,
 }
 
 async fn create_task_handler(
@@ -416,6 +484,14 @@ async fn create_task_handler(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .and_then(|v| uuid::Uuid::parse_str(v).ok());
+    let ticket_number = payload
+        .ticket_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if ticket_number.is_some_and(|t| t.chars().count() > 64) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let id = db::tasks::create_task(
         &state.pool,
@@ -424,12 +500,53 @@ async fn create_task_handler(
         parent_id,
         priority,
         task_type,
+        ticket_number,
         None,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "id": id })))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateProjectPayload {
+    // "" = clear, non-empty = set, absent = don't touch.
+    // Must contain "{ticket}" placeholder when set (DB CHECK enforces this).
+    ticket_url_template: Option<String>,
+}
+
+async fn update_project_handler(
+    State(state): State<DashboardState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateProjectPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(raw) = payload.ticket_url_template else {
+        return Ok(Json(serde_json::json!({ "updated": false })));
+    };
+    let trimmed = raw.trim();
+    let template = if trimmed.is_empty() {
+        None
+    } else {
+        // Protocol allowlist: only http/https. Blocks javascript:, data:, file:.
+        // MiniJinja autoescape neutralizes attacker-injected templates *as page
+        // content*, but a tracker URL is rendered as an `href` and clicking a
+        // non-http link is a footgun we don't need.
+        if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !trimmed.contains("{ticket}") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if trimmed.chars().count() > 512 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Some(trimmed)
+    };
+    let updated = db::projects::update_ticket_url_template(&state.pool, id, template)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
 // --- Batch operations ---
@@ -679,22 +796,23 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     };
 
     // Followups = completed tasks that spawned at least one subtask AFTER completion.
-    // Captures the "log follow-ups after merge/complete_task" workflow; a count
-    // matching `completed_tasks` means every completion begot at least one
-    // deferred review task.
+    // Counted via explicit `task_links.link_type='follow_up'` rows written by
+    // complete_task; the prior `child.created_at > parent.completed_at` heuristic
+    // missed (a) subtasks created between real work finishing and complete_task
+    // being called and (b) bulk-imported subtasks with older created_at.
     //
-    // Heuristic, not exact. Known limitations: (a) subtask created before
-    // `complete_task` is invoked but after real work finished is undercounted;
-    // (b) bulk-imported subtasks with older `created_at` are undercounted. An
-    // explicit `task_links.link_type='follow_up'` is the rigorous fix — logged
-    // as a follow-up of its own.
+    // No `parent.completed_at IS NOT NULL` guard here: the follow_up edge is only
+    // written by complete_task on a successful 'completed' transition, so its
+    // existence already encodes post-completion intent. status='completed'
+    // remains as a defensive guard against rows whose status was later mutated
+    // back (e.g. update_task_status reverting a completion).
     let followup_parents: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT parent.id) \
          FROM ai_memory.tasks parent \
-         JOIN ai_memory.tasks child ON child.parent_task_id = parent.id \
-         WHERE parent.status = 'completed' \
-           AND parent.completed_at IS NOT NULL \
-           AND child.created_at > parent.completed_at",
+         JOIN ai_memory.task_links link \
+           ON link.source_task_id = parent.id \
+          AND link.link_type = 'follow_up' \
+         WHERE parent.status = 'completed'",
     )
     .fetch_one(&state.pool)
     .await

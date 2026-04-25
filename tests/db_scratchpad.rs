@@ -46,7 +46,7 @@ async fn test_upsert_updates_value() {
 async fn test_task_scope_distinct_from_project() {
     let (pool, _container) = common::setup_db().await;
     let pid = make_project(&pool, "scratch-p3", "/tmp/scratch-p3").await;
-    let tid = tasks::create_task(&pool, pid, "a task", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "a task", None, None, None, None, None)
         .await
         .unwrap();
 

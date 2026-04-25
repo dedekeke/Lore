@@ -62,6 +62,7 @@ fn start_task_params(description: &str) -> Parameters<StartTaskParams> {
         parent_task_id: None,
         priority: None,
         task_type: None,
+        ticket_number: None,
     })
 }
 
@@ -191,12 +192,28 @@ async fn test_complete_task_creates_followups_as_child_tasks() {
 
     let listed = server
         .list_subtasks(Parameters(lore::server::ListSubtasksParams {
-            parent_task_id: parent_id,
+            parent_task_id: parent_id.clone(),
         }))
         .await
         .unwrap();
     let subtasks = extract_json(&listed);
     assert_eq!(subtasks.as_array().unwrap().len(), 2);
+
+    // Each created child must also have a follow_up edge from the parent —
+    // the analytics dashboard's count depends on these rows existing.
+    let parent_uuid = uuid::Uuid::parse_str(&parent_id).unwrap();
+    let links = lore::db::task_links::get_links_for_task(&_pool, parent_uuid)
+        .await
+        .unwrap();
+    let follow_ups: Vec<_> = links
+        .iter()
+        .filter(|l| l.source_task_id == parent_uuid && l.link_type == "follow_up")
+        .collect();
+    assert_eq!(
+        follow_ups.len(),
+        2,
+        "complete_task should write a follow_up edge per non-empty followup"
+    );
 }
 
 #[tokio::test]

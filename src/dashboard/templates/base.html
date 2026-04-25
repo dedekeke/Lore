@@ -106,6 +106,7 @@
     .badge-lesson { background: rgba(196,163,90,0.12); color: var(--yellow); }
     .badge-priority { background: rgba(196,163,90,0.1); color: var(--yellow); }
     .badge-type { background: rgba(108,117,125,0.1); color: var(--text-secondary); }
+    .badge-ticket { background: rgba(115,148,181,0.12); color: var(--blue); font-family: var(--mono, monospace); }
 
     /* Buttons */
     .btn {
@@ -384,6 +385,102 @@
         document.addEventListener('mousedown', dismiss);
       }, 0);
     }
+
+    // Inline ticket editor: click to edit, blur (or Enter) to save, Esc to cancel.
+    // Element must carry data-task-id and data-value. Values are trimmed and
+    // capped at 64 code points. Failed PATCH silently reverts.
+    const TICKET_PLACEHOLDER = '+ Ticket';
+    function bindTicketEditor(el) {
+      if (el.dataset.ticketBound === '1') return;
+      el.dataset.ticketBound = '1';
+      el.addEventListener('focus', () => {
+        if (!el.dataset.value) el.textContent = '';
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        else if (e.key === 'Escape') {
+          // stopPropagation so the global Escape→closeModal handler doesn't fire
+          e.preventDefault(); e.stopPropagation();
+          el.textContent = el.dataset.value || TICKET_PLACEHOLDER;
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', async () => {
+        let val = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if ([...val].length > 64) val = [...val].slice(0, 64).join('');
+        const prev = el.dataset.value || '';
+        if (val === prev) { el.textContent = val || TICKET_PLACEHOLDER; return; }
+        // Empty string is the intentional "clear" signal; the dashboard handler
+        // normalizes "" → None (see update_task_handler in src/dashboard/mod.rs)
+        // and the DB CHECK constraint rejects whitespace-only values.
+        const res = await fetch('/tasks/' + el.dataset.taskId, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ticket_number: val})
+        });
+        if (!res.ok) { el.textContent = prev || TICKET_PLACEHOLDER; return; }
+        el.dataset.value = val;
+        el.textContent = val || TICKET_PLACEHOLDER;
+        const placeholderStyle = ' background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
+        el.style.cssText = 'cursor: text;' + (val ? '' : placeholderStyle);
+      });
+    }
+
+    // Inline ticket-URL-template editor (per-project setting). Same blur-to-save
+    // pattern as bindTicketEditor; reloads on success so the linkifier ↗ icons
+    // pick up the new template. Validates the {ticket} placeholder client-side
+    // (the DB CHECK constraint enforces it server-side too).
+    const TEMPLATE_PLACEHOLDER = '+ Set https://.../{ticket}';
+    function bindTicketUrlTemplateEditor(el) {
+      if (el.dataset.tplBound === '1') return;
+      el.dataset.tplBound = '1';
+      el.addEventListener('focus', () => {
+        if (!el.dataset.value) el.textContent = '';
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        else if (e.key === 'Escape') {
+          e.preventDefault(); e.stopPropagation();
+          el.textContent = el.dataset.value || TEMPLATE_PLACEHOLDER;
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', async () => {
+        const val = (el.textContent || '').trim();
+        const prev = el.dataset.value || '';
+        if (val === prev) { el.textContent = val || TEMPLATE_PLACEHOLDER; return; }
+        if (val !== '' && !val.includes('{ticket}')) {
+          el.textContent = prev || TEMPLATE_PLACEHOLDER;
+          return;  // silent revert: missing required placeholder
+        }
+        if (val !== '' && !(val.startsWith('https://') || val.startsWith('http://'))) {
+          el.textContent = prev || TEMPLATE_PLACEHOLDER;
+          return;  // silent revert: only http/https schemes allowed
+        }
+        const res = await fetch('/projects/' + el.dataset.projectId, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ticket_url_template: val})
+        });
+        if (!res.ok) { el.textContent = prev || TEMPLATE_PLACEHOLDER; return; }
+        // Reload so the ↗ linkifier on every row picks up the new template.
+        window.location.reload();
+      });
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.ticket-edit').forEach(bindTicketEditor);
+      document.querySelectorAll('.ticket-url-template-edit').forEach(bindTicketUrlTemplateEditor);
+    });
   </script>
 </body>
 </html>

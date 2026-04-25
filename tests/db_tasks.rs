@@ -9,7 +9,7 @@ async fn test_create_and_get_task() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let tid = tasks::create_task(&pool, pid, "do something", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "do something", None, None, None, None, None)
         .await
         .unwrap();
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
@@ -24,10 +24,10 @@ async fn test_list_tasks_with_status_filter() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "task1", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "task1", None, None, None, None, None)
         .await
         .unwrap();
-    tasks::create_task(&pool, pid, "task2", None, None, None, None)
+    tasks::create_task(&pool, pid, "task2", None, None, None, None, None)
         .await
         .unwrap();
     tasks::complete_task(&pool, t1, None).await.unwrap();
@@ -45,7 +45,7 @@ async fn test_list_tasks_with_status_filter() {
 async fn test_complete_task() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "finish me", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "finish me", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -60,7 +60,7 @@ async fn test_complete_task() {
 async fn test_update_task_status() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
-    let tid = tasks::create_task(&pool, pid, "block me", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "block me", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -76,10 +76,10 @@ async fn test_subtask_parent() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None)
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None, None)
         .await
         .unwrap();
-    let child = tasks::create_task(&pool, pid, "child", Some(parent), None, None, None)
+    let child = tasks::create_task(&pool, pid, "child", Some(parent), None, None, None, None)
         .await
         .unwrap();
 
@@ -101,7 +101,7 @@ async fn test_get_task_stats_with_attempts() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "stats task", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "stats task", None, None, None, None, None)
         .await
         .unwrap();
     let a1 = attempts::create_attempt(&pool, t1, "approach 1", None, None, None)
@@ -160,10 +160,10 @@ async fn test_get_task_stats_filtered_by_status() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let t1 = tasks::create_task(&pool, pid, "active", None, None, None, None)
+    let t1 = tasks::create_task(&pool, pid, "active", None, None, None, None, None)
         .await
         .unwrap();
-    let t2 = tasks::create_task(&pool, pid, "done", None, None, None, None)
+    let t2 = tasks::create_task(&pool, pid, "done", None, None, None, None, None)
         .await
         .unwrap();
     tasks::complete_task(&pool, t2, None).await.unwrap();
@@ -187,9 +187,18 @@ async fn test_create_task_with_description_embedding() {
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
     let emb = vec![0.42_f32; 384];
-    let tid = tasks::create_task(&pool, pid, "embedded task", None, None, None, Some(&emb))
-        .await
-        .unwrap();
+    let tid = tasks::create_task(
+        &pool,
+        pid,
+        "embedded task",
+        None,
+        None,
+        None,
+        None,
+        Some(&emb),
+    )
+    .await
+    .unwrap();
 
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
     assert_eq!(task.description, "embedded task");
@@ -204,7 +213,7 @@ async fn test_create_task_without_embedding() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
-    let tid = tasks::create_task(&pool, pid, "no emb", None, None, None, None)
+    let tid = tasks::create_task(&pool, pid, "no emb", None, None, None, None, None)
         .await
         .unwrap();
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
@@ -217,10 +226,10 @@ async fn test_list_tasks_includes_embedding() {
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();
 
     let emb = vec![0.1_f32; 384];
-    tasks::create_task(&pool, pid, "t1", None, None, None, Some(&emb))
+    tasks::create_task(&pool, pid, "t1", None, None, None, None, Some(&emb))
         .await
         .unwrap();
-    tasks::create_task(&pool, pid, "t2", None, None, None, None)
+    tasks::create_task(&pool, pid, "t2", None, None, None, None, None)
         .await
         .unwrap();
 
@@ -228,4 +237,215 @@ async fn test_list_tasks_includes_embedding() {
     assert_eq!(all.len(), 2);
     assert!(all.iter().any(|t| t.description_embedding.is_some()));
     assert!(all.iter().any(|t| t.description_embedding.is_none()));
+}
+
+#[tokio::test]
+async fn test_ticket_number_create_update_clear() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    // Create with ticket
+    let tid = tasks::create_task(
+        &pool,
+        pid,
+        "with ticket",
+        None,
+        None,
+        None,
+        Some("ABC-123"),
+        None,
+    )
+    .await
+    .unwrap();
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.ticket_number.as_deref(), Some("ABC-123"));
+
+    // Update to a new ticket
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            ticket_number: Some(Some("ENG-42")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(updated);
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.ticket_number.as_deref(), Some("ENG-42"));
+
+    // Clear it
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            ticket_number: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(updated);
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert!(task.ticket_number.is_none());
+
+    // CHECK constraint rejects empty/whitespace
+    let bad = tasks::create_task(&pool, pid, "bad", None, None, None, Some("   "), None).await;
+    assert!(bad.is_err());
+}
+
+#[tokio::test]
+async fn test_apply_task_update_description_also_updates_summary() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    // Long description so the auto-generated summary is non-trivially derived.
+    let long = "a".repeat(200);
+    let tid = tasks::create_task(&pool, pid, &long, None, None, None, None, None)
+        .await
+        .unwrap();
+
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            description: Some("short replacement"),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(updated);
+
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.description, "short replacement");
+    // generate_summary leaves <=120-char descriptions unchanged.
+    assert_eq!(task.summary.as_deref(), Some("short replacement"));
+}
+
+#[tokio::test]
+async fn test_ticket_number_survives_complete_task() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let tid = tasks::create_task(
+        &pool,
+        pid,
+        "complete with ticket",
+        None,
+        None,
+        None,
+        Some("ABC-7"),
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::complete_task(&pool, tid, None).await.unwrap();
+
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.ticket_number.as_deref(), Some("ABC-7"));
+}
+
+#[tokio::test]
+async fn test_find_by_ticket_number_hit_miss_and_multi() {
+    let (pool, _c) = common::setup_db().await;
+    let pid_a = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pid_b = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    // Two tasks in project A share a ticket
+    let t1 = tasks::create_task(
+        &pool,
+        pid_a,
+        "refactor under ABC-1",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+    let t2 = tasks::create_task(
+        &pool,
+        pid_a,
+        "follow-up bug under ABC-1",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+    // Different ticket in project A
+    tasks::create_task(&pool, pid_a, "other", None, None, None, Some("XYZ-9"), None)
+        .await
+        .unwrap();
+    // Same ticket value in project B — must NOT leak across projects
+    tasks::create_task(
+        &pool,
+        pid_b,
+        "cross-project same ticket",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Multi-hit
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "ABC-1")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    let ids: Vec<_> = hits.iter().map(|t| t.id).collect();
+    assert!(ids.contains(&t1) && ids.contains(&t2));
+
+    // Single-hit
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "XYZ-9")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+
+    // Miss
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "NOPE-0")
+        .await
+        .unwrap();
+    assert!(hits.is_empty());
+
+    // Project isolation: project B has 1 task with ABC-1, project A has 2; never cross
+    let hits_b = tasks::find_by_ticket_number(&pool, pid_b, "ABC-1")
+        .await
+        .unwrap();
+    assert_eq!(hits_b.len(), 1);
+    assert!(!ids.contains(&hits_b[0].id));
+}
+
+#[tokio::test]
+async fn test_task_summary_includes_ticket_number() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    tasks::create_task(
+        &pool,
+        pid,
+        "with ticket",
+        None,
+        Some("P1"),
+        None,
+        Some("LORE-9"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let summaries = tasks::get_task_summaries(&pool, pid, &[TaskStatus::Active])
+        .await
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].ticket_number.as_deref(), Some("LORE-9"));
 }

@@ -315,6 +315,83 @@ async fn test_ticket_number_survives_complete_task() {
 }
 
 #[tokio::test]
+async fn test_find_by_ticket_number_hit_miss_and_multi() {
+    let (pool, _c) = common::setup_db().await;
+    let pid_a = projects::create_project(&pool, "a", "/a").await.unwrap();
+    let pid_b = projects::create_project(&pool, "b", "/b").await.unwrap();
+
+    // Two tasks in project A share a ticket
+    let t1 = tasks::create_task(
+        &pool,
+        pid_a,
+        "refactor under ABC-1",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+    let t2 = tasks::create_task(
+        &pool,
+        pid_a,
+        "follow-up bug under ABC-1",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+    // Different ticket in project A
+    tasks::create_task(&pool, pid_a, "other", None, None, None, Some("XYZ-9"), None)
+        .await
+        .unwrap();
+    // Same ticket value in project B — must NOT leak across projects
+    tasks::create_task(
+        &pool,
+        pid_b,
+        "cross-project same ticket",
+        None,
+        None,
+        None,
+        Some("ABC-1"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Multi-hit
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "ABC-1")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    let ids: Vec<_> = hits.iter().map(|t| t.id).collect();
+    assert!(ids.contains(&t1) && ids.contains(&t2));
+
+    // Single-hit
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "XYZ-9")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+
+    // Miss
+    let hits = tasks::find_by_ticket_number(&pool, pid_a, "NOPE-0")
+        .await
+        .unwrap();
+    assert!(hits.is_empty());
+
+    // Project isolation: project B has 1 task with ABC-1, project A has 2; never cross
+    let hits_b = tasks::find_by_ticket_number(&pool, pid_b, "ABC-1")
+        .await
+        .unwrap();
+    assert_eq!(hits_b.len(), 1);
+    assert!(!ids.contains(&hits_b[0].id));
+}
+
+#[tokio::test]
 async fn test_task_summary_includes_ticket_number() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();

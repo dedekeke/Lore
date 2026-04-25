@@ -159,6 +159,28 @@ pub async fn delete_task(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Look up tasks by their external tracker reference within a project.
+/// Returns Vec because uniqueness is not enforced — a single ticket can
+/// legitimately map to multiple Lore tasks (e.g. a refactor task + a
+/// follow-up bug). Hits the partial index `idx_tasks_ticket_number`.
+pub async fn find_by_ticket_number(
+    pool: &PgPool,
+    project_id: Uuid,
+    ticket_number: &str,
+) -> Result<Vec<Task>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
+         created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
+         FROM ai_memory.tasks \
+         WHERE project_id = $1 AND ticket_number = $2 \
+         ORDER BY created_at DESC",
+    )
+    .bind(project_id)
+    .bind(ticket_number)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn list_tasks(
     pool: &PgPool,
     project_id: Uuid,

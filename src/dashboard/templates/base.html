@@ -404,7 +404,8 @@
       el.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
         else if (e.key === 'Escape') {
-          e.preventDefault();
+          // stopPropagation so the global Escape→closeModal handler doesn't fire
+          e.preventDefault(); e.stopPropagation();
           el.textContent = el.dataset.value || TICKET_PLACEHOLDER;
           el.blur();
         }
@@ -414,6 +415,9 @@
         if ([...val].length > 64) val = [...val].slice(0, 64).join('');
         const prev = el.dataset.value || '';
         if (val === prev) { el.textContent = val || TICKET_PLACEHOLDER; return; }
+        // Empty string is the intentional "clear" signal; the dashboard handler
+        // normalizes "" → None (see update_task_handler in src/dashboard/mod.rs)
+        // and the DB CHECK constraint rejects whitespace-only values.
         const res = await fetch('/tasks/' + el.dataset.taskId, {
           method: 'PATCH',
           headers: {'Content-Type': 'application/json'},

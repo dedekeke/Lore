@@ -20,6 +20,7 @@
 
   {# Inline editable ticket_number — click to edit, blur or Enter to save, Esc to cancel #}
   <span class="badge badge-ticket ticket-edit" contenteditable="true" spellcheck="false"
+        role="textbox" aria-label="Ticket number"
         style="cursor: text;{% if not task.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}"
         data-task-id="{{ task.id }}"
         data-value="{{ task.ticket_number | default(value='') }}"

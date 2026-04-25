@@ -402,6 +402,16 @@ impl LoreServer {
         }
     }
 
+    /// Best-effort fetch of `ticket_number` for inclusion in webhook payloads.
+    /// Errors are swallowed — a missing ticket is just `None` to subscribers.
+    async fn task_ticket_number(&self, task_id: uuid::Uuid) -> Option<String> {
+        db::tasks::get_task(self.pool(), task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|t| t.ticket_number)
+    }
+
     async fn fire_webhook(&self, event: &str, data: serde_json::Value) {
         if let Some(url) = &self.config().webhook_url {
             let project_name = if let Some(pid) = *self.inner.current_project_id.read().await {
@@ -1755,10 +1765,12 @@ impl LoreServer {
                 .unwrap_or_default();
                 let threshold = self.config().webhook_rejection_threshold as usize;
                 if rejected.len() == threshold {
+                    let ticket_number = self.task_ticket_number(attempt.task_id).await;
                     self.fire_webhook(
                         "rejection_threshold",
                         serde_json::json!({
                             "task_id": attempt.task_id,
+                            "ticket_number": ticket_number,
                             "rejection_count": rejected.len(),
                             "latest_reasoning": reasoning,
                         }),
@@ -2162,10 +2174,12 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_completed",
                 serde_json::json!({
                     "task_id": task_id,
+                    "ticket_number": ticket_number,
                     "lesson": lesson,
                     "parents_rolled_up": rolled_up,
                     "followups_created": followup_ids.len(),
@@ -2230,9 +2244,15 @@ impl LoreServer {
         };
 
         if success {
+            let ticket_number = self.task_ticket_number(tid).await;
             self.fire_webhook(
                 "task_abandoned",
-                serde_json::json!({ "task_id": task_id, "reason": reason, "parents_rolled_up": rolled_up }),
+                serde_json::json!({
+                    "task_id": task_id,
+                    "ticket_number": ticket_number,
+                    "reason": reason,
+                    "parents_rolled_up": rolled_up,
+                }),
             )
             .await;
         }

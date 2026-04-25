@@ -27,8 +27,21 @@ fi
 
 drift=0
 
-old_version=$(jq -r '.version' "$OLD")
-new_version=$(jq -r '.version' "$NEW")
+# Pre-flight: case_id values must be unique within each dataset.per_case[].
+# If duplicates exist, `select(.case_id == $cid)` would emit multiple rows and
+# silently mask drift. Fail fast with a clear error rather than guessing.
+for f in "$OLD" "$NEW"; do
+  if ! jq -e '
+    [.datasets[]?.per_case[]?.case_id] as $ids |
+    ($ids | length) == ($ids | unique | length)
+  ' "$f" >/dev/null; then
+    echo "::error::$f has duplicate case_id values within a dataset.per_case[]; refusing to compare"
+    exit 2
+  fi
+done
+
+old_version=$(jq -cS '.version' "$OLD")
+new_version=$(jq -cS '.version' "$NEW")
 if [[ "$old_version" != "$new_version" ]]; then
   echo "::error::version drift: $old_version -> $new_version (drift regen, not fixture-add)"
   drift=1
@@ -50,10 +63,16 @@ while IFS= read -r ds; do
     continue
   fi
   while IFS= read -r case_id; do
-    old_row=$(jq -cS --arg ds "$ds" --arg cid "$case_id" \
-      '.datasets[$ds].per_case[] | select(.case_id == $cid)' "$OLD")
-    new_row=$(jq -cS --arg ds "$ds" --arg cid "$case_id" \
-      '.datasets[$ds].per_case[] | select(.case_id == $cid)' "$NEW")
+    if ! old_row=$(jq -cS --arg ds "$ds" --arg cid "$case_id" \
+      '[.datasets[$ds].per_case[] | select(.case_id == $cid)] | first // empty' "$OLD"); then
+      echo "::error::jq failure reading old row for dataset '$ds' case '$case_id'"
+      exit 2
+    fi
+    if ! new_row=$(jq -cS --arg ds "$ds" --arg cid "$case_id" \
+      '[.datasets[$ds].per_case[] | select(.case_id == $cid)] | first // empty' "$NEW"); then
+      echo "::error::jq failure reading new row for dataset '$ds' case '$case_id'"
+      exit 2
+    fi
     if [[ -z "$new_row" ]]; then
       echo "::error::dataset '$ds' case '$case_id' removed (drift regen, not fixture-add)"
       drift=1

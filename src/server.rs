@@ -403,13 +403,29 @@ impl LoreServer {
     }
 
     /// Best-effort fetch of `ticket_number` for inclusion in webhook payloads.
-    /// Errors are swallowed — a missing ticket is just `None` to subscribers.
+    /// Narrow `SELECT ticket_number` (no embedding column) — webhook hot path.
+    /// Errors are swallowed (logged at warn) — missing ticket is just `None`
+    /// to subscribers; we never want a transient DB hiccup to drop the event.
+    ///
+    /// On the `rejection_threshold` path this fetch is a separate query from
+    /// the attempt+rejection-list reads, so a concurrent `update_task` could
+    /// emit a `ticket_number` value that differs from what was stored at the
+    /// instant the threshold breached. Acceptable: ticket_number changes are
+    /// rare/operator-driven, and `task_id` remains the authoritative key.
     async fn task_ticket_number(&self, task_id: uuid::Uuid) -> Option<String> {
-        db::tasks::get_task(self.pool(), task_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|t| t.ticket_number)
+        match sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT ticket_number FROM ai_memory.tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.pool())
+        .await
+        {
+            Ok(row) => row.and_then(|(t,)| t),
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "task_ticket_number lookup failed; webhook payload will carry null");
+                None
+            }
+        }
     }
 
     async fn fire_webhook(&self, event: &str, data: serde_json::Value) {

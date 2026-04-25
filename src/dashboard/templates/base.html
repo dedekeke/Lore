@@ -463,6 +463,10 @@
           el.textContent = prev || TEMPLATE_PLACEHOLDER;
           return;  // silent revert: missing required placeholder
         }
+        if (val !== '' && !(val.startsWith('https://') || val.startsWith('http://'))) {
+          el.textContent = prev || TEMPLATE_PLACEHOLDER;
+          return;  // silent revert: only http/https schemes allowed
+        }
         const res = await fetch('/projects/' + el.dataset.projectId, {
           method: 'PATCH',
           headers: {'Content-Type': 'application/json'},

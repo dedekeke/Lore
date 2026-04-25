@@ -276,10 +276,12 @@ async fn task_detail(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // FK constraint guarantees the project exists; treat missing as data
+    // integrity issue (500), not a stale-link 404.
     let project = db::projects::get_project(&state.pool, task.project_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -503,6 +505,13 @@ async fn update_project_handler(
     let template = if trimmed.is_empty() {
         None
     } else {
+        // Protocol allowlist: only http/https. Blocks javascript:, data:, file:.
+        // MiniJinja autoescape neutralizes attacker-injected templates *as page
+        // content*, but a tracker URL is rendered as an `href` and clicking a
+        // non-http link is a footgun we don't need.
+        if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         if !trimmed.contains("{ticket}") {
             return Err(StatusCode::BAD_REQUEST);
         }

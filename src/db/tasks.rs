@@ -25,11 +25,13 @@ pub struct Task {
     pub priority: Option<String>,
     pub task_type: Option<String>,
     pub summary: Option<String>,
+    pub ticket_number: Option<String>,
     #[serde(skip)]
     #[allow(dead_code)]
     pub description_embedding: Option<Vector>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_task(
     pool: &PgPool,
     project_id: Uuid,
@@ -37,13 +39,14 @@ pub async fn create_task(
     parent_task_id: Option<Uuid>,
     priority: Option<&str>,
     task_type: Option<&str>,
+    ticket_number: Option<&str>,
     description_embedding: Option<&[f32]>,
 ) -> Result<Uuid, sqlx::Error> {
     let summary = generate_summary(description);
     let emb = description_embedding.map(|e| Vector::from(e.to_vec()));
     let row: (Uuid,) = sqlx::query_as(
-        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type, description_embedding) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO ai_memory.tasks (project_id, description, parent_task_id, summary, priority, task_type, ticket_number, description_embedding) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(project_id)
     .bind(description)
@@ -51,6 +54,7 @@ pub async fn create_task(
     .bind(&summary)
     .bind(priority)
     .bind(task_type)
+    .bind(ticket_number)
     .bind(emb.as_ref())
     .fetch_one(pool)
     .await?;
@@ -60,7 +64,7 @@ pub async fn create_task(
 #[allow(dead_code)]
 pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
+        "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
          FROM ai_memory.tasks WHERE id = $1",
     )
     .bind(id)
@@ -68,6 +72,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Err
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_task(
     pool: &PgPool,
     id: Uuid,
@@ -76,6 +81,7 @@ pub async fn update_task(
     description: Option<&str>,
     description_embedding: Option<&[f32]>,
     parent_task_id: Option<Option<Uuid>>,
+    ticket_number: Option<Option<&str>>,
 ) -> Result<bool, sqlx::Error> {
     // Each Option<Option<_>>: None = don't touch, Some(None) = clear, Some(Some(v)) = set
     let mut set_clauses = Vec::new();
@@ -102,6 +108,10 @@ pub async fn update_task(
     }
     if parent_task_id.is_some() {
         set_clauses.push(format!("parent_task_id = ${param_idx}"));
+        param_idx += 1;
+    }
+    if ticket_number.is_some() {
+        set_clauses.push(format!("ticket_number = ${param_idx}"));
     }
     if set_clauses.is_empty() {
         return Ok(false);
@@ -131,6 +141,9 @@ pub async fn update_task(
     if let Some(pid) = &parent_task_id {
         query = query.bind(*pid);
     }
+    if let Some(tn) = &ticket_number {
+        query = query.bind(tn.as_deref());
+    }
 
     let result = query.execute(pool).await?;
     Ok(result.rows_affected() > 0)
@@ -151,7 +164,7 @@ pub async fn list_tasks(
 ) -> Result<Vec<Task>, sqlx::Error> {
     match status {
         Some(s) => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 ORDER BY created_at",
         )
         .bind(project_id)
@@ -159,7 +172,7 @@ pub async fn list_tasks(
         .fetch_all(pool)
         .await,
         None => sqlx::query_as(
-            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, description_embedding \
+            "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
                  FROM ai_memory.tasks WHERE project_id = $1 ORDER BY created_at",
         )
         .bind(project_id)
@@ -204,6 +217,7 @@ pub struct TaskSummary {
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub priority: Option<String>,
+    pub ticket_number: Option<String>,
     pub total_attempts: i64,
     pub pending_attempts: i64,
     pub rejected_attempts: i64,
@@ -226,7 +240,7 @@ pub async fn get_task_summaries(
         .collect();
 
     sqlx::query_as(
-        "SELECT t.id, t.description, t.status, t.created_at, t.priority, \
+        "SELECT t.id, t.description, t.status, t.created_at, t.priority, t.ticket_number, \
          COUNT(a.id) AS total_attempts, \
          COUNT(a.id) FILTER (WHERE a.outcome = 'pending') AS pending_attempts, \
          COUNT(a.id) FILTER (WHERE a.outcome = 'rejected') AS rejected_attempts, \
@@ -349,7 +363,9 @@ pub async fn list_tasks_paginated(
     offset: i64,
 ) -> Result<Vec<Task>, sqlx::Error> {
     let col = match sort_col {
-        "summary" | "priority" | "task_type" | "status" | "created_at" => sort_col,
+        "summary" | "priority" | "task_type" | "status" | "created_at" | "ticket_number" => {
+            sort_col
+        }
         _ => "created_at",
     };
     let dir = if sort_dir.eq_ignore_ascii_case("asc") {
@@ -368,13 +384,13 @@ pub async fn list_tasks_paginated(
     let sql = match status {
         Some(_) => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary, description_embedding \
+             created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 AND status = $2 \
              ORDER BY {order} LIMIT $3 OFFSET $4"
         ),
         None => format!(
             "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-             created_at, completed_at, priority, task_type, summary, description_embedding \
+             created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
              FROM ai_memory.tasks WHERE project_id = $1 \
              ORDER BY {order} LIMIT $2 OFFSET $3"
         ),
@@ -405,7 +421,7 @@ pub async fn list_tasks_paginated(
 pub async fn list_subtasks(pool: &PgPool, parent_task_id: Uuid) -> Result<Vec<Task>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, project_id, description, status, parent_task_id, resolved_attempt_id, \
-         created_at, completed_at, priority, task_type, summary, description_embedding \
+         created_at, completed_at, priority, task_type, summary, ticket_number, description_embedding \
          FROM ai_memory.tasks WHERE parent_task_id = $1 ORDER BY created_at",
     )
     .bind(parent_task_id)

@@ -330,6 +330,8 @@ struct UpdateTaskPayload {
     description: Option<String>,
     // "" = clear parent, valid UUID = set parent, absent = don't touch
     parent_task_id: Option<String>,
+    // "" = clear, non-empty = set, absent = don't touch
+    ticket_number: Option<String>,
 }
 
 async fn update_task_handler(
@@ -354,6 +356,19 @@ async fn update_task_handler(
             Some(trimmed)
         }
     });
+    let ticket_number = payload.ticket_number.map(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    if let Some(Some(ref t)) = ticket_number {
+        if t.chars().count() > 64 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
     let description = payload
         .description
         .map(|v| v.trim().to_string())
@@ -376,6 +391,7 @@ async fn update_task_handler(
         description.as_deref(),
         None,
         parent_task_id,
+        ticket_number.as_ref().map(|o| o.as_deref()),
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -390,6 +406,7 @@ struct CreateTaskPayload {
     priority: Option<String>,
     task_type: Option<String>,
     parent_task_id: Option<String>,
+    ticket_number: Option<String>,
 }
 
 async fn create_task_handler(
@@ -416,6 +433,14 @@ async fn create_task_handler(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .and_then(|v| uuid::Uuid::parse_str(v).ok());
+    let ticket_number = payload
+        .ticket_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if ticket_number.is_some_and(|t| t.chars().count() > 64) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let id = db::tasks::create_task(
         &state.pool,
@@ -424,6 +449,7 @@ async fn create_task_handler(
         parent_id,
         priority,
         task_type,
+        ticket_number,
         None,
     )
     .await

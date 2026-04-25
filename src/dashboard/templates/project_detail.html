@@ -34,6 +34,8 @@
         <option value="{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=60) }}</option>
         {% endfor %}
       </select>
+      <input id="new-ticket" type="text" maxlength="64" placeholder="Ticket (e.g. ABC-123, optional)" class="filter-select" style="font-family: var(--mono, monospace);">
+
       <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
         <button class="btn" onclick="document.getElementById('create-modal').style.display='none'">Cancel</button>
         <button class="btn" style="border-color:var(--accent); color:var(--accent-bright);" onclick="createTask()">Create</button>
@@ -94,6 +96,7 @@
       <th class="sortable" onclick="applySort('summary')">Summary {{ "▲" if sort == "summary" and dir == "asc" else "▼" if sort == "summary" else "" }}</th>
       <th class="sortable" onclick="applySort('priority')" style="width: 80px;">Priority {{ "▲" if sort == "priority" and dir == "asc" else "▼" if sort == "priority" else "" }}</th>
       <th class="sortable" onclick="applySort('task_type')" style="width: 80px;">Type {{ "▲" if sort == "task_type" and dir == "asc" else "▼" if sort == "task_type" else "" }}</th>
+      <th class="sortable" onclick="applySort('ticket_number')" style="width: 100px;">Ticket {{ "▲" if sort == "ticket_number" and dir == "asc" else "▼" if sort == "ticket_number" else "" }}</th>
       <th class="sortable" onclick="applySort('status')" style="width: 90px;">Status {{ "▲" if sort == "status" and dir == "asc" else "▼" if sort == "status" else "" }}</th>
       <th class="sortable" onclick="applySort('created_at')" style="width: 100px;">Created {{ "▲" if sort == "created_at" and dir == "asc" else "▼" if sort == "created_at" and dir == "desc" else "" }}</th>
       <th style="width: 70px;"></th>
@@ -109,6 +112,9 @@
       </td>
       <td>
         <span class="badge badge-type" style="cursor: pointer;{% if not t.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ t.id }}" data-value="{{ t.task_type | default(value='') }}">{{ t.task_type | default(value="—") }}</span>
+      </td>
+      <td>
+        <span class="badge badge-ticket" style="cursor: pointer;{% if not t.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editTicketCell(this)" data-task-id="{{ t.id }}" data-value="{{ t.ticket_number | default(value='') }}" title="Click to edit ticket">{{ t.ticket_number | default(value="—") }}</span>
       </td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
       <td class="mono text-nowrap" style="color: var(--muted);">{{ t.created_at | dateformat }}</td>
@@ -167,6 +173,26 @@ function editField(badge, field) {
       ? 'cursor: pointer;'
       : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
   });
+}
+async function editTicketCell(badge) {
+  const taskId = badge.dataset.taskId;
+  const current = badge.dataset.value;
+  const next = window.prompt('Ticket number (e.g. ABC-123). Leave blank to clear.', current);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (trimmed === current) return;
+  if (trimmed.length > 64) { alert('Ticket too long (max 64 chars)'); return; }
+  const res = await fetch('/tasks/' + taskId, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ticket_number: trimmed})
+  });
+  if (!res.ok) { alert('Failed to update ticket'); return; }
+  badge.dataset.value = trimmed;
+  badge.textContent = trimmed || '—';
+  badge.style.cssText = trimmed
+    ? 'cursor: pointer;'
+    : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
 }
 function buildParams(overrides) {
   const params = new URLSearchParams();
@@ -247,6 +273,7 @@ async function createTask() {
     priority: document.getElementById('new-priority').value || undefined,
     task_type: document.getElementById('new-type').value || undefined,
     parent_task_id: document.getElementById('new-parent').value || undefined,
+    ticket_number: document.getElementById('new-ticket').value.trim() || undefined,
   };
   const res = await fetch('/tasks', {
     method: 'POST', headers: {'Content-Type': 'application/json'},

@@ -775,22 +775,17 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     };
 
     // Followups = completed tasks that spawned at least one subtask AFTER completion.
-    // Captures the "log follow-ups after merge/complete_task" workflow; a count
-    // matching `completed_tasks` means every completion begot at least one
-    // deferred review task.
-    //
-    // Heuristic, not exact. Known limitations: (a) subtask created before
-    // `complete_task` is invoked but after real work finished is undercounted;
-    // (b) bulk-imported subtasks with older `created_at` are undercounted. An
-    // explicit `task_links.link_type='follow_up'` is the rigorous fix — logged
-    // as a follow-up of its own.
+    // Counted via explicit `task_links.link_type='follow_up'` rows written by
+    // complete_task; the prior `child.created_at > parent.completed_at` heuristic
+    // missed (a) subtasks created between real work finishing and complete_task
+    // being called and (b) bulk-imported subtasks with older created_at.
     let followup_parents: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT parent.id) \
          FROM ai_memory.tasks parent \
-         JOIN ai_memory.tasks child ON child.parent_task_id = parent.id \
-         WHERE parent.status = 'completed' \
-           AND parent.completed_at IS NOT NULL \
-           AND child.created_at > parent.completed_at",
+         JOIN ai_memory.task_links link \
+           ON link.source_task_id = parent.id \
+          AND link.link_type = 'follow_up' \
+         WHERE parent.status = 'completed'",
     )
     .fetch_one(&state.pool)
     .await

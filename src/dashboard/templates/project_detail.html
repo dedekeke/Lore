@@ -5,7 +5,17 @@
   <a href="/" class="btn">&larr; Projects</a>
 </div>
 <h1>{{ project.name }}</h1>
-<p class="mono" style="color: var(--muted); margin-bottom: 2rem;">{{ project.root_path }}</p>
+<p class="mono" style="color: var(--muted); margin-bottom: 0.5rem;">{{ project.root_path }}</p>
+<p class="mono" style="color: var(--muted); margin-bottom: 2rem; font-size: 0.72rem;">
+  Ticket URL template:
+  <span class="ticket-url-template-edit" contenteditable="true" spellcheck="false"
+        role="textbox" aria-label="Ticket URL template"
+        data-project-id="{{ project.id }}"
+        data-value="{{ project.ticket_url_template | default(value='') }}"
+        title="Per-project URL template — must contain {ticket}. e.g. https://jira.example.com/browse/{ticket}"
+        style="cursor: text; padding: 0.1rem 0.4rem; border-radius: 3px;{% if not project.ticket_url_template %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% else %} background: rgba(115,148,181,0.08); color: var(--blue);{% endif %}"
+  >{{ project.ticket_url_template | default(value="+ Set https://.../{ticket}") }}</span>
+</p>
 
 <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem;">
   <h2 style="margin-bottom: 0;">Tasks ({{ total }})</h2>
@@ -120,6 +130,12 @@
               data-task-id="{{ t.id }}"
               data-value="{{ t.ticket_number | default(value='') }}"
               title="Click to edit ticket">{{ t.ticket_number | default(value="+ Ticket") }}</span>
+        {% if project.ticket_url_template and t.ticket_number %}
+        <a href="{{ project.ticket_url_template | replace('{ticket}', t.ticket_number | urlencode) }}"
+           target="_blank" rel="noopener noreferrer"
+           style="margin-left: 0.25rem; color: var(--muted); font-size: 0.72rem; text-decoration: none;"
+           title="Open in tracker">↗</a>
+        {% endif %}
       </td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
       <td class="mono text-nowrap" style="color: var(--muted);">{{ t.created_at | dateformat }}</td>

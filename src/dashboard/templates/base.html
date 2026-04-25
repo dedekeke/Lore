@@ -430,8 +430,52 @@
         el.style.cssText = 'cursor: text;' + (val ? '' : placeholderStyle);
       });
     }
+
+    // Inline ticket-URL-template editor (per-project setting). Same blur-to-save
+    // pattern as bindTicketEditor; reloads on success so the linkifier ↗ icons
+    // pick up the new template. Validates the {ticket} placeholder client-side
+    // (the DB CHECK constraint enforces it server-side too).
+    const TEMPLATE_PLACEHOLDER = '+ Set https://.../{ticket}';
+    function bindTicketUrlTemplateEditor(el) {
+      if (el.dataset.tplBound === '1') return;
+      el.dataset.tplBound = '1';
+      el.addEventListener('focus', () => {
+        if (!el.dataset.value) el.textContent = '';
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        else if (e.key === 'Escape') {
+          e.preventDefault(); e.stopPropagation();
+          el.textContent = el.dataset.value || TEMPLATE_PLACEHOLDER;
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', async () => {
+        const val = (el.textContent || '').trim();
+        const prev = el.dataset.value || '';
+        if (val === prev) { el.textContent = val || TEMPLATE_PLACEHOLDER; return; }
+        if (val !== '' && !val.includes('{ticket}')) {
+          el.textContent = prev || TEMPLATE_PLACEHOLDER;
+          return;  // silent revert: missing required placeholder
+        }
+        const res = await fetch('/projects/' + el.dataset.projectId, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ticket_url_template: val})
+        });
+        if (!res.ok) { el.textContent = prev || TEMPLATE_PLACEHOLDER; return; }
+        // Reload so the ↗ linkifier on every row picks up the new template.
+        window.location.reload();
+      });
+    }
     document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('.ticket-edit').forEach(bindTicketEditor);
+      document.querySelectorAll('.ticket-url-template-edit').forEach(bindTicketUrlTemplateEditor);
     });
   </script>
 </body>

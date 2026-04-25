@@ -67,6 +67,46 @@ async fn test_delete_project() {
 }
 
 #[tokio::test]
+async fn test_ticket_url_template_set_clear_and_check_constraint() {
+    let (pool, _container) = common::setup_db().await;
+    let id = projects::create_project(&pool, "url-tpl", "/tmp/url-tpl")
+        .await
+        .unwrap();
+
+    // Defaults to None
+    let p = projects::get_project(&pool, id).await.unwrap().unwrap();
+    assert!(p.ticket_url_template.is_none());
+
+    // Set valid template
+    let updated = projects::update_ticket_url_template(
+        &pool,
+        id,
+        Some("https://jira.example.com/browse/{ticket}"),
+    )
+    .await
+    .unwrap();
+    assert!(updated);
+    let p = projects::get_project(&pool, id).await.unwrap().unwrap();
+    assert_eq!(
+        p.ticket_url_template.as_deref(),
+        Some("https://jira.example.com/browse/{ticket}")
+    );
+
+    // Clear
+    let updated = projects::update_ticket_url_template(&pool, id, None)
+        .await
+        .unwrap();
+    assert!(updated);
+    let p = projects::get_project(&pool, id).await.unwrap().unwrap();
+    assert!(p.ticket_url_template.is_none());
+
+    // CHECK constraint rejects template without `{ticket}` placeholder
+    let bad =
+        projects::update_ticket_url_template(&pool, id, Some("https://no-placeholder/")).await;
+    assert!(bad.is_err());
+}
+
+#[tokio::test]
 async fn test_delete_nonexistent() {
     let (pool, _container) = common::setup_db().await;
 

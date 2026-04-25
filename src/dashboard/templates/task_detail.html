@@ -25,6 +25,12 @@
         data-task-id="{{ task.id }}"
         data-value="{{ task.ticket_number | default(value='') }}"
         title="External tracker reference (Jira/Linear ticket)">{{ task.ticket_number | default(value="+ Ticket") }}</span>
+  {% if project.ticket_url_template and task.ticket_number %}
+  <a href="{{ project.ticket_url_template | replace('{ticket}', task.ticket_number | urlencode) }}"
+     target="_blank" rel="noopener noreferrer"
+     style="color: var(--muted); font-size: 0.78rem; text-decoration: none;"
+     title="Open in tracker">↗</a>
+  {% endif %}
 
   {# Link/unlink parent #}
   <span id="parent-badge">

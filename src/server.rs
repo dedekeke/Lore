@@ -904,7 +904,9 @@ pub struct LinkTasksParams {
     pub source_task_id: String,
     #[schemars(description = "UUID of the target task")]
     pub target_task_id: String,
-    #[schemars(description = "Link type: blocks, related_to, caused_by, or duplicate_of")]
+    #[schemars(
+        description = "Link type: blocks, related_to, caused_by, duplicate_of, or follow_up"
+    )]
     pub link_type: String,
 }
 
@@ -1887,7 +1889,7 @@ impl LoreServer {
     }
 
     #[tool(
-        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of."
+        description = "Create a relationship link between two tasks. Types: blocks, related_to, caused_by, duplicate_of, follow_up."
     )]
     pub async fn link_tasks(
         &self,
@@ -1899,7 +1901,18 @@ impl LoreServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let source = Self::parse_uuid(&source_task_id)?;
         let target = Self::parse_uuid(&target_task_id)?;
-        let valid_types = ["blocks", "related_to", "caused_by", "duplicate_of"];
+        // Mirror of the DB CHECK constraint on task_links.link_type. The DB is
+        // the source of truth; this list exists only to give a friendly
+        // error before round-tripping to PG. If the migration adds a value,
+        // update here too — drift produces a confusing "valid in DB,
+        // rejected at MCP" failure.
+        let valid_types = [
+            "blocks",
+            "related_to",
+            "caused_by",
+            "duplicate_of",
+            "follow_up",
+        ];
         let lt = link_type.to_lowercase();
         if !valid_types.contains(&lt.as_str()) {
             return Err(rmcp::ErrorData::invalid_params(
@@ -2181,7 +2194,24 @@ impl LoreServer {
                     )
                     .await
                     {
-                        Ok(new_id) => followup_ids.push(new_id),
+                        Ok(new_id) => {
+                            // Explicit follow_up edge — analytics + downstream tooling
+                            // read this instead of inferring from created_at timestamps.
+                            // upsert_link is idempotent: a re-run or a backfill collision
+                            // returns Ok(None), no warn — only real DB errors surface.
+                            if let Err(e) =
+                                db::task_links::upsert_link(self.pool(), tid, new_id, "follow_up")
+                                    .await
+                            {
+                                tracing::warn!(
+                                    parent_task_id = %tid,
+                                    followup_task_id = %new_id,
+                                    error = %e,
+                                    "follow_up link upsert failed; child task still recorded"
+                                );
+                            }
+                            followup_ids.push(new_id);
+                        }
                         Err(e) => {
                             return Err(rmcp::ErrorData::internal_error(
                                 format!(

@@ -30,6 +30,24 @@ fn truncate_filter(value: String, kwargs: minijinja::value::Kwargs) -> String {
     }
 }
 
+/// Percent-encode a value for safe substitution into a URL path/query
+/// component. Used by the ticket-URL linkifier when expanding `{ticket}`
+/// in a per-project template.
+fn urlencode_filter(value: String) -> String {
+    const SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                          abcdefghijklmnopqrstuvwxyz\
+                          0123456789-_.~";
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if SAFE.contains(byte) {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Format a DateTime string as dd-mm-yyyy
 fn dateformat(value: String) -> String {
     // Input is ISO 8601 like "2026-03-29T13:57:14.579090Z"
@@ -42,6 +60,7 @@ pub fn router(pool: PgPool) -> Router {
     let mut env = Environment::new();
     env.add_filter("truncate", truncate_filter);
     env.add_filter("dateformat", dateformat);
+    env.add_filter("urlencode", urlencode_filter);
     env.add_template("base.html", include_str!("templates/base.html"))
         .unwrap();
     env.add_template("projects.html", include_str!("templates/projects.html"))
@@ -68,7 +87,10 @@ pub fn router(pool: PgPool) -> Router {
 
     Router::new()
         .route("/", get(projects_page))
-        .route("/projects/{id}", get(project_detail))
+        .route(
+            "/projects/{id}",
+            get(project_detail).patch(update_project_handler),
+        )
         .route(
             "/tasks/{id}",
             get(task_detail)
@@ -254,6 +276,12 @@ async fn task_detail(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    // FK constraint guarantees the project exists; treat missing as data
+    // integrity issue (500), not a stale-link 404.
+    let project = db::projects::get_project(&state.pool, task.project_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let attempts = db::attempts::list_attempts(&state.pool, id, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -283,7 +311,7 @@ async fn task_detail(
     render(
         &state.env,
         "task_detail.html",
-        context! { task => task, attempts => attempts, snapshots => snapshots, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
+        context! { task => task, project => project, attempts => attempts, snapshots => snapshots, subtasks => subtasks, parent => parent, all_tasks => all_tasks },
     )
 }
 
@@ -456,6 +484,46 @@ async fn create_task_handler(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "id": id })))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateProjectPayload {
+    // "" = clear, non-empty = set, absent = don't touch.
+    // Must contain "{ticket}" placeholder when set (DB CHECK enforces this).
+    ticket_url_template: Option<String>,
+}
+
+async fn update_project_handler(
+    State(state): State<DashboardState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(payload): Json<UpdateProjectPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(raw) = payload.ticket_url_template else {
+        return Ok(Json(serde_json::json!({ "updated": false })));
+    };
+    let trimmed = raw.trim();
+    let template = if trimmed.is_empty() {
+        None
+    } else {
+        // Protocol allowlist: only http/https. Blocks javascript:, data:, file:.
+        // MiniJinja autoescape neutralizes attacker-injected templates *as page
+        // content*, but a tracker URL is rendered as an `href` and clicking a
+        // non-http link is a footgun we don't need.
+        if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if !trimmed.contains("{ticket}") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if trimmed.chars().count() > 512 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Some(trimmed)
+    };
+    let updated = db::projects::update_ticket_url_template(&state.pool, id, template)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
 // --- Batch operations ---

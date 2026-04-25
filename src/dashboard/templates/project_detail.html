@@ -11,10 +11,10 @@
   <span class="ticket-url-template-edit" contenteditable="true" spellcheck="false"
         role="textbox" aria-label="Ticket URL template"
         data-project-id="{{ project.id }}"
-        data-value="{{ project.ticket_url_template | default(value='') }}"
+        data-value="{{ project.ticket_url_template or '' }}"
         title="Per-project URL template — must contain {ticket}. e.g. https://jira.example.com/browse/{ticket}"
         style="cursor: text; padding: 0.1rem 0.4rem; border-radius: 3px;{% if not project.ticket_url_template %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% else %} background: rgba(115,148,181,0.08); color: var(--blue);{% endif %}"
-  >{{ project.ticket_url_template | default(value="+ Set https://.../{ticket}") }}</span>
+  >{{ project.ticket_url_template or "+ Set https://.../{ticket}" }}</span>
 </p>
 
 <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.75rem;">
@@ -41,7 +41,7 @@
       <select id="new-parent" class="filter-select">
         <option value="">No parent (top-level)</option>
         {% for t in tasks %}
-        <option value="{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=60) }}</option>
+        <option value="{{ t.id }}">{{ (t.summary or t.description) | truncate(length=60) }}</option>
         {% endfor %}
       </select>
       <input id="new-ticket" type="text" maxlength="64" placeholder="Ticket (e.g. ABC-123, optional)" class="filter-select" style="font-family: var(--mono, monospace);">
@@ -116,20 +116,20 @@
     {% for t in tasks %}
     <tr id="task-{{ t.id }}">
       <td><input type="checkbox" class="task-cb" value="{{ t.id }}" onchange="updateBatchBar()"></td>
-      <td>{% if t.parent_task_id %}<span style="color: var(--muted); margin-right: 0.3rem;">↳</span>{% endif %}<a href="/tasks/{{ t.id }}">{{ t.summary | default(value=t.description) | truncate(length=80) }}</a></td>
+      <td>{% if t.parent_task_id %}<span style="color: var(--muted); margin-right: 0.3rem;">↳</span>{% endif %}<a href="/tasks/{{ t.id }}">{{ (t.summary or t.description) | truncate(length=80) }}</a></td>
       <td>
-        <span class="badge badge-priority" style="cursor: pointer;{% if not t.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ t.id }}" data-value="{{ t.priority | default(value='') }}">{{ t.priority | default(value="—") }}</span>
+        <span class="badge badge-priority" style="cursor: pointer;{% if not t.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ t.id }}" data-value="{{ t.priority or '' }}">{{ t.priority or "—" }}</span>
       </td>
       <td>
-        <span class="badge badge-type" style="cursor: pointer;{% if not t.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ t.id }}" data-value="{{ t.task_type | default(value='') }}">{{ t.task_type | default(value="—") }}</span>
+        <span class="badge badge-type" style="cursor: pointer;{% if not t.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ t.id }}" data-value="{{ t.task_type or '' }}">{{ t.task_type or "—" }}</span>
       </td>
       <td>
         <span class="badge badge-ticket ticket-edit" contenteditable="true" spellcheck="false"
               role="textbox" aria-label="Ticket number"
               style="cursor: text;{% if not t.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}"
               data-task-id="{{ t.id }}"
-              data-value="{{ t.ticket_number | default(value='') }}"
-              title="Click to edit ticket">{{ t.ticket_number | default(value="+ Ticket") }}</span>
+              data-value="{{ t.ticket_number or '' }}"
+              title="Click to edit ticket">{{ t.ticket_number or "+ Ticket" }}</span>
         {% if project.ticket_url_template and t.ticket_number %}
         <a href="{{ project.ticket_url_template | replace('{ticket}', t.ticket_number | urlencode) }}"
            target="_blank" rel="noopener noreferrer"

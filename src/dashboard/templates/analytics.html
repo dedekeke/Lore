@@ -17,7 +17,7 @@
     <div class="sub">Lower is better</div>
   </div>
   <div class="stat-card">
-    <div class="value">{{ knowledge_tokens | default(value=0) }}</div>
+    <div class="value">{{ knowledge_tokens or 0 }}</div>
     <div class="label">Knowledge Tokens</div>
     <div class="sub">{{ total_rule_bytes }}B rules + {{ total_attempt_bytes }}B attempts</div>
   </div>

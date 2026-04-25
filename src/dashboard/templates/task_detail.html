@@ -121,7 +121,7 @@
       <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
       <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
-      <td class="mono" style="color: var(--muted);" title="agent: {{ a.agent_id | default(value='—') }}&#10;session: {{ a.session_id | default(value='—') }}">{{ a.agent_id | default(value="—") }}{% if a.session_id %} / {{ a.session_id | truncate(length=8) }}{% endif %}</td>
+      <td class="mono" style="color: var(--muted);" title="agent: {{ a.agent_id | default(value='—') }}&#10;session: {{ a.session_id | default(value='—') }}">{% if a.agent_id or a.session_id %}{{ a.agent_id | default(value="—") }}{% if a.session_id %} / {{ a.session_id | truncate(length=8) }}{% endif %}{% else %}—{% endif %}</td>
       <td class="mono" style="color: var(--muted);" title="resolved_by_agent: {{ a.resolved_by_agent_id | default(value='—') }}&#10;resolved_by_session: {{ a.resolved_by_session_id | default(value='—') }}">{% if a.resolved_by_agent_id or a.resolved_by_session_id %}{{ a.resolved_by_agent_id | default(value="—") }}{% if a.resolved_by_session_id %} / {{ a.resolved_by_session_id | truncate(length=8) }}{% endif %}{% else %}—{% endif %}</td>
       <td class="mono" style="color: var(--muted);">{{ a.created_at | dateformat }}</td>
     </tr>

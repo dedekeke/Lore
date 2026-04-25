@@ -201,13 +201,14 @@ async fn project_detail(
     let sort_dir = q.dir.as_deref().unwrap_or("desc");
 
     // Raw value is what the user typed (trim only) — echoed back into the input field.
-    // Capping at 64 chars matches the validate_ticket_number write-path bound and
-    // prevents pathological inputs. The DB does the case-insensitive match via ILIKE.
+    // Capping at 64 *characters* matches the validate_ticket_number write-path bound
+    // (which uses chars().count(), not bytes — important for non-ASCII tracker IDs).
+    // The DB does the case-insensitive match via ILIKE.
     let raw_ticket_prefix = q
         .ticket_prefix
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .filter(|s| !s.is_empty() && s.chars().count() <= 64)
         .map(str::to_string);
 
     let filters = db::tasks::TaskListFilters {

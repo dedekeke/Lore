@@ -525,7 +525,14 @@ async fn test_filtered_count_and_list_paginated() {
         task_type: Some("Feature"),
         ..Default::default()
     };
-    assert_eq!(tasks::count_tasks(&pool, pid, f).await.unwrap(), 2);
+    assert_eq!(tasks::count_tasks(&pool, pid, f.clone()).await.unwrap(), 2);
+    let rows = tasks::list_tasks_paginated(&pool, pid, f, "created_at", "asc", 50, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .all(|t| t.task_type.as_deref() == Some("Feature")));
 
     // Active + ticket_prefix=abc (case-insensitive) → alpha, beta (gamma is XYZ, delta is completed)
     let f = TaskListFilters {

@@ -2080,6 +2080,9 @@ impl LoreServer {
             None
         };
 
+        // parent_task_id is intentionally NOT exposed via this MCP tool —
+        // re-parenting tasks is dashboard-only. ..Default::default() leaves
+        // it untouched.
         let updated = db::tasks::apply_task_update(
             self.pool(),
             tid,

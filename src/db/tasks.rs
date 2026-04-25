@@ -78,8 +78,8 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> Result<Option<Task>, sqlx::Err
 /// - `Some(None)` — clear (write SQL NULL).
 /// - `Some(Some(v))` — set to `v`.
 ///
-/// Constructed via `TaskUpdate::default()` and then field-set, so call sites
-/// only mention the fields they actually mutate.
+/// Constructed as a struct literal with `..Default::default()`, so call
+/// sites only mention the fields they actually mutate.
 #[derive(Debug, Default)]
 pub struct TaskUpdate<'a> {
     pub priority: Option<Option<&'a str>>,
@@ -138,7 +138,12 @@ pub async fn apply_task_update(
     }
     if fields.ticket_number.is_some() {
         set_clauses.push(format!("ticket_number = ${param_idx}"));
+        param_idx += 1;
     }
+    // Suppress unused-assignment warning; the trailing increment exists so
+    // adding a new field after `ticket_number` doesn't silently reuse the
+    // previous index and corrupt the bind order.
+    let _ = param_idx;
 
     let sql = format!(
         "UPDATE ai_memory.tasks SET {} WHERE id = $1",

@@ -80,11 +80,12 @@
   </select>
   {% endif %}
   <input id="filter-ticket-prefix" type="text" class="filter-select"
-         placeholder="Ticket prefix (e.g. ABC)" maxlength="32"
+         placeholder="Ticket prefix (e.g. ABC)" maxlength="64"
          value="{{ current_ticket_prefix or '' }}"
+         data-current-value="{{ current_ticket_prefix or '' }}"
          style="font-family: var(--mono, monospace); width: 13rem;"
          onkeydown="if(event.key==='Enter'){event.preventDefault();applyFilters();}"
-         onblur="if(this.value !== '{{ current_ticket_prefix or '' }}')applyFilters();">
+         onblur="if(this.value !== this.dataset.currentValue)applyFilters();">
   {% if current_status != "active" or current_priority or current_task_type or current_ticket_prefix %}
   <a href="/projects/{{ project.id }}" class="btn btn-danger" style="font-size: 0.72rem;">Clear</a>
   {% endif %}

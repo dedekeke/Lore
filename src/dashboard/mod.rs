@@ -217,20 +217,26 @@ async fn project_detail(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // In-memory filtering for priority and task_type (pending DB-level filter)
+    // In-memory filtering for priority, task_type, and ticket_prefix (pending DB-level filter).
+    // Pagination's `total` / `total_pages` are derived from the unfiltered DB count, so
+    // these filters can yield short pages — accepted trade-off until the DB-level pass lands.
     if let Some(ref p) = q.priority {
         tasks.retain(|t| t.priority.as_deref() == Some(p.as_str()));
     }
     if let Some(ref tt) = q.task_type {
         tasks.retain(|t| t.task_type.as_deref() == Some(tt.as_str()));
     }
-    let ticket_prefix = q
+    // Raw value is what the user typed (trim only) — echoed back into the input field.
+    // Uppercased value is used for the case-insensitive prefix match. Capping at 64 chars
+    // matches the validate_ticket_number write-path bound and prevents pathological inputs.
+    let raw_ticket_prefix = q
         .ticket_prefix
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_uppercase);
-    if let Some(ref pfx) = ticket_prefix {
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .map(str::to_string);
+    let ticket_prefix_match = raw_ticket_prefix.as_deref().map(str::to_ascii_uppercase);
+    if let Some(ref pfx) = ticket_prefix_match {
         tasks.retain(|t| {
             t.ticket_number
                 .as_deref()
@@ -272,7 +278,7 @@ async fn project_detail(
             current_status => resolved_status,
             current_priority => q.priority,
             current_task_type => q.task_type,
-            current_ticket_prefix => ticket_prefix,
+            current_ticket_prefix => raw_ticket_prefix,
             page => page,
             per_page => per_page,
             total_pages => total_pages,

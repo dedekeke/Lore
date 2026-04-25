@@ -261,15 +261,13 @@ async fn test_ticket_number_create_update_clear() {
     assert_eq!(task.ticket_number.as_deref(), Some("ABC-123"));
 
     // Update to a new ticket
-    let updated = tasks::update_task(
+    let updated = tasks::apply_task_update(
         &pool,
         tid,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(Some("ENG-42")),
+        tasks::TaskUpdate {
+            ticket_number: Some(Some("ENG-42")),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -278,9 +276,16 @@ async fn test_ticket_number_create_update_clear() {
     assert_eq!(task.ticket_number.as_deref(), Some("ENG-42"));
 
     // Clear it
-    let updated = tasks::update_task(&pool, tid, None, None, None, None, None, Some(None))
-        .await
-        .unwrap();
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            ticket_number: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert!(updated);
     let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
     assert!(task.ticket_number.is_none());
@@ -288,6 +293,35 @@ async fn test_ticket_number_create_update_clear() {
     // CHECK constraint rejects empty/whitespace
     let bad = tasks::create_task(&pool, pid, "bad", None, None, None, Some("   "), None).await;
     assert!(bad.is_err());
+}
+
+#[tokio::test]
+async fn test_apply_task_update_description_also_updates_summary() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    // Long description so the auto-generated summary is non-trivially derived.
+    let long = "a".repeat(200);
+    let tid = tasks::create_task(&pool, pid, &long, None, None, None, None, None)
+        .await
+        .unwrap();
+
+    let updated = tasks::apply_task_update(
+        &pool,
+        tid,
+        tasks::TaskUpdate {
+            description: Some("short replacement"),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(updated);
+
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.description, "short replacement");
+    // generate_summary leaves <=120-char descriptions unchanged.
+    assert_eq!(task.summary.as_deref(), Some("short replacement"));
 }
 
 #[tokio::test]

@@ -2080,15 +2080,20 @@ impl LoreServer {
             None
         };
 
-        let updated = db::tasks::update_task(
+        // parent_task_id is intentionally NOT exposed via this MCP tool —
+        // re-parenting tasks is dashboard-only. ..Default::default() leaves
+        // it untouched.
+        let updated = db::tasks::apply_task_update(
             self.pool(),
             tid,
-            p.as_ref().map(|o| o.as_deref()),
-            tt.as_ref().map(|o| o.as_deref()),
-            desc.as_deref(),
-            desc_embedding.as_deref(),
-            None,
-            tn.as_ref().map(|o| o.as_deref()),
+            db::tasks::TaskUpdate {
+                priority: p.as_ref().map(|o| o.as_deref()),
+                task_type: tt.as_ref().map(|o| o.as_deref()),
+                description: desc.as_deref(),
+                description_embedding: desc_embedding.as_deref(),
+                ticket_number: tn.as_ref().map(|o| o.as_deref()),
+                ..Default::default()
+            },
         )
         .await
         .map_err(Self::db_err)?;

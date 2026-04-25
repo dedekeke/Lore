@@ -114,7 +114,12 @@
         <span class="badge badge-type" style="cursor: pointer;{% if not t.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ t.id }}" data-value="{{ t.task_type | default(value='') }}">{{ t.task_type | default(value="—") }}</span>
       </td>
       <td>
-        <span class="badge badge-ticket" style="cursor: pointer;{% if not t.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editTicketCell(this)" data-task-id="{{ t.id }}" data-value="{{ t.ticket_number | default(value='') }}" title="Click to edit ticket">{{ t.ticket_number | default(value="—") }}</span>
+        <span class="badge badge-ticket ticket-edit" contenteditable="true" spellcheck="false"
+              role="textbox" aria-label="Ticket number"
+              style="cursor: text;{% if not t.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}"
+              data-task-id="{{ t.id }}"
+              data-value="{{ t.ticket_number | default(value='') }}"
+              title="Click to edit ticket">{{ t.ticket_number | default(value="+ Ticket") }}</span>
       </td>
       <td><span class="badge badge-{{ t.status | lower }}">{{ t.status }}</span></td>
       <td class="mono text-nowrap" style="color: var(--muted);">{{ t.created_at | dateformat }}</td>
@@ -173,26 +178,6 @@ function editField(badge, field) {
       ? 'cursor: pointer;'
       : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
   });
-}
-async function editTicketCell(badge) {
-  const taskId = badge.dataset.taskId;
-  const current = badge.dataset.value;
-  const next = window.prompt('Ticket number (e.g. ABC-123). Leave blank to clear.', current);
-  if (next === null) return;
-  const trimmed = next.trim();
-  if (trimmed === current) return;
-  if ([...trimmed].length > 64) { alert('Ticket too long (max 64 chars)'); return; }
-  const res = await fetch('/tasks/' + taskId, {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ticket_number: trimmed})
-  });
-  if (!res.ok) { alert('Failed to update ticket'); return; }
-  badge.dataset.value = trimmed;
-  badge.textContent = trimmed || '—';
-  badge.style.cssText = trimmed
-    ? 'cursor: pointer;'
-    : 'cursor: pointer; background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
 }
 function buildParams(overrides) {
   const params = new URLSearchParams();

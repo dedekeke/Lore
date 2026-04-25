@@ -385,6 +385,54 @@
         document.addEventListener('mousedown', dismiss);
       }, 0);
     }
+
+    // Inline ticket editor: click to edit, blur (or Enter) to save, Esc to cancel.
+    // Element must carry data-task-id and data-value. Values are trimmed and
+    // capped at 64 code points. Failed PATCH silently reverts.
+    const TICKET_PLACEHOLDER = '+ Ticket';
+    function bindTicketEditor(el) {
+      if (el.dataset.ticketBound === '1') return;
+      el.dataset.ticketBound = '1';
+      el.addEventListener('focus', () => {
+        if (!el.dataset.value) el.textContent = '';
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+        else if (e.key === 'Escape') {
+          // stopPropagation so the global Escape→closeModal handler doesn't fire
+          e.preventDefault(); e.stopPropagation();
+          el.textContent = el.dataset.value || TICKET_PLACEHOLDER;
+          el.blur();
+        }
+      });
+      el.addEventListener('blur', async () => {
+        let val = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if ([...val].length > 64) val = [...val].slice(0, 64).join('');
+        const prev = el.dataset.value || '';
+        if (val === prev) { el.textContent = val || TICKET_PLACEHOLDER; return; }
+        // Empty string is the intentional "clear" signal; the dashboard handler
+        // normalizes "" → None (see update_task_handler in src/dashboard/mod.rs)
+        // and the DB CHECK constraint rejects whitespace-only values.
+        const res = await fetch('/tasks/' + el.dataset.taskId, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ticket_number: val})
+        });
+        if (!res.ok) { el.textContent = prev || TICKET_PLACEHOLDER; return; }
+        el.dataset.value = val;
+        el.textContent = val || TICKET_PLACEHOLDER;
+        const placeholderStyle = ' background: var(--surface); border: 1px dashed var(--border); color: var(--muted);';
+        el.style.cssText = 'cursor: text;' + (val ? '' : placeholderStyle);
+      });
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.ticket-edit').forEach(bindTicketEditor);
+    });
   </script>
 </body>
 </html>

@@ -156,12 +156,14 @@ function cancelTicket() {
 }
 async function saveTicket() {
   const val = document.getElementById('ticket-input').value.trim();
+  if ([...val].length > 64) { alert('Ticket too long (max 64 chars)'); return; }
   const res = await fetch('/tasks/{{ task.id }}', {
     method: 'PATCH',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ticket_number: val})
   });
-  if (res.ok) window.location.reload();
+  if (!res.ok) { alert('Failed to update ticket'); return; }
+  window.location.reload();
 }
 function showParentSelect() {
   document.getElementById('parent-badge').style.display = 'none';

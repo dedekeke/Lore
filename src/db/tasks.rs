@@ -112,7 +112,9 @@ pub async fn update_task(
     }
     if ticket_number.is_some() {
         set_clauses.push(format!("ticket_number = ${param_idx}"));
+        param_idx += 1;
     }
+    let _ = param_idx;
     if set_clauses.is_empty() {
         return Ok(false);
     }

@@ -291,6 +291,30 @@ async fn test_ticket_number_create_update_clear() {
 }
 
 #[tokio::test]
+async fn test_ticket_number_survives_complete_task() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let tid = tasks::create_task(
+        &pool,
+        pid,
+        "complete with ticket",
+        None,
+        None,
+        None,
+        Some("ABC-7"),
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::complete_task(&pool, tid, None).await.unwrap();
+
+    let task = tasks::get_task(&pool, tid).await.unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.ticket_number.as_deref(), Some("ABC-7"));
+}
+
+#[tokio::test]
 async fn test_task_summary_includes_ticket_number() {
     let (pool, _c) = common::setup_db().await;
     let pid = projects::create_project(&pool, "p", "/").await.unwrap();

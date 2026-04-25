@@ -366,6 +366,20 @@ impl LoreServer {
         Ok(())
     }
 
+    /// Char-counted length cap for ticket_number — keeps the dashboard, MCP,
+    /// and HTML `maxlength` enforcement on the same Unicode-character semantic
+    /// (vs. `validate_len` which counts bytes).
+    fn validate_ticket_number(val: &str) -> Result<(), rmcp::ErrorData> {
+        let chars = val.chars().count();
+        if chars > 64 {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("ticket_number exceeds max length ({chars} > 64 chars)"),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_nonblank(field: &str, val: &str) -> Result<(), rmcp::ErrorData> {
         if val.trim().is_empty() {
             return Err(rmcp::ErrorData::invalid_params(
@@ -1605,7 +1619,7 @@ impl LoreServer {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
         if let Some(ref t) = ticket_number {
-            Self::validate_len("ticket_number", t, 64)?;
+            Self::validate_ticket_number(t)?;
         }
         let embedding = self.embed(&description).await.ok();
         let id = db::tasks::create_task(
@@ -2011,7 +2025,7 @@ impl LoreServer {
             }
         });
         if let Some(Some(ref t)) = tn {
-            Self::validate_len("ticket_number", t, 64)?;
+            Self::validate_ticket_number(t)?;
         }
         let desc = description
             .map(|v| v.trim().to_string())

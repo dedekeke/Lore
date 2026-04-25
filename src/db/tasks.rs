@@ -394,11 +394,14 @@ pub struct TaskListFilters<'a> {
     pub ticket_prefix: Option<&'a str>,
 }
 
-/// Builds the dynamic `WHERE` body and returns the index of the next free
-/// placeholder. project_id is always bound at $1, so `start_idx` is 2.
-fn task_filter_clauses(filters: &TaskListFilters) -> (String, i32) {
+/// Builds the dynamic `WHERE` body and returns the *first post-filter
+/// placeholder index*. Callers use the returned value directly as
+/// `${idx}` (e.g. for LIMIT) and `${idx + 1}` for any subsequent bind
+/// (e.g. OFFSET). project_id is always bound at $1, so the running idx
+/// starts at 2.
+fn task_filter_clauses(filters: &TaskListFilters) -> (String, usize) {
     let mut clauses = vec!["project_id = $1".to_string()];
-    let mut idx: i32 = 2;
+    let mut idx: usize = 2;
     if filters.status.is_some() {
         clauses.push(format!("status = ${idx}"));
         idx += 1;

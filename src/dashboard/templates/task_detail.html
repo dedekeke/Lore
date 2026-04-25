@@ -1,30 +1,30 @@
 {% extends "base.html" %}
-{% block title %}Task — {{ task.summary | default(value=task.description) | truncate(length=40) }}{% endblock %}
+{% block title %}Task — {{ (task.summary or task.description) | truncate(length=40) }}{% endblock %}
 {% block content %}
 <div style="margin-bottom: 2rem;">
   <a href="/projects/{{ task.project_id }}" class="btn">&larr; Tasks</a>
   {% if parent %}
-  <a href="/tasks/{{ parent.id }}" class="btn">&larr; Parent: {{ parent.summary | default(value=parent.description) | truncate(length=40) }}</a>
+  <a href="/tasks/{{ parent.id }}" class="btn">&larr; Parent: {{ (parent.summary or parent.description) | truncate(length=40) }}</a>
   {% endif %}
 </div>
 
-<h1>{{ task.summary | default(value=task.description | truncate(length=80)) }}</h1>
+<h1>{{ (task.summary or task.description) | truncate(length=80) }}</h1>
 <div style="display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 1.5rem; flex-wrap: wrap;">
   <span class="badge badge-{{ task.status | lower }}">{{ task.status }}</span>
 
   {# Editable priority — custom dropdown #}
-  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ task.id }}" data-value="{{ task.priority | default(value='') }}">{{ task.priority | default(value="—") }}</span>
+  <span class="badge badge-priority" style="cursor: pointer;{% if not task.priority %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'priority')" data-task-id="{{ task.id }}" data-value="{{ task.priority or '' }}">{{ task.priority or "—" }}</span>
 
   {# Editable task_type — custom dropdown #}
-  <span class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ task.id }}" data-value="{{ task.task_type | default(value='') }}">{{ task.task_type | default(value="+ Type") }}</span>
+  <span class="badge badge-type" style="cursor: pointer;{% if not task.task_type %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}" onclick="editField(this, 'task_type')" data-task-id="{{ task.id }}" data-value="{{ task.task_type or '' }}">{{ task.task_type or "+ Type" }}</span>
 
   {# Inline editable ticket_number — click to edit, blur or Enter to save, Esc to cancel #}
   <span class="badge badge-ticket ticket-edit" contenteditable="true" spellcheck="false"
         role="textbox" aria-label="Ticket number"
         style="cursor: text;{% if not task.ticket_number %} background: var(--surface); border: 1px dashed var(--border); color: var(--muted);{% endif %}"
         data-task-id="{{ task.id }}"
-        data-value="{{ task.ticket_number | default(value='') }}"
-        title="External tracker reference (Jira/Linear ticket)">{{ task.ticket_number | default(value="+ Ticket") }}</span>
+        data-value="{{ task.ticket_number or '' }}"
+        title="External tracker reference (Jira/Linear ticket)">{{ task.ticket_number or "+ Ticket" }}</span>
   {% if project.ticket_url_template and task.ticket_number %}
   <a href="{{ project.ticket_url_template | replace('{ticket}', task.ticket_number | urlencode) }}"
      target="_blank" rel="noopener noreferrer"
@@ -35,7 +35,7 @@
   {# Link/unlink parent #}
   <span id="parent-badge">
     {% if parent %}
-    <span class="badge" style="background: var(--surface); border: 1px solid var(--border); cursor: pointer;" onclick="showParentSelect()" title="Click to change or unlink parent">Subtask of: {{ parent.summary | default(value=parent.description) | truncate(length=30) }}</span>
+    <span class="badge" style="background: var(--surface); border: 1px solid var(--border); cursor: pointer;" onclick="showParentSelect()" title="Click to change or unlink parent">Subtask of: {{ (parent.summary or parent.description) | truncate(length=30) }}</span>
     {% else %}
     <span class="badge" style="background: var(--surface); border: 1px dashed var(--border); color: var(--muted); cursor: pointer;" onclick="showParentSelect()" title="Click to link a parent task">+ Link Parent</span>
     {% endif %}
@@ -44,7 +44,7 @@
     <select id="parent-select" class="filter-select" style="font-size: 0.75rem; width: auto; min-width: 200px;">
       <option value="">— No parent —</option>
       {% for t in all_tasks %}
-      <option value="{{ t.id }}" {% if parent and t.id == parent.id %}selected{% endif %}>{{ t.summary | default(value=t.description) | truncate(length=50) }}</option>
+      <option value="{{ t.id }}" {% if parent and t.id == parent.id %}selected{% endif %}>{{ (t.summary or t.description) | truncate(length=50) }}</option>
       {% endfor %}
     </select>
     <button class="btn" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;" onclick="saveParent()">Save</button>
@@ -77,7 +77,7 @@
   <tbody>
     {% for s in subtasks %}
     <tr>
-      <td><a href="/tasks/{{ s.id }}">{{ s.summary | default(value=s.description) | truncate(length=80) }}</a></td>
+      <td><a href="/tasks/{{ s.id }}">{{ (s.summary or s.description) | truncate(length=80) }}</a></td>
       <td><span class="badge badge-{{ s.status | lower }}">{{ s.status }}</span></td>
       <td class="mono" style="color: var(--muted);">{{ s.created_at | dateformat }}</td>
     </tr>
@@ -95,9 +95,9 @@
     <tr>
       <td class="mono" style="color: var(--muted);">{{ s.wiped_at | dateformat }}</td>
       <td class="mono">{{ s.token_count_before }}</td>
-      <td class="mono" style="color: var(--muted);">{{ s.agent_id | default(value="—") }}</td>
-      <td class="mono" style="color: var(--muted);">{{ s.session_id | default(value="—") }}</td>
-      <td class="mono" style="color: var(--muted);">{{ s.last_attempt_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.agent_id or "—" }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.session_id or "—" }}</td>
+      <td class="mono" style="color: var(--muted);">{{ s.last_attempt_id or "—" }}</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -114,8 +114,8 @@
       <td class="clickable-cell" onclick="showModal('Approach', this.dataset.full)" data-full="{{ a.approach_summary }}">{{ a.approach_summary | truncate(length=60) }}</td>
       <td><span class="badge badge-{{ a.outcome | lower }}">{{ a.outcome }}</span></td>
       <td class="clickable-cell" onclick="showModal('Reasoning', this.dataset.full)" data-full="{{ a.reasoning }}">{{ a.reasoning | truncate(length=60) }}</td>
-      <td class="mono" style="color: var(--muted);">{{ a.agent_id | default(value="—") }}</td>
-      <td class="mono" style="color: var(--muted);">{{ a.session_id | default(value="—") }}</td>
+      <td class="mono" style="color: var(--muted);">{{ a.agent_id or "—" }}</td>
+      <td class="mono" style="color: var(--muted);">{{ a.session_id or "—" }}</td>
       <td class="mono" style="color: var(--muted);">{{ a.created_at | dateformat }}</td>
     </tr>
     {% endfor %}

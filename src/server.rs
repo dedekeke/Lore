@@ -1331,9 +1331,19 @@ impl LoreServer {
                 match sr.rule.category {
                     db::RuleCategory::Constraint => avoid.push(item),
                     db::RuleCategory::Fact => info.push(item),
-                    db::RuleCategory::Instruction
-                    | db::RuleCategory::Preference
-                    | db::RuleCategory::Lesson => do_strategies.push(item),
+                    db::RuleCategory::Instruction | db::RuleCategory::Preference => {
+                        do_strategies.push(item)
+                    }
+                    // Lessons land in either bucket based on origin tag:
+                    // abandon-derived lessons describe failure reasons (avoid);
+                    // anything else (success-derived or hand-written) is guidance.
+                    db::RuleCategory::Lesson => {
+                        if sr.rule.tags.iter().any(|t| t == "origin:abandoned") {
+                            avoid.push(item);
+                        } else {
+                            do_strategies.push(item);
+                        }
+                    }
                 }
             }
             let body = serde_json::json!({
@@ -2205,13 +2215,16 @@ impl LoreServer {
             let project_id = self.project_id().await?;
             if let Some(lesson_text) = &lesson {
                 let embedding = self.embed(lesson_text).await?;
+                // Tag with origin so recall_rules(grouped=true) can distinguish
+                // success-derived lessons (apply these) from abandon-derived
+                // ones (avoid these).
                 db::semantic::create_rule(
                     self.pool(),
                     project_id,
                     db::RuleCategory::Lesson,
                     lesson_text,
                     Some(&embedding),
-                    &[],
+                    &["origin:completed".to_string()],
                 )
                 .await
                 .map_err(Self::db_err)?;
@@ -2328,13 +2341,16 @@ impl LoreServer {
         if success && save_lesson.unwrap_or(false) {
             let project_id = self.project_id().await?;
             let embedding = self.embed(&reason).await?;
+            // Origin tag → recall_rules(grouped=true) routes this to `avoid`
+            // instead of `do_strategies`, since abandonment reasons describe
+            // what NOT to do, not affirmative guidance.
             db::semantic::create_rule(
                 self.pool(),
                 project_id,
                 db::RuleCategory::Lesson,
                 &reason,
                 Some(&embedding),
-                &[],
+                &["origin:abandoned".to_string()],
             )
             .await
             .map_err(Self::db_err)?;

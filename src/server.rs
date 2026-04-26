@@ -2909,6 +2909,21 @@ impl LoreServer {
             .unwrap_or("Unknown");
         writeln!(md, "# Handoff Packet — {name}\n").unwrap();
 
+        // Reader hint: when the next session's LLM ingests this packet, ask it
+        // to collapse each task's attempt sequence into numbered atomic action
+        // steps before planning. Pattern adapted from ECNU-SII/MIA's
+        // get_trace_prompt — keeps the briefing dense without bloating storage.
+        writeln!(
+            md,
+            "## How to read this\n\n\
+             Before acting, abstract each Active Task's attempt list into numbered \
+             atomic steps in the form `N. action_purpose (input → output)`. \
+             Preserve the [accepted]/[rejected]/[pending] outcome on each step so \
+             the next move is informed by both what worked and what didn't. \
+             Keep the abstraction ≤8 steps per task; cut redundant retries.\n"
+        )
+        .unwrap();
+
         // Active tasks with recent attempts
         if !active_tasks.is_empty() {
             writeln!(md, "## Active Tasks\n").unwrap();

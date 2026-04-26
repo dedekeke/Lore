@@ -228,10 +228,40 @@ All via environment variables (see `.env.example`):
 | `DASHBOARD_ENABLED`                  | `false`                                             | Enable web dashboard                                           |
 | `DASHBOARD_PORT`                     | `3102`                                              | Dashboard HTTP port                                            |
 | `WEBHOOK_URL`                        | —                                                   | HTTP endpoint for event notifications                          |
-| `WEBHOOK_EVENTS`                     | `task_completed,task_abandoned,rejection_threshold` | Event types to fire                                            |
+| `WEBHOOK_EVENTS`                     | `task_completed,task_abandoned,rejection_threshold` | Event types to fire (allowlist; see below)                     |
 | `WEBHOOK_REJECTION_THRESHOLD`        | `3`                                                 | Fire webhook after N rejections on same task                   |
 
 > Changing `EMBEDDING_DIMENSIONS` requires a migration to alter the pgvector column size.
+
+### Webhook events
+
+When `WEBHOOK_URL` is set, Lore POSTs JSON to it for every event named in `WEBHOOK_EVENTS`. Delivery is best-effort (fire-and-forget on a tokio task) — a failed delivery is logged at `warn` and never blocks or rolls back the underlying state change.
+
+Every payload shares the same envelope:
+
+```json
+{
+  "event": "<event_name>",
+  "project": "<project_name>",
+  "data": { … per-event fields … },
+  "timestamp": "2026-04-25T14:46:21.123Z"
+}
+```
+
+`task_created` is opt-in: it's not in the default `WEBHOOK_EVENTS` allowlist, so existing deployments don't start receiving new traffic on upgrade — add it explicitly if you want it.
+
+| Event | Fired by | `data` fields |
+|-------|----------|----------------|
+| `task_created` | `start_task` | `task_id`, `ticket_number`, `parent_task_id`, `priority`, `task_type` |
+| `task_completed` | `complete_task` | `task_id`, `ticket_number`, `lesson`, `parents_rolled_up`, `followups_created` |
+| `task_abandoned` | `abandon_task` | `task_id`, `ticket_number`, `reason`, `parents_rolled_up` |
+| `rejection_threshold` | `log_outcome` once `WEBHOOK_REJECTION_THRESHOLD` rejected attempts accumulate on a single task | `task_id`, `ticket_number`, `rejection_count`, `latest_reasoning` |
+
+Notes:
+- `ticket_number` is `null` when the task has no external tracker reference.
+- `parent_task_id`, `priority`, `task_type` on `task_created` are `null` when omitted at `start_task`.
+- `lesson` on `task_completed` is `null` when no lesson string was supplied.
+- Each event carries the fields meaningful at *that* lifecycle moment — payload shapes are not uniform across events on purpose. The `event` + `task_id` pair is the stable correlation handle.
 
 ---
 
@@ -243,7 +273,7 @@ Tables in the `ai_memory` schema:
 - `semantic_rules` — rules with embeddings, temporal validity, hit counters
 - `tasks` — goals with status, priority, subtask hierarchies
 - `attempts` — episodic ledger: approach, outcome, reasoning, code, git ref
-- `task_links` — cross-task edges (`blocks`, `related_to`, `caused_by`, `duplicate_of`)
+- `task_links` — cross-task edges (`blocks`, `related_to`, `caused_by`, `duplicate_of`, `follow_up`)
 - `context_snapshots` — context wipe bookmarks
 - `code_chunks` — AST-level code chunks with embeddings and community IDs
 - `codebase_edges` — `calls` / `imports` / `references` between chunks

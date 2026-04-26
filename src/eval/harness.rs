@@ -203,6 +203,7 @@ pub async fn replay_case(server: &LoreServer, case: &EvalCase) -> Result<CaseRun
                         tags: None,
                         cross_project: None,
                         compact: Some(true),
+                        grouped: None,
                     }))
                     .await?;
                 let returned_ids = parse_compact_ids(&res)?;

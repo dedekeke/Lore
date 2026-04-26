@@ -243,11 +243,168 @@ async fn test_remember_and_recall_rules() {
             tags: None,
             cross_project: None,
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();
     let rules = extract_json(&recalled);
     assert!(!rules.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_recall_rules_grouped() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("grouped-test", "/tmp"))
+        .await
+        .unwrap();
+
+    // All rules share the anchor token "rustguidance" so the hybrid search
+    // returns the full set regardless of FakeEmbeddingProvider similarity drift.
+    // The two lesson rows differ by their `origin:` tag, which is what the
+    // grouper uses to split success-derived (do_strategies) from
+    // abandon-derived (avoid).
+    let inserts: &[(&str, &str, Option<Vec<String>>)] = &[
+        (
+            "instruction",
+            "rustguidance: always run cargo fmt before commit",
+            None,
+        ),
+        (
+            "preference",
+            "rustguidance: prefer thiserror over anyhow",
+            None,
+        ),
+        ("constraint", "rustguidance: never log secrets", None),
+        (
+            "lesson",
+            "rustguidance: Vec::retain runs after pagination",
+            Some(vec!["origin:completed".into()]),
+        ),
+        (
+            "lesson",
+            "rustguidance: don't bypass the hook layer with direct DB writes",
+            Some(vec!["origin:abandoned".into()]),
+        ),
+        ("fact", "rustguidance: pgvector requires Postgres 14+", None),
+    ];
+    for (cat, content, tags) in inserts {
+        server
+            .remember_rule(Parameters(RememberRuleParams {
+                category: (*cat).into(),
+                content: (*content).into(),
+                tags: tags.clone(),
+                always_inject: None,
+            }))
+            .await
+            .unwrap();
+    }
+
+    let recalled = server
+        .recall_rules(Parameters(RecallRulesParams {
+            query: "rustguidance".into(),
+            limit: Some(20),
+            category: None,
+            tags: None,
+            cross_project: None,
+            compact: Some(true),
+            grouped: Some(true),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&recalled);
+
+    let do_strategies = body["do_strategies"].as_array().unwrap();
+    let avoid = body["avoid"].as_array().unwrap();
+    let info = body["info"].as_array().unwrap();
+
+    let total = do_strategies.len() + avoid.len() + info.len();
+    assert!(total >= 1, "expected at least one rule from hybrid search");
+
+    // RuleCategory serialises in PascalCase via serde defaults.
+    // `avoid` accepts Constraint OR Lesson with origin:abandoned tag.
+    for item in avoid {
+        let cat = item["category"].as_str().unwrap();
+        match cat {
+            "Constraint" => {} // always avoid
+            "Lesson" => {
+                let tags: Vec<&str> = item["tags"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+                    .unwrap_or_default();
+                assert!(
+                    tags.contains(&"origin:abandoned"),
+                    "Lesson in avoid bucket must carry origin:abandoned tag; got {tags:?}"
+                );
+            }
+            other => panic!("avoid bucket got unexpected category {other}"),
+        }
+    }
+    for item in info {
+        assert_eq!(item["category"].as_str().unwrap(), "Fact");
+    }
+    for item in do_strategies {
+        let cat = item["category"].as_str().unwrap();
+        assert!(
+            matches!(cat, "Instruction" | "Preference" | "Lesson"),
+            "do_strategies bucket got unexpected category {cat}"
+        );
+        // Lesson in do_strategies must NOT carry origin:abandoned.
+        if cat == "Lesson" {
+            let tags: Vec<&str> = item["tags"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+                .unwrap_or_default();
+            assert!(
+                !tags.contains(&"origin:abandoned"),
+                "abandon-derived Lesson must route to avoid, not do_strategies"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_abandon_task_save_lesson_tags_origin() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("abandon-origin", "/tmp"))
+        .await
+        .unwrap();
+
+    let task = server
+        .start_task(start_task_params("doomed approach"))
+        .await
+        .unwrap();
+    let tid = extract_json(&task)["task_id"].as_str().unwrap().to_string();
+
+    server
+        .abandon_task(Parameters(AbandonTaskParams {
+            task_id: tid,
+            reason: "this approach broke under concurrent writes".into(),
+            save_lesson: Some(true),
+        }))
+        .await
+        .unwrap();
+
+    // List lessons for the project; the abandon-saved one must carry origin:abandoned.
+    let listed = server
+        .list_rules(Parameters(ListRulesParams {
+            category: Some("lesson".into()),
+            tags: None,
+        }))
+        .await
+        .unwrap();
+    let rules = extract_json(&listed);
+    let arr = rules.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    let tags: Vec<&str> = arr[0]["tags"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        tags.contains(&"origin:abandoned"),
+        "abandon_task save_lesson must tag lesson with origin:abandoned; got {tags:?}"
+    );
 }
 
 #[tokio::test]
@@ -282,6 +439,7 @@ async fn test_recall_rules_cross_project() {
             tags: None,
             cross_project: Some(false),
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();
@@ -296,6 +454,7 @@ async fn test_recall_rules_cross_project() {
             tags: None,
             cross_project: Some(true),
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();

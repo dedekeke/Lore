@@ -734,6 +734,10 @@ pub struct RecallRulesParams {
         description = "If true, return compact previews (id, category, first 80 chars, score, tags, hit_count, last_used_at) instead of full content. Use get_rule(id) to fetch full details."
     )]
     pub compact: Option<bool>,
+    #[schemars(
+        description = "If true, group results into `do_strategies` (Instruction/Preference/Lesson), `avoid` (Constraint), and `info` (Fact) buckets — gives the planner LLM a 'what to do vs. what not to do' split instead of a flat list. Composes with `compact`."
+    )]
+    pub grouped: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1267,6 +1271,7 @@ impl LoreServer {
             tags,
             cross_project,
             compact,
+            grouped,
         }): Parameters<RecallRulesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         Self::validate_len("query", &query, 2048)?;
@@ -1295,22 +1300,68 @@ impl LoreServer {
         .await
         .map_err(Self::db_err)?;
 
-        if compact.unwrap_or(false) {
-            let compact_results: Vec<serde_json::Value> = scored_rules
-                .iter()
-                .map(|sr| {
-                    let preview: String = sr.rule.content.chars().take(80).collect();
-                    serde_json::json!({
-                        "id": sr.rule.id.to_string(),
-                        "category": serde_json::to_value(&sr.rule.category).unwrap_or_default(),
-                        "preview": preview,
-                        "score": sr.score,
-                        "tags": sr.rule.tags,
-                        "hit_count": sr.rule.hit_count,
-                        "last_used_at": sr.rule.last_used_at,
-                    })
+        let compact = compact.unwrap_or(false);
+        let to_item = |sr: &db::semantic::ScoredRule| -> serde_json::Value {
+            if compact {
+                let preview: String = sr.rule.content.chars().take(80).collect();
+                serde_json::json!({
+                    "id": sr.rule.id.to_string(),
+                    "category": serde_json::to_value(&sr.rule.category).unwrap_or_default(),
+                    "preview": preview,
+                    "score": sr.score,
+                    "tags": sr.rule.tags,
+                    "hit_count": sr.rule.hit_count,
+                    "last_used_at": sr.rule.last_used_at,
                 })
-                .collect();
+            } else {
+                serde_json::to_value(sr).unwrap_or_default()
+            }
+        };
+
+        if grouped.unwrap_or(false) {
+            // Map RuleCategory onto MIA-style "what to do / what to avoid":
+            //   Instruction + Preference + Lesson → do_strategies
+            //   Constraint                        → avoid
+            //   Fact                              → info (neutral context)
+            let mut do_strategies: Vec<serde_json::Value> = Vec::new();
+            let mut avoid: Vec<serde_json::Value> = Vec::new();
+            let mut info: Vec<serde_json::Value> = Vec::new();
+            for sr in &scored_rules {
+                let item = to_item(sr);
+                match sr.rule.category {
+                    db::RuleCategory::Constraint => avoid.push(item),
+                    db::RuleCategory::Fact => info.push(item),
+                    db::RuleCategory::Instruction | db::RuleCategory::Preference => {
+                        do_strategies.push(item)
+                    }
+                    // Lessons land in either bucket based on origin tag:
+                    // abandon-derived lessons describe failure reasons (avoid);
+                    // anything else (success-derived or hand-written) is guidance.
+                    db::RuleCategory::Lesson => {
+                        if sr.rule.tags.iter().any(|t| t == "origin:abandoned") {
+                            avoid.push(item);
+                        } else {
+                            do_strategies.push(item);
+                        }
+                    }
+                }
+            }
+            let body = serde_json::json!({
+                "do_strategies": do_strategies,
+                "avoid": avoid,
+                "info": info,
+            });
+            let nudge = if compact {
+                "Apply `do_strategies`; respect `avoid`; treat `info` as context. Use get_rule(id) to fetch full content."
+            } else {
+                "Apply `do_strategies`; respect `avoid`; treat `info` as context."
+            };
+            return Self::json_content_with_nudge(&body, nudge);
+        }
+
+        if compact {
+            let compact_results: Vec<serde_json::Value> =
+                scored_rules.iter().map(to_item).collect();
             return Self::json_content_with_nudge(
                 &compact_results,
                 "Use get_rule(id) to fetch full content for specific rules.",
@@ -2164,13 +2215,16 @@ impl LoreServer {
             let project_id = self.project_id().await?;
             if let Some(lesson_text) = &lesson {
                 let embedding = self.embed(lesson_text).await?;
+                // Tag with origin so recall_rules(grouped=true) can distinguish
+                // success-derived lessons (apply these) from abandon-derived
+                // ones (avoid these).
                 db::semantic::create_rule(
                     self.pool(),
                     project_id,
                     db::RuleCategory::Lesson,
                     lesson_text,
                     Some(&embedding),
-                    &[],
+                    &["origin:completed".to_string()],
                 )
                 .await
                 .map_err(Self::db_err)?;
@@ -2287,13 +2341,16 @@ impl LoreServer {
         if success && save_lesson.unwrap_or(false) {
             let project_id = self.project_id().await?;
             let embedding = self.embed(&reason).await?;
+            // Origin tag → recall_rules(grouped=true) routes this to `avoid`
+            // instead of `do_strategies`, since abandonment reasons describe
+            // what NOT to do, not affirmative guidance.
             db::semantic::create_rule(
                 self.pool(),
                 project_id,
                 db::RuleCategory::Lesson,
                 &reason,
                 Some(&embedding),
-                &[],
+                &["origin:abandoned".to_string()],
             )
             .await
             .map_err(Self::db_err)?;
@@ -2743,14 +2800,26 @@ impl LoreServer {
 
         // L0: minimal orientation
         if tier.as_deref().map(|t| t.to_uppercase()).as_deref() == Some("L0") {
-            let active_count =
-                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Active))
-                    .await
-                    .map_err(Self::db_err)?;
-            let blocked_count =
-                db::tasks::count_tasks(self.pool(), project_id, Some(db::TaskStatus::Blocked))
-                    .await
-                    .map_err(Self::db_err)?;
+            let active_count = db::tasks::count_tasks(
+                self.pool(),
+                project_id,
+                db::tasks::TaskListFilters {
+                    status: Some(db::TaskStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(Self::db_err)?;
+            let blocked_count = db::tasks::count_tasks(
+                self.pool(),
+                project_id,
+                db::tasks::TaskListFilters {
+                    status: Some(db::TaskStatus::Blocked),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(Self::db_err)?;
             let lesson_count = db::semantic::count_rules_by_category(
                 self.pool(),
                 project_id,
@@ -2896,6 +2965,25 @@ impl LoreServer {
             .map(|p| p.name.as_str())
             .unwrap_or("Unknown");
         writeln!(md, "# Handoff Packet — {name}\n").unwrap();
+
+        // Reader hint: when the next session's LLM ingests this packet, ask it
+        // to collapse each task's attempt sequence into numbered atomic action
+        // steps before planning. Pattern adapted from ECNU-SII/MIA's
+        // get_trace_prompt — keeps the briefing dense without bloating storage.
+        writeln!(
+            md,
+            "## How to read this\n\n\
+             For each Active Task below, before issuing your first tool call \
+             rewrite its attempt list as a numbered sequence of atomic steps in \
+             the form `N. action_purpose (input → output) [outcome]` where \
+             `outcome` is one of accepted/rejected/pending taken from the \
+             attempt's recorded result. Collapse repeated retries of the same \
+             approach into a single step (note the retry count in parentheses); \
+             do not drop rejected attempts — they bound what to avoid next. \
+             Cap at 8 steps per task. Use that rewritten sequence as the basis \
+             for your plan; do not act on the raw attempt list directly.\n"
+        )
+        .unwrap();
 
         // Active tasks with recent attempts
         if !active_tasks.is_empty() {

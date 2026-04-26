@@ -243,11 +243,81 @@ async fn test_remember_and_recall_rules() {
             tags: None,
             cross_project: None,
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();
     let rules = extract_json(&recalled);
     assert!(!rules.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_recall_rules_grouped() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("grouped-test", "/tmp"))
+        .await
+        .unwrap();
+
+    // All rules share the anchor token "rustguidance" so the hybrid search
+    // returns the full set regardless of FakeEmbeddingProvider similarity drift.
+    for (cat, content) in [
+        ("instruction", "rustguidance: always run cargo fmt before commit"),
+        ("preference", "rustguidance: prefer thiserror over anyhow"),
+        ("constraint", "rustguidance: never log secrets"),
+        ("lesson", "rustguidance: Vec::retain runs after pagination"),
+        ("fact", "rustguidance: pgvector requires Postgres 14+"),
+    ] {
+        server
+            .remember_rule(Parameters(RememberRuleParams {
+                category: cat.into(),
+                content: content.into(),
+                tags: None,
+                always_inject: None,
+            }))
+            .await
+            .unwrap();
+    }
+
+    let recalled = server
+        .recall_rules(Parameters(RecallRulesParams {
+            query: "rustguidance".into(),
+            limit: Some(20),
+            category: None,
+            tags: None,
+            cross_project: None,
+            compact: Some(true),
+            grouped: Some(true),
+        }))
+        .await
+        .unwrap();
+    let body = extract_json(&recalled);
+
+    let do_strategies = body["do_strategies"].as_array().unwrap();
+    let avoid = body["avoid"].as_array().unwrap();
+    let info = body["info"].as_array().unwrap();
+
+    // Verify the response shape exists and bucketing is correct for whatever
+    // the hybrid search returns (FakeEmbeddingProvider scoring is deterministic
+    // but not discriminative — returned set varies). Each returned item must
+    // land in the bucket that matches its category.
+    let total = do_strategies.len() + avoid.len() + info.len();
+    assert!(total >= 1, "expected at least one rule from hybrid search");
+
+    // RuleCategory serialises in PascalCase via serde defaults.
+    for item in avoid {
+        assert_eq!(item["category"].as_str().unwrap(), "Constraint");
+    }
+    for item in info {
+        assert_eq!(item["category"].as_str().unwrap(), "Fact");
+    }
+    for item in do_strategies {
+        let c = item["category"].as_str().unwrap();
+        assert!(
+            matches!(c, "Instruction" | "Preference" | "Lesson"),
+            "do_strategies bucket got unexpected category {c}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -282,6 +352,7 @@ async fn test_recall_rules_cross_project() {
             tags: None,
             cross_project: Some(false),
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();
@@ -296,6 +367,7 @@ async fn test_recall_rules_cross_project() {
             tags: None,
             cross_project: Some(true),
             compact: None,
+            grouped: None,
         }))
         .await
         .unwrap();

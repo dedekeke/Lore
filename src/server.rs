@@ -2916,11 +2916,15 @@ impl LoreServer {
         writeln!(
             md,
             "## How to read this\n\n\
-             Before acting, abstract each Active Task's attempt list into numbered \
-             atomic steps in the form `N. action_purpose (input → output)`. \
-             Preserve the [accepted]/[rejected]/[pending] outcome on each step so \
-             the next move is informed by both what worked and what didn't. \
-             Keep the abstraction ≤8 steps per task; cut redundant retries.\n"
+             For each Active Task below, before issuing your first tool call \
+             rewrite its attempt list as a numbered sequence of atomic steps in \
+             the form `N. action_purpose (input → output) [outcome]` where \
+             `outcome` is one of accepted/rejected/pending taken from the \
+             attempt's recorded result. Collapse repeated retries of the same \
+             approach into a single step (note the retry count in parentheses); \
+             do not drop rejected attempts — they bound what to avoid next. \
+             Cap at 8 steps per task. Use that rewritten sequence as the basis \
+             for your plan; do not act on the raw attempt list directly.\n"
         )
         .unwrap();
 

@@ -769,16 +769,12 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
         });
     }
 
-    let rejection_rate = if total_attempts > 0 {
-        (total_rejected * 100) / total_attempts
-    } else {
-        0
-    };
-    let first_try_rate = if completed_tasks > 0 {
-        (first_try_success * 100) / completed_tasks
-    } else {
-        0
-    };
+    let rejection_rate = (total_rejected * 100)
+        .checked_div(total_attempts)
+        .unwrap_or(0);
+    let first_try_rate = (first_try_success * 100)
+        .checked_div(completed_tasks)
+        .unwrap_or(0);
     let knowledge_tokens = (total_rule_bytes + total_attempt_bytes) / 3;
     let avg_attempts_per_task = if completed_tasks > 0 {
         format!("{:.1}", total_attempts as f64 / completed_tasks as f64)
@@ -809,11 +805,9 @@ async fn analytics_page(State(state): State<DashboardState>) -> Result<Html<Stri
     .await
     .unwrap_or(0);
     let followups_captured = followup_parents as usize;
-    let followups_rate = if completed_tasks > 0 {
-        (followups_captured * 100) / completed_tasks
-    } else {
-        0
-    };
+    let followups_rate = (followups_captured * 100)
+        .checked_div(completed_tasks)
+        .unwrap_or(0);
 
     render(
         &state.env,

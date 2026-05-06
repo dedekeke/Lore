@@ -2,7 +2,7 @@ mod common;
 
 use lore::db::attempts::{self, AttemptOutcome, LogOutcomeArgs};
 use lore::db::tasks::{TaskListFilters, TaskStatus};
-use lore::db::{projects, tasks};
+use lore::db::{projects, task_links, tasks};
 
 #[tokio::test]
 async fn test_create_and_get_task() {
@@ -562,4 +562,167 @@ async fn test_filtered_count_and_list_paginated() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].description, "alpha");
+}
+
+#[tokio::test]
+async fn test_cascade_close_decomp_subtasks_inherits_parent_resolved_attempt() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None, None)
+        .await
+        .unwrap();
+    let child_decomp = tasks::create_task(
+        &pool,
+        pid,
+        "decomp child",
+        Some(parent),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Parent has an accepted attempt; child has none.
+    let parent_attempt = attempts::create_attempt(&pool, parent, "ap", None, None, None)
+        .await
+        .unwrap();
+    attempts::log_outcome(
+        &pool,
+        LogOutcomeArgs {
+            attempt_id: parent_attempt,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "ok",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let cascaded =
+        tasks::cascade_close_decomposition_subtasks(&pool, parent, Some(parent_attempt)).await;
+    assert_eq!(cascaded, 1);
+
+    let c = tasks::get_task(&pool, child_decomp).await.unwrap().unwrap();
+    assert_eq!(c.status, TaskStatus::Completed);
+    assert_eq!(c.resolved_attempt_id, Some(parent_attempt));
+}
+
+#[tokio::test]
+async fn test_cascade_close_skips_followup_subtasks() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None, None)
+        .await
+        .unwrap();
+    let followup = tasks::create_task(&pool, pid, "fu", Some(parent), None, None, None, None)
+        .await
+        .unwrap();
+    task_links::upsert_link(&pool, parent, followup, "follow_up")
+        .await
+        .unwrap();
+
+    let cascaded = tasks::cascade_close_decomposition_subtasks(&pool, parent, None).await;
+    assert_eq!(cascaded, 0);
+
+    let f = tasks::get_task(&pool, followup).await.unwrap().unwrap();
+    assert_eq!(f.status, TaskStatus::Active);
+}
+
+#[tokio::test]
+async fn test_cascade_close_prefers_child_accepted_attempt_over_parent() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None, None)
+        .await
+        .unwrap();
+    let child = tasks::create_task(&pool, pid, "child", Some(parent), None, None, None, None)
+        .await
+        .unwrap();
+
+    let parent_attempt = attempts::create_attempt(&pool, parent, "p-ap", None, None, None)
+        .await
+        .unwrap();
+    let child_attempt = attempts::create_attempt(&pool, child, "c-ap", None, None, None)
+        .await
+        .unwrap();
+    attempts::log_outcome(
+        &pool,
+        LogOutcomeArgs {
+            attempt_id: child_attempt,
+            outcome: AttemptOutcome::Accepted,
+            reasoning: "child ok",
+            reasoning_embedding: None,
+            git_ref: None,
+            code_snippet: None,
+            resolved_by_agent_id: None,
+            resolved_by_session_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let cascaded =
+        tasks::cascade_close_decomposition_subtasks(&pool, parent, Some(parent_attempt)).await;
+    assert_eq!(cascaded, 1);
+
+    let c = tasks::get_task(&pool, child).await.unwrap().unwrap();
+    assert_eq!(c.resolved_attempt_id, Some(child_attempt));
+}
+
+#[tokio::test]
+async fn test_list_active_decomposition_subtasks_filters_completed_and_followups() {
+    let (pool, _c) = common::setup_db().await;
+    let pid = projects::create_project(&pool, "p", "/").await.unwrap();
+
+    let parent = tasks::create_task(&pool, pid, "parent", None, None, None, None, None)
+        .await
+        .unwrap();
+    let active_decomp = tasks::create_task(
+        &pool,
+        pid,
+        "active decomp",
+        Some(parent),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let done_decomp = tasks::create_task(
+        &pool,
+        pid,
+        "done decomp",
+        Some(parent),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tasks::complete_task(&pool, done_decomp, None)
+        .await
+        .unwrap();
+    let followup = tasks::create_task(&pool, pid, "fu", Some(parent), None, None, None, None)
+        .await
+        .unwrap();
+    task_links::upsert_link(&pool, parent, followup, "follow_up")
+        .await
+        .unwrap();
+
+    let active = tasks::list_active_decomposition_subtasks(&pool, parent)
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, active_decomp);
 }

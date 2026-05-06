@@ -155,6 +155,51 @@ async fn test_full_task_lifecycle() {
 }
 
 #[tokio::test]
+async fn test_propose_attempt_rejects_parent_with_open_decomposition_subtasks() {
+    let (server, _pool, _c) = setup_server().await;
+    server
+        .switch_project(switch_params("guard", "/tmp"))
+        .await
+        .unwrap();
+
+    let parent = server
+        .start_task(start_task_params("parent goal"))
+        .await
+        .unwrap();
+    let parent_id = extract_json(&parent)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let _child = server
+        .start_task(Parameters(StartTaskParams {
+            description: "decomp step 1".into(),
+            parent_task_id: Some(parent_id.clone()),
+            priority: None,
+            task_type: None,
+            ticket_number: None,
+        }))
+        .await
+        .unwrap();
+
+    let err = server
+        .propose_attempt_impl(ProposeAttemptParams {
+            task_id: parent_id.clone(),
+            approach_summary: "should be blocked".into(),
+            agent_id: None,
+            session_id: None,
+            request_confirmation: None,
+        })
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("open decomposition subtask"),
+        "expected guard message, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn test_complete_task_creates_followups_as_child_tasks() {
     let (server, _pool, _c) = setup_server().await;
     server

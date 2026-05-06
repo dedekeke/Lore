@@ -586,8 +586,8 @@ impl LoreServer {
                         "New goal: {goal}\n\n\
                          Follow Lore protocol:\n\
                          1. Call start_task(description=\"{goal}\") first.\n\
-                         2. If this involves 3+ distinct steps, decompose into subtasks via start_task(..., parent_task_id=<id>).\n\
-                         3. For each subtask, call propose_attempt BEFORE writing code.\n\
+                         2. If this involves 3+ distinct steps, decompose into subtasks via start_task(..., parent_task_id=<id>). Once decomposed, attempts and outcomes attach to the subtask, never the parent.\n\
+                         3. For each subtask, call propose_attempt(subtask_id, ...) BEFORE writing code. propose_attempt against the parent is rejected while open decomposition subtasks exist.\n\
                          4. Set priority (P1-P4) and task_type (Bug/Feature/Security/Refactor) where appropriate."
                     )
                 },
@@ -683,8 +683,8 @@ impl LoreServer {
         "CRITICAL OPERATING PROTOCOL — MANDATORY FOR ALL INTERACTIONS:\n\
          1. FIRST CALL: switch_project(name, root_path) to set context (optional — project is auto-detected from cwd if not called).\n\
          2. NEW GOALS: call start_task(description) BEFORE generating any code.\n\
-         3. SUBTASKS: if a task involves 3+ distinct steps, decompose it — call start_task(description, parent_task_id) for each subtask.\n\
-         4. PROPOSING CODE: call propose_attempt(task_id, approach) BEFORE writing code to the user.\n\
+         3. SUBTASKS: if a task involves 3+ distinct steps, decompose it — call start_task(description, parent_task_id) for each subtask. After decomposing, ALL propose_attempt / log_outcome / complete_task calls target the SUBTASK, not the parent. The parent rolls up automatically when subtasks complete, and cascade-closes any zero-attempt decomposition children that remain.\n\
+         4. PROPOSING CODE: call propose_attempt(task_id, approach) BEFORE writing code to the user. Server rejects propose_attempt against a task that has open decomposition subtasks — pick one of the subtasks instead.\n\
          5. FAILURES: if the user reports an error, IMMEDIATELY call log_outcome(attempt_id, 'rejected', reasoning, code_snippet) BEFORE suggesting a fix.\n\
          6. OUTCOME RULES: Do NOT auto-accept. Only call log_outcome(attempt_id, 'accepted', reasoning, code_snippet) when the USER explicitly confirms success. If unsure, use 'pending'. Include code_snippet with the actual code written.\n\
          7. CONTEXT RECOVERY: if you feel lost or the user says 'try something else', call review_ledger(task_id) to read past failures so you don't repeat them.\n\
@@ -1773,6 +1773,30 @@ impl LoreServer {
         let approach_summary = self.maybe_scrub(approach_summary);
         Self::validate_len("approach_summary", &approach_summary, 4096)?;
         let tid = Self::parse_uuid(&task_id)?;
+        // Guard: if this task has open decomposition subtasks, attempts must attach
+        // to one of them, not the parent. Follow-up children are excluded — they're
+        // deferred work, not the active step. Surfaces the subtask list so the LLM
+        // can pick without another round-trip.
+        let open_subtasks = db::tasks::list_active_decomposition_subtasks(self.pool(), tid)
+            .await
+            .map_err(Self::db_err)?;
+        if !open_subtasks.is_empty() {
+            let listing: Vec<serde_json::Value> = open_subtasks
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "task_id": t.id.to_string(),
+                        "summary": t.summary.clone().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            let msg = format!(
+                "Task {tid} has {} open decomposition subtask(s). Attach the attempt to one of them, not the parent. Open subtasks: {}",
+                open_subtasks.len(),
+                serde_json::to_string(&listing).unwrap_or_default(),
+            );
+            return Err(rmcp::ErrorData::invalid_params(msg, None));
+        }
         let git_ref = self.capture_git_ref().await;
         let id = db::attempts::create_attempt(
             self.pool(),
@@ -2283,6 +2307,29 @@ impl LoreServer {
             }
         }
 
+        // Re-read parent's resolved_attempt_id post-transition: if the caller passed
+        // None, complete_task may have auto-attached the latest accepted attempt.
+        // Children inherit this so cascade closures stay traceable to a real attempt.
+        let parent_resolved_attempt_id = if success {
+            db::tasks::get_task(self.pool(), tid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.resolved_attempt_id)
+        } else {
+            None
+        };
+        let cascaded = if success {
+            db::tasks::cascade_close_decomposition_subtasks(
+                self.pool(),
+                tid,
+                parent_resolved_attempt_id,
+            )
+            .await
+        } else {
+            0
+        };
+
         let rolled_up = if success {
             db::tasks::try_rollup_parents(self.pool(), tid).await
         } else {
@@ -2298,6 +2345,7 @@ impl LoreServer {
                     "ticket_number": ticket_number,
                     "lesson": lesson,
                     "parents_rolled_up": rolled_up,
+                    "subtasks_cascaded": cascaded,
                     "followups_created": followup_ids.len(),
                 }),
             )
@@ -2316,6 +2364,7 @@ impl LoreServer {
             &serde_json::json!({
                 "success": success,
                 "parents_rolled_up": rolled_up,
+                "subtasks_cascaded": cascaded,
                 "followup_task_ids": followup_ids,
             }),
             &nudge,

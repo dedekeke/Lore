@@ -585,6 +585,76 @@ pub async fn complete_task(
     Ok(true)
 }
 
+/// Active decomposition subtasks of `parent_id`: children with `parent_task_id = parent_id`
+/// AND no `follow_up` link from parent → child. Follow-ups are deferred work logged at
+/// completion time; they must not be cascade-closed or used to gate `propose_attempt`.
+pub async fn list_active_decomposition_subtasks(
+    pool: &PgPool,
+    parent_id: Uuid,
+) -> Result<Vec<Task>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT t.id, t.project_id, t.description, t.status, t.parent_task_id, \
+         t.resolved_attempt_id, t.created_at, t.completed_at, t.priority, t.task_type, \
+         t.summary, t.ticket_number, t.description_embedding \
+         FROM ai_memory.tasks t \
+         WHERE t.parent_task_id = $1 \
+           AND t.status = 'active' \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM ai_memory.task_links l \
+             WHERE l.source_task_id = $1 AND l.target_task_id = t.id \
+               AND l.link_type = 'follow_up' \
+           ) \
+         ORDER BY t.created_at",
+    )
+    .bind(parent_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Cascade-close decomposition subtasks of `parent_id` after the parent has been completed.
+/// For each active decomposition child:
+/// - Resolve attempt = child's last accepted attempt, or fall back to `parent_resolved_attempt_id`.
+/// - Call `complete_task(child, resolved)` — idempotent guard inside skips already-closed rows.
+///
+/// Follow-up subtasks are skipped (see `list_active_decomposition_subtasks`).
+/// Returns the count successfully transitioned. Per-child errors are logged and skipped
+/// so one failure doesn't strand the rest.
+pub async fn cascade_close_decomposition_subtasks(
+    pool: &PgPool,
+    parent_id: Uuid,
+    parent_resolved_attempt_id: Option<Uuid>,
+) -> u32 {
+    let children = match list_active_decomposition_subtasks(pool, parent_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, parent_id = %parent_id, "cascade list failed");
+            return 0;
+        }
+    };
+    let mut closed = 0u32;
+    for child in children {
+        // Prefer child's own accepted attempt; inherit parent's only as fallback.
+        let child_resolved = match super::attempts::list_attempts(
+            pool,
+            child.id,
+            Some(super::attempts::AttemptOutcome::Accepted),
+        )
+        .await
+        {
+            Ok(a) => a.last().map(|a| a.id).or(parent_resolved_attempt_id),
+            Err(_) => parent_resolved_attempt_id,
+        };
+        match complete_task(pool, child.id, child_resolved).await {
+            Ok(true) => closed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, child_id = %child.id, "cascade close failed");
+            }
+        }
+    }
+    closed
+}
+
 /// Walk up the parent chain, auto-completing each ancestor whose subtasks are all done.
 /// Returns the number of parents rolled up. Caps at 10 levels.
 pub async fn try_rollup_parents(pool: &PgPool, task_id: Uuid) -> u32 {
